@@ -1125,9 +1125,9 @@ MovInstruction:
     //  1       2       3          4         5                   6
     Predicate MOV_OP SatModOpt ExecSize VecDstOperand_G_I VecSrcOperand_G_I_IMM_A_AO
     {
-        pBuilder->CISA_create_mov_instruction(
+        ABORT_ON_FAIL(pBuilder->CISA_create_mov_instruction(
             $1, $2, $4.emask, $4.exec_size, $3,
-            $5.cisa_gen_opnd, $6.cisa_gen_opnd, CISAlineno);
+            $5.cisa_gen_opnd, $6.cisa_gen_opnd, CISAlineno));
     }
     |
     Predicate MOV_OP SatModOpt ExecSize VecDstOperand_A VecSrcOperand_G_I_IMM_A_AO
@@ -2128,8 +2128,8 @@ BranchInstruction: Predicate BRANCH_OP ExecSize IdentOrStringLit
         $1, $3.emask, $3.exec_size,
         $4.cisa_gen_opnd, (unsigned)$5, (unsigned)$6, CISAlineno);
     }
-    // 1       2          3
-    | FADDR  IDENT VecDstOperand_G_I
+    // 1      2                3
+    | FADDR  IdentOrStringLit VecDstOperand_G_I
     {
         pBuilder->CISA_create_faddr_instruction($2, $3.cisa_gen_opnd, CISAlineno);
     }

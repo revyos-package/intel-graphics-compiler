@@ -1,6 +1,6 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (C) 2021 Intel Corporation
+Copyright (C) 2021-2022 Intel Corporation
 
 SPDX-License-Identifier: MIT
 
@@ -449,7 +449,7 @@ namespace IGCMetrics
                     func_m->set_type(IGC_METRICS::FunctionType::FUNCTION);
                     break;
                 default:
-                    IGC_ASSERT_MESSAGE(false, "Unknow Function type");
+                    IGC_ASSERT_MESSAGE(false, "Unknown Function type");
                     break;
                 }
                 map_Func.insert({ func_dbinfo , func_m });
@@ -598,7 +598,7 @@ namespace IGCMetrics
 #endif
     }
 
-    void IGCMetricImpl::CollectDataFromDebugInfo(IGC::DebugInfoData* pDebugInfo, IGC::DbgDecoder* pDebugDecoder)
+    void IGCMetricImpl::CollectDataFromDebugInfo(IGC::DebugInfoData *pDebugInfo, const IGC::VISADebugInfo *pVisaDbgInfo)
     {
         if (!Enable()) return;
 #ifdef IGC_METRICS__PROTOBUF_ATTACHED
@@ -615,8 +615,7 @@ namespace IGCMetrics
         {
             llvm::Function* pFunc = pListFuncData_it->first;
             IGC::VISAModule* vISAData = pListFuncData_it->second;
-
-            //IGC::ScalarVisaModule* scalarVM = llvm::dyn_cast<IGC::ScalarVisaModule>(vISAData);
+            const auto &VDI = vISAData->getVisaObjectDI(*pVisaDbgInfo);
 
 #ifdef DEBUG_METRIC
             std::printf("\nList of symbols:\n");
@@ -731,7 +730,7 @@ namespace IGCMetrics
 
                 auto fillRegister = [&](unsigned int reg)
                 {
-                    const auto* varInfo = vISAData->getVarInfo(*pDebugDecoder, reg);
+                    const auto* varInfo = vISAData->getVarInfo(VDI, reg);
                     auto varInfo_reg_m = varInfo_m->add_reg();
 
                     varInfo_reg_m->set_addrmodel(varLoc.IsInGlobalAddrSpace() ?

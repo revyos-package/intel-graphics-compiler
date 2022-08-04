@@ -10,7 +10,7 @@ SPDX-License-Identifier: MIT
 #define _KERNEL_ANNOTATIONS_H_
 
 #include <string>
-#include "patch_list.h"
+#include "AdaptorOCL/ocl_igc_shared/executable_format/patch_list.h"
 
 namespace iOpenCL
 {
@@ -279,7 +279,7 @@ struct ThreadPayload
     bool     tileY           = false;
 };
 
-struct ExecutionEnivronment
+struct ExecutionEnvironment
 {
     DWORD  CompiledSIMDSize                           = 0;
     DWORD  CompiledSubGroupsNumber                    = 0;

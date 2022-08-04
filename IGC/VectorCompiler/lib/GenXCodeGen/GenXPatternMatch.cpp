@@ -42,7 +42,6 @@ SPDX-License-Identifier: MIT
 ///
 //===----------------------------------------------------------------------===//
 
-#define DEBUG_TYPE "GENX_PATTERN_MATCH"
 #include "GenX.h"
 #include "GenXConstants.h"
 #include "GenXModule.h"
@@ -63,7 +62,7 @@ SPDX-License-Identifier: MIT
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/InstVisitor.h"
-#include "llvm/IR/Instructions.h"
+#include "llvmWrapper/IR/Instructions.h"
 #include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/PatternMatch.h"
@@ -75,11 +74,13 @@ SPDX-License-Identifier: MIT
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
 #include "llvm/Transforms/Utils/Local.h"
 
+#include "llvmWrapper/ADT/APInt.h"
 #include "llvmWrapper/IR/Constants.h"
 #include "llvmWrapper/IR/DerivedTypes.h"
 #include "llvmWrapper/Support/TypeSize.h"
 #include "llvmWrapper/Transforms/Utils/Local.h"
 
+#include "vc/Utils/GenX/Intrinsics.h"
 #include "vc/Utils/General/InstRebuilder.h"
 
 #include <functional>
@@ -91,6 +92,8 @@ SPDX-License-Identifier: MIT
 using namespace llvm;
 using namespace llvm::PatternMatch;
 using namespace genx;
+
+#define DEBUG_TYPE "GENX_PATTERN_MATCH"
 
 STATISTIC(NumOfMadMatched, "Number of mad instructions matched");
 STATISTIC(NumOfMinMaxMatched, "Number of min/max instructions matched");
@@ -2814,6 +2817,8 @@ enum class DivRemOptimize {
   Not,
   // Power of 2 case optimization.
   Pow2,
+  // Not power of 2 case optimization.
+  NotPow2,
 };
 
 // Check if unsigned UDiv/URem can be optimized,
@@ -2824,17 +2829,24 @@ static DivRemOptimize isSuitableUDivURemOperand(Value *Operand) {
   if (!isa<Constant>(Operand))
     return DivRemOptimize::Not;
   Type *OperandTy = Operand->getType();
-  // TODO support i8, i16 & i64 cases
-  // for pow2 case just turning on the same pattern as i32 width
-  // Not int and not vector of int, or width wrong( not 32).
-  if (!OperandTy->isIntOrIntVectorTy(genx::DWordBits))
+  if (!OperandTy->isIntOrIntVectorTy())
     return DivRemOptimize::Not;
   // TODO: Remove this as we have tests for this pattern.
   if (PatternMatch::match(Operand, PatternMatch::m_Negative()))
     return DivRemOptimize::Not;
   if (PatternMatch::match(Operand, PatternMatch::m_Power2()))
     return DivRemOptimize::Pow2;
-  return DivRemOptimize::Not;
+  // Not power of 2 case.
+  // For now we expect type to be i32 or vector of i32.
+  // TODO: support i8, i16 case by creating zext cast to i32.
+  // TODO: support i64 case by using the same pattern, as for i32 case.
+  // Now can not be done, as mulh i64 is not supported.
+  if (OperandTy->getScalarSizeInBits() != 32)
+    return DivRemOptimize::Not;
+  // Expect to be splat.
+   if (OperandTy->isVectorTy() && !(cast<Constant>(Operand)->getSplatValue()))
+    return DivRemOptimize::Not;
+  return DivRemOptimize::NotPow2;
 }
 
 // Check if unsigned SDiv/URem can be optimized,
@@ -2845,12 +2857,7 @@ static DivRemOptimize isSuitableSDivSRemOperand(Value *Operand) {
   if (!isa<Constant>(Operand))
     return DivRemOptimize::Not;
   Type *OperandTy = Operand->getType();
-  // TODO support i8, i16 & i64 cases
-  // i8, i16 - by creating zext/sext to i32
-  // i64 - just turning on the same pattern as i32 width,
-  //  as emulation for shift and add much faster than emulation division.
-  // Not int and not vector of int, or width wrong( not 32).
-  if (!OperandTy->isIntOrIntVectorTy(genx::DWordBits))
+  if (!OperandTy->isIntOrIntVectorTy())
     return DivRemOptimize::Not;
   if (PatternMatch::match(Operand, PatternMatch::m_Negative()))
     return DivRemOptimize::Not;
@@ -2878,10 +2885,10 @@ static void decomposeSDivPow2(BinaryOperator &SDivOp) {
   IGC_ASSERT(ElementTy);
   unsigned ElementBitWidth = ElementTy->getIntegerBitWidth();
 
-  Constant *VecSignBit =
-      Constant::getIntegerValue(OperationTy, APInt{32, ElementBitWidth - 1});
-  Constant *VecBitWidth =
-      Constant::getIntegerValue(OperationTy, APInt{32, ElementBitWidth});
+  Constant *VecSignBit = Constant::getIntegerValue(
+      OperationTy, APInt{ElementBitWidth, ElementBitWidth - 1});
+  Constant *VecBitWidth = Constant::getIntegerValue(
+      OperationTy, APInt{ElementBitWidth, ElementBitWidth});
 
   Constant *Log2Divisor = getFloorLog2(Divisor);
   IGC_ASSERT(Log2Divisor != nullptr);
@@ -2922,12 +2929,93 @@ static void decomposeUDivPow2(BinaryOperator &UDivOp) {
   Res->takeName(&UDivOp);
 }
 
+// Unsigned optimization if x / y, y positive not power of 2:
+// floor ( x / y ) = floor( x / 2^k * 2^k / y )
+// m = ceil( 2^k / y ) = (2^k + e ) / y, e - error, e = y - (2^k % y )
+// floor( m * x / 2^k) = floor( x / y + e / y * x / 2^k )
+// k should be big enough, to( e * x ) / (y * 2^k) < 1 / d,
+//  as if reminder was d - 1, with error greater the result will be bigger
+// x <= 2^32, e / d ~ 1, => k = 32 + ceil( log2( d) )
+// Note: m is 33 bit number, so need some additional work:
+// m * x = ( m - 2^32 ) * x + 2^32 * x
+// Note: another hack: ( a + b) / 2^k = [ (a - b) / 2 + b ] / 2 ^ ( k -1 ).
+// Usual algorithm, for every unsigned number:
+// p = ceil ( log2(y) )
+// m = ceil [ 2^(32 + p) / y ] - save low 32 bits
+// q = ( m * x ) >> 32 = mulh( m, x )
+// t = ( x - q ) / 2 + q // it is a save variant of ( x + q ) / 2
+// ans = t >> ( p - 1 )
+// It can be simplified, if the value is near power of 2, so
+// if m is <= 2^32 we can remove addition that was added as a hack for multiply
+// additional shift for p - 1 also could be removed.
+// See Hacker's Delight 10-10.
+static void decomposeUDivNotPow2(BinaryOperator &UDivOp) {
+  IGC_ASSERT(UDivOp.getOpcode() == Instruction::UDiv);
+  Value *Dividend = UDivOp.getOperand(0);
+  IGC_ASSERT(isSuitableUDivURemOperand(UDivOp.getOperand(1)) ==
+             DivRemOptimize::NotPow2);
+  Constant *Divisor = cast<Constant>(UDivOp.getOperand(1));
+  IRBuilder<> Builder{&UDivOp};
+  Type *OperationTy = Dividend->getType();
+  bool IsVector = OperationTy->isVectorTy();
+
+  IGC_ASSERT(!IsVector || cast<ConstantDataVector>(Divisor)->isSplat());
+  const APInt &DivisorVal =
+      (IsVector ? cast<ConstantInt>(Divisor->getSplatValue())
+                : cast<ConstantInt>(Divisor))
+          ->getValue();
+
+  IGCLLVM::UnsignedDivisonByConstantInfo MagicStruct = IGCLLVM::getAPIntMagicUnsigned(DivisorVal);
+  const int ElementBitWidth =
+      Divisor->getType()->getScalarType()->getIntegerBitWidth();
+  // Even divisors, can pre-shift the dividend to avoid
+  // extra work at the end.
+  Value *ShiftedDividend = Dividend;
+  // Need addition and y is 2 * y'.
+  if (IGCLLVM::IsAddition(MagicStruct) && !DivisorVal[0]) {
+    unsigned ShiftSizeRaw = DivisorVal.countTrailingZeros();
+    Constant *ShiftSize =
+        Constant::getIntegerValue(OperationTy, APInt{32, ShiftSizeRaw});
+    ShiftedDividend = Builder.CreateLShr(ShiftedDividend, ShiftSize);
+    MagicStruct = IGCLLVM::getAPIntMagicUnsigned(DivisorVal.lshr(ShiftSizeRaw), ShiftSizeRaw);
+
+    // Should not change addition quality.
+    IGC_ASSERT_MESSAGE(!IGCLLVM::IsAddition(MagicStruct), "expected to subtract now");
+    IGC_ASSERT_MESSAGE(IGCLLVM::ShiftAmount(MagicStruct) < DivisorVal.getBitWidth(),
+                       "undefined shift");
+  }
+  Constant *MagicConst = Constant::getIntegerValue(OperationTy, IGCLLVM::MagicNumber(MagicStruct));
+  Value *MulH = vc::createAnyIntrinsic(Builder, {ShiftedDividend, MagicConst},
+                                        GenXIntrinsic::genx_umulh,
+                                        {OperationTy, OperationTy}, "opt");
+
+  Value *Res = nullptr;
+  if (!IGCLLVM::IsAddition(MagicStruct)) {
+    Constant *Shift =
+        Constant::getIntegerValue(OperationTy, APInt{32, IGCLLVM::ShiftAmount(MagicStruct)});
+    Res = Builder.CreateLShr(MulH, Shift);
+  } else {
+    Value *Fixup = Builder.CreateSub(Dividend, MulH, "q_appx");
+    Constant *One = Constant::getIntegerValue(OperationTy, APInt{32, 1});
+    Fixup = Builder.CreateLShr(Fixup, One);
+    Value *Addition = Builder.CreateAdd(Fixup, MulH, "q_appx_add");
+    Constant *Shift =
+        Constant::getIntegerValue(OperationTy, APInt{32, IGCLLVM::ShiftAmount(MagicStruct) - 1});
+    Res = Builder.CreateLShr(Addition, Shift);
+  }
+  IGC_ASSERT(Res);
+  UDivOp.replaceAllUsesWith(Res);
+  Res->takeName(&UDivOp);
+}
+
 void GenXPatternMatch::visitUDiv(BinaryOperator &I) {
   auto CheckRes = isSuitableUDivURemOperand(I.getOperand(1));
   if (CheckRes == DivRemOptimize::Not)
     return;
-  IGC_ASSERT(CheckRes == DivRemOptimize::Pow2);
   Changed = true;
+  if (CheckRes == DivRemOptimize::NotPow2)
+    return decomposeUDivNotPow2(I);
+  IGC_ASSERT(CheckRes == DivRemOptimize::Pow2);
   return decomposeUDivPow2(I);
 }
 
@@ -2945,7 +3033,10 @@ static void decomposeSRemPow2(BinaryOperator &SRemOp) {
 
   const char *Name = "genxSremOpt";
   Value *Sdiv = Builder.CreateSDiv(Dividend, Divisor, Name);
-  Value *MulRes = Builder.CreateMul(Sdiv, Divisor, Name);
+  // Mul is implemented with left shift.
+  Constant *Log2Divisor = getFloorLog2(Divisor);
+  Value *MulRes = Builder.CreateShl(Sdiv, Log2Divisor, Name);
+
   Value *Res = Builder.CreateSub(Dividend, MulRes);
 
   decomposeSDivPow2(*cast<BinaryOperator>(Sdiv));
@@ -2973,12 +3064,34 @@ static void decomposeURemPow2(BinaryOperator &URemOp) {
              DivRemOptimize::Pow2);
   Constant *Divisor = cast<Constant>(URemOp.getOperand(1));
   Type *OperationTy = Dividend->getType();
+  Type *ElementTy = OperationTy->getScalarType();
+  unsigned ElementBitWidth = ElementTy->getIntegerBitWidth();
 
   IRBuilder<> Builder{&URemOp};
 
-  Constant *One = Constant::getIntegerValue(OperationTy, APInt{32, 1});
+  Constant *One =
+      Constant::getIntegerValue(OperationTy, APInt{ElementBitWidth, 1});
   Value *Res = Builder.CreateAnd(Dividend, Builder.CreateSub(Divisor, One));
   URemOp.replaceAllUsesWith(Res);
+  Res->takeName(&URemOp);
+}
+
+// Optimization for unsigned x % y, y is not power of 2 value.
+// x % y = x - y * (x / y)
+static void decomposeURemNotPow2(BinaryOperator &URemOp) {
+  IGC_ASSERT(URemOp.getOpcode() == Instruction::URem);
+  Value *Dividend = URemOp.getOperand(0);
+  IGC_ASSERT(isSuitableUDivURemOperand(URemOp.getOperand(1)) ==
+             DivRemOptimize::NotPow2);
+  Constant *Divisor = cast<Constant>(URemOp.getOperand(1));
+  IRBuilder Builder{&URemOp};
+  Value *UDivOp = Builder.CreateUDiv(Dividend, Divisor, "udiv");
+  Value *Res = Builder.CreateSub(Dividend,
+                                 Builder.CreateMul(Divisor, UDivOp, "tmpRes"));
+
+  decomposeUDivNotPow2(*cast<BinaryOperator>(UDivOp));
+
+  URemOp.replaceAllUsesWith(cast<BinaryOperator>(Res));
   Res->takeName(&URemOp);
 }
 
@@ -2986,8 +3099,10 @@ void GenXPatternMatch::visitURem(BinaryOperator &I) {
   auto CheckRes = isSuitableUDivURemOperand(I.getOperand(1));
   if (CheckRes == DivRemOptimize::Not)
     return;
-  IGC_ASSERT(CheckRes == DivRemOptimize::Pow2);
   Changed = true;
+  if (CheckRes == DivRemOptimize::NotPow2)
+    return decomposeURemNotPow2(I);
+  IGC_ASSERT(CheckRes == DivRemOptimize::Pow2);
   return decomposeURemPow2(I);
 }
 
@@ -3281,7 +3396,7 @@ bool GenXPatternMatch::vectorizeConstants(Function *F) {
       unsigned NumOpnds = Inst->getNumOperands();
       auto CI = dyn_cast<CallInst>(Inst);
       if (CI)
-        NumOpnds = CI->getNumArgOperands();
+        NumOpnds = IGCLLVM::getNumArgOperands(CI);
       for (unsigned i = 0, e = NumOpnds; i != e; ++i) {
         auto C = dyn_cast<Constant>(Inst->getOperand(i));
         if (!C || isa<UndefValue>(C))

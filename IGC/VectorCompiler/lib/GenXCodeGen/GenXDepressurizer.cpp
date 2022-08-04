@@ -1,6 +1,6 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (C) 2017-2021 Intel Corporation
+Copyright (C) 2017-2022 Intel Corporation
 
 SPDX-License-Identifier: MIT
 
@@ -101,7 +101,6 @@ SPDX-License-Identifier: MIT
 /// flag pressure.
 ///
 //===----------------------------------------------------------------------===//
-#define DEBUG_TYPE "GENX_DEPRESSURIZER"
 
 #include "FunctionGroup.h"
 #include "GenX.h"
@@ -126,6 +125,8 @@ SPDX-License-Identifier: MIT
 
 using namespace llvm;
 using namespace genx;
+
+#define DEBUG_TYPE "GENX_DEPRESSURIZER"
 
 static cl::opt<unsigned>
     LimitGenXDepressurizer("limit-genx-depressurizer", cl::init(UINT_MAX),
@@ -848,7 +849,7 @@ void GenXDepressurizer::attemptSinking(Instruction *InsertBefore,
     //
     // ... := use(v0); // SB.Head
     //
-    // v1  := twoaddr(v0); // two-addr intruction.
+    // v1  := twoaddr(v0); // two-addr instruction.
     //
     // x <--- here this SB could be sunk to.
     //

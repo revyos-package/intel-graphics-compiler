@@ -1,6 +1,6 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (C) 2017-2021 Intel Corporation
+Copyright (C) 2017-2022 Intel Corporation
 
 SPDX-License-Identifier: MIT
 
@@ -76,7 +76,7 @@ void CoalesceSpillFills::copyToOldFills(
     INST_LIST_ITER f, G4_BB* bb, int srcCISAOff)
 {
     // Copy data from coalesced fill in to older fills.
-    // This way we dont carry entire coalesced payload
+    // This way we don't carry entire coalesced payload
     // till last fill.
     for (auto oldFill : indFills)
     {
@@ -92,8 +92,9 @@ void CoalesceSpillFills::copyToOldFills(
             unsigned int size = oldFill.second.second;
 
             static const int BYTES_PER_HEXWORD = 32;
+
             unsigned int scratchOff =
-                coalescedFillDst->getInst()->getMsgDesc()->getOffset() / BYTES_PER_HEXWORD;
+              ((unsigned)coalescedFillDst->getInst()->getMsgDesc()->getOffset()->immOff) / BYTES_PER_HEXWORD;
 
             // Scratch msg offset is always equal or lower than individual fills
             unsigned int offToUse = off - scratchOff + rowOff;
@@ -105,7 +106,8 @@ void CoalesceSpillFills::copyToOldFills(
                 oldFill.first->getBase(), rowOff, 0, 1, Type_UD);
 
             G4_SrcRegRegion* src = kernel.fg.builder->createSrc(
-                coalescedFillDst->getBase(), offToUse, 0, kernel.fg.builder->getRegionStride1(), Type_UD);
+                coalescedFillDst->getBase(), offToUse, 0,
+                kernel.fg.builder->getRegionStride1(), Type_UD);
 
             G4_INST* copy = kernel.fg.builder->createMov(
                 simdSize, movDst, src, InstOpt_WriteEnable, false);
@@ -319,7 +321,7 @@ bool CoalesceSpillFills::fillHeuristic(std::list<INST_LIST_ITER>& coalesceableFi
     }
 
     // Iterate over coalescable fills and ensure all rows of a variable
-    // are fill candidates. If not, then dont fill. This helps cases like,
+    // are fill candidates. If not, then don't fill. This helps cases like,
     // #1 FILL_V10(0,0) <-- load 0x10 ... (4 GRFs)
     // #2 FILL_V10(4,0) <-- load 0x14 ... (1 GRF)
     // #3 send ... FILL_V10(0,0)   ... (use 3 GRFs of FILL_V10)
@@ -391,7 +393,7 @@ bool CoalesceSpillFills::fillHeuristic(std::list<INST_LIST_ITER>& coalesceableFi
         if (bits[0] != bits[1] &&
             bits[2] != bits[3])
         {
-            // Dont coalesce patterns like
+            // Don't coalesce patterns like
             // 1010, 0101
             return false;
         }
@@ -611,7 +613,7 @@ void CoalesceSpillFills::keepConsecutiveSpills(std::list<INST_LIST_ITER>& instLi
                     auto curInstDstTopDcl = (*(*spillIt))->getSrc(1)->getTopDcl();
                     // Check whether current inst's topdcl was spilled in a send.
                     // If it was and first instruction in instList wasnt then
-                    // dont consider current instruction as coalescing candidate.
+                    // don't consider current instruction as coalescing candidate.
                     if (!firstSpillFromSend &&
                         sendDstDcl.find(curInstDstTopDcl) != sendDstDcl.end())
                     {
@@ -1042,7 +1044,7 @@ void CoalesceSpillFills::fills()
             if (splitInsts.find(inst) != splitInsts.end())
             {
                 // if inst was emitted by loop split transformation,
-                // then dont optimize it. such instructions are
+                // then don't optimize it. such instructions are
                 // emitted in loop preheader/loop exit. if a split
                 // variable spills, we need to erase all fills and
                 // spills emitted for that split. if we coalesce
@@ -1772,7 +1774,7 @@ void CoalesceSpillFills::spillFillCleanup()
                         unsigned int pRowStart, pNumRows;
                         getScratchMsgInfo(pInst, pRowStart, pNumRows);
 
-                        // If any def of src1 dcl is found then dont
+                        // If any def of src1 dcl is found then don't
                         // consider this write for optimization. Its
                         // value in memory could be different than
                         // one held in variable.

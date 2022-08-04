@@ -138,7 +138,8 @@ namespace IGC
         bool            m_SeparatingSpillAndPrivateScratchMemorySpace = false;
         unsigned int m_scratchSpaceSizeLimit = 0;
         unsigned int m_numGRFTotal = 128;
-        std::string m_VISAAsm;
+        using NamedVISAAsm = std::pair<std::string, std::string>; // Pair of name for the section (1st elem) and VISA asm text (2nd elem).
+        std::vector<NamedVISAAsm> m_VISAAsm;
 
         // Optional statistics
         std::optional<uint64_t> m_NumGRFSpill;
@@ -311,6 +312,7 @@ namespace IGC
         bool hasUniformAssumptions;
         bool hasPullBary;
         bool sampleCmpToDiscardOptimizationPossible;
+        bool hasRuntimeValueVector;
         unsigned int numCall;
         unsigned int numBarrier;
         unsigned int numLoadStore;
@@ -567,11 +569,10 @@ namespace IGC
         bool         DiscardAdjacencyEnable;
         OctEltUnit   SBEVertexURBEntryReadOffset;
         URBAllocationUnit URBAllocationSize;
-        unsigned int UserClipDistancesMask;
-        unsigned int UserCullDistancesMask;
         unsigned int MaxOutputVertexCount;
         unsigned int BindingTableEntryBitmap;
 
+        bool         DeclaresClipCullDistances;
         bool         DeclaresVPAIndex;
         bool         DeclaresRTAIndex;
 
@@ -838,7 +839,7 @@ namespace IGC
 
         iOpenCL::ThreadPayload        m_threadPayload = {};
 
-        iOpenCL::ExecutionEnivronment m_executionEnivronment = {};
+        iOpenCL::ExecutionEnvironment m_executionEnvironment = {};
 
         iOpenCL::KernelTypeProgramBinaryInfo m_kernelTypeInfo = {};
 
@@ -1087,6 +1088,8 @@ namespace IGC
         bool m_enableFunctionPointer = false;
         // Module flag for when we need to compile multiple SIMD sizes to support SIMD variants
         bool m_enableSimdVariantCompilation = false;
+        // Module flag to indicate if non-inlinable stack functions are present
+        bool m_hasStackCalls = false;
 
         // Adding multiversioning to partially redundant samples, if AIL is on.
         bool m_enableSampleMultiversioning = false;
@@ -1142,7 +1145,6 @@ namespace IGC
         SInstrTypes m_savedInstrTypes;
 
         bool m_hasVendorExtension = false;
-        bool PsHighSimdDisable = false;
 
         std::vector<int> m_hsIdxMap;
         std::vector<int> m_dsIdxMap;
@@ -1251,10 +1253,10 @@ namespace IGC
         virtual uint32_t getNumGRFPerThread() const;
         virtual bool forceGlobalMemoryAllocation() const;
         virtual bool allocatePrivateAsGlobalBuffer() const;
-        virtual bool hasNoLocalToGenericCast() const;
-        virtual bool hasNoPrivateToGenericCast() const;
         virtual bool enableTakeGlobalAddress() const;
         virtual int16_t getVectorCoalescingControl() const;
+        virtual uint32_t getPrivateMemoryMinimalSizePerThread() const;
+        virtual uint32_t getIntelScratchSpacePrivateMemoryMinimalSizePerThread() const;
         bool isPOSH() const;
 
         CompilerStats& Stats()
@@ -1420,7 +1422,8 @@ namespace IGC
         SComputeShaderKernelProgram programOutput;
         bool isSecondCompile;
         bool m_IsPingPongSecond;
-        unsigned m_slmSize;
+        unsigned m_slmSize;  // tgsm size round to power of 2
+        unsigned m_tgsmSize; // tgsm size
         bool numWorkGroupsUsed;
         bool m_ForceOneSIMD = false;
         bool m_UseLinearWalk = false;
@@ -1438,6 +1441,7 @@ namespace IGC
             isSecondCompile = false;
             m_IsPingPongSecond = false;
             m_slmSize = 0;
+            m_tgsmSize = 0;
             numWorkGroupsUsed = false;
             m_threadGroupSize_X = 0;
             m_threadGroupSize_Y = 0;
@@ -1554,6 +1558,7 @@ namespace IGC
             CompOptions.TileYDim2D = GET(TileYDim2D, RayTracingCustomTileYDim2D);
             CompOptions.RematThreshold = GET(RematThreshold, RematThreshold);
             CompOptions.HoistRemat = GET(HoistRemat, EnableHoistRemat);
+            CompOptions.DispatchAlongY = GET(DispatchAlongY, EnableRTDispatchAlongY);
 #undef GET
         }
 
@@ -1627,6 +1632,12 @@ namespace IGC
 
         // Returns true if an RTPSO (i.e., not a collection state object).
         bool isRTPSO() const;
+
+        // Flip X,Y thread group dimensions in COMPUTE_WALKER?
+        bool isDispatchAlongY() const;
+
+        // widen spills to use padded area of SWStack
+        bool doSpillWidening() const;
 
         enum class CompileConfig
         {
@@ -1742,7 +1753,6 @@ namespace IGC
             bool CompileOneKernelAtTime = false;
 
             // Generic address related
-            bool HasNoLocalToGeneric = false;
             bool ForceGlobalMemoryAllocation = false;
 
             // -1 : initial value that means it is not set from cmdline
@@ -1762,10 +1772,18 @@ namespace IGC
             bool IntelForceDisable4GBBuffer = false;
             // user-controled option to disable EU Fusion
             bool DisableEUFusion = false;
+            // Function Control (same as IGC key FunctionControl)
+            int FunctionControl = -1;
             // Fail comilation if spills are present in compiled kernel
             bool FailOnSpill = false;
+            // This option forces IGC to poison kernels using fp64
+            // operations on platforms without HW support for fp64.
+            bool EnableUnsupportedFP64Poisoning = false;
 
             bool AllowRelocAdd = true;
+
+            uint32_t IntelPrivateMemoryMinimalSizePerThread = 0;
+            uint32_t IntelScratchSpacePrivateMemoryMinimalSizePerThread = 0;
 
             private:
                 void parseOptions(const char* IntOptStr);
@@ -1877,10 +1895,10 @@ namespace IGC
         uint32_t getNumThreadsPerEU() const override;
         bool forceGlobalMemoryAllocation() const override;
         bool allocatePrivateAsGlobalBuffer() const override;
-        bool hasNoLocalToGenericCast() const override;
-        bool hasNoPrivateToGenericCast() const override;
         bool enableTakeGlobalAddress() const override;
         int16_t getVectorCoalescingControl() const override;
+        uint32_t getPrivateMemoryMinimalSizePerThread() const override;
+        uint32_t getIntelScratchSpacePrivateMemoryMinimalSizePerThread() const override;
         void failOnSpills();
     private:
         llvm::DenseMap<llvm::Function*, std::string> m_hashes_per_kernel;

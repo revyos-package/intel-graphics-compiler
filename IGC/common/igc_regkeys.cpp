@@ -441,27 +441,60 @@ Output:
 \*****************************************************************************/
 static const char* ConvertType(const char* flagType)
 {
-    if(strcmp(flagType, "bool") == 0)
-    {
-        return "bool";
-    }
-    if((strcmp(flagType, "int") == 0) || (strcmp(flagType, "DWORD") == 0))
-    {
+    if (strcmp(flagType, "int") == 0)
         return "DWORD";
-    }
-    if(strcmp(flagType, "debugString") == 0)
-    {
+    else if(strcmp(flagType, "debugString") == 0)
         return "string";
-    }
     return flagType;
 }
 
-#define DECLARE_IGC_REGKEY( dataType, regkeyName, defaultValue, descriptionText, releaseMode ) \
-    fprintf(fp, "    <Key name=\"%s\" type=\"%s\" location=\"%s\" description=\"%s\" />\n",    \
-        #regkeyName,                                                                           \
-        ConvertType(#dataType),                                                                \
-        "HKLM\\" IGC_REGISTRY_KEY,                                                             \
+template <typename T>
+static std::string ConvertDefault(
+    const std::string &Type, T Val, const std::string &ValStr)
+{
+    if (Type == "bool")
+    {
+        return std::to_string(static_cast<bool>(Val) ? 1U : 0U);
+    }
+    else if (Type == "string")
+    {
+        if (Val == 0)
+            return "";
+        else if constexpr (std::is_convertible_v<T, std::string>)
+            return Val;
+    }
+    return ValStr;
+}
+
+static void DumpIGCRegistryKeyDefinitions(
+    const char* registryKeyPath, const char* xmlPath)
+{
+#ifdef _WIN32
+    // Create the directory path
+    iSTD::DirectoryCreate("C:\\Intel");
+    iSTD::DirectoryCreate("C:\\Intel\\IGfx");
+    iSTD::DirectoryCreate("C:\\Intel\\IGfx\\GfxRegistryManager");
+    iSTD::DirectoryCreate("C:\\Intel\\IGfx\\GfxRegistryManager\\Keys");
+
+    // Create the XML file to hold the debug variable definitions
+    FILE* fp = fopen(xmlPath, "w");
+
+    if (fp == NULL)
+    {
+        return;
+    }
+
+#define DECLARE_IGC_REGKEY( dataType, regkeyName, defaultValue, descriptionText, releaseMode )             \
+    fprintf(fp, "    <Key name=\"%s\" type=\"%s\" location=\"%s\" default=\"%s\" description=\"%s\" />\n", \
+        #regkeyName,                                                                                       \
+        ConvertType(#dataType),                                                                            \
+        registryKeyPath,                                                                                   \
+        ConvertDefault(ConvertType(#dataType), defaultValue, #defaultValue).c_str(),                       \
         descriptionText);
+#define DECLARE_IGC_REGKEY_ENUM(regkeyName, defaultValue, description, values, releaseMode) \
+    DECLARE_IGC_REGKEY(enum, regkeyName, defaultValue, description "[VALUES]" values, releaseMode)
+#define DECLARE_IGC_REGKEY_BITMASK(regkeyName, defaultValue, description, values, releaseMode) \
+    DECLARE_IGC_REGKEY(bitmask, regkeyName, defaultValue, description "[VALUES]" values, releaseMode)
 #define DECLARE_IGC_GROUP( groupName ) \
     if(!firstGroup)                    \
     {                                  \
@@ -470,23 +503,6 @@ static const char* ConvertType(const char* flagType)
     firstGroup = false;                \
     fprintf(fp, "  <Group name=\"%s\">\n", groupName);
 
-void DumpIGCRegistryKeyDefinitions()
-{
-#ifdef _WIN32
-    // Create the directory path
-
-    iSTD::DirectoryCreate("C:\\Intel");
-    iSTD::DirectoryCreate("C:\\Intel\\IGfx");
-    iSTD::DirectoryCreate("C:\\Intel\\IGfx\\GfxRegistryManager");
-    iSTD::DirectoryCreate("C:\\Intel\\IGfx\\GfxRegistryManager\\Keys");
-
-    // Create the XML file to hold the debug variable definitions
-    FILE* fp = fopen("C:\\Intel\\IGfx\\GfxRegistryManager\\Keys\\IGC.xml", "w");
-
-    if (fp == NULL)
-    {
-        return;
-    }
     bool firstGroup = true;
     // Generate the XML
     fprintf(fp, "<RegistryKeys>\n");
@@ -496,68 +512,43 @@ void DumpIGCRegistryKeyDefinitions()
 
     fclose(fp);
     fp = NULL;
-#endif
-}
+
 #undef DECLARE_IGC_REGKEY
 #undef DECLARE_IGC_GROUP
+#undef DECLARE_IGC_REGKEY_ENUM
+#undef DECLARE_IGC_REGKEY_BITMASK
+
+#endif // _WIN32
+}
+
+void DumpIGCRegistryKeyDefinitions()
+{
+    constexpr char* registryKeyPath = "HKLM\\" IGC_REGISTRY_KEY;
+    constexpr char* xmlPath =
+        "C:\\Intel\\IGfx\\GfxRegistryManager\\Keys\\IGC.xml";
+
+    DumpIGCRegistryKeyDefinitions(registryKeyPath, xmlPath);
+}
 
 void DumpIGCRegistryKeyDefinitions3(std::string driverRegistryPath, unsigned long pciBus, unsigned long pciDevice, unsigned long pciFunction)
 {
-#ifdef _WIN32
-    // Create the directory path
-
-    iSTD::DirectoryCreate("C:\\Intel");
-    iSTD::DirectoryCreate("C:\\Intel\\IGfx");
-    iSTD::DirectoryCreate("C:\\Intel\\IGfx\\GfxRegistryManager");
-    iSTD::DirectoryCreate("C:\\Intel\\IGfx\\GfxRegistryManager\\Keys");
-
     if (driverRegistryPath.empty())
     {
         IGC_ASSERT_MESSAGE(0, "Failed to find the driver registry path, cannot create the debug variable XML file.");
         return;
     }
 
-    std::string registryKeyPath = "HKLM\\SYSTEM\\ControlSet001\\Control\\Class\\" + driverRegistryPath + "\\IGC";
+    const std::string registryKeyPath =
+        "HKLM\\SYSTEM\\ControlSet001\\Control\\Class\\" + driverRegistryPath + "\\IGC";
 
-#define DECLARE_IGC_REGKEY( dataType, regkeyName, defaultValue, descriptionText, releaseMode ) \
-    fprintf(fp, "    <Key name=\"%s\" type=\"%s\" location=\"%s\" description=\"%s\" />\n",    \
-        #regkeyName,                                                                           \
-        ConvertType(#dataType),                                                                \
-        registryKeyPath.c_str(),                                                               \
-        descriptionText);
+    const std::string xmlPath =
+        "C:\\Intel\\IGfx\\GfxRegistryManager\\Keys\\IGC." +
+        std::to_string(pciBus)      + "." +
+        std::to_string(pciDevice)   + "." +
+        std::to_string(pciFunction) + ".xml";
 
-#define DECLARE_IGC_GROUP( groupName ) \
-    if(!firstGroup)                    \
-    {                                  \
-        fprintf(fp, "  </Group>\n");   \
-    }                                  \
-    firstGroup = false;                \
-    fprintf(fp, "  <Group name=\"%s\">\n", groupName);
-
-    std::string xmlPath = "C:\\Intel\\IGfx\\GfxRegistryManager\\Keys\\IGC." + std::to_string(pciBus) + "." + std::to_string(pciDevice) + "." + std::to_string(pciFunction) + ".xml";
-
-    // Create the XML file to hold the debug variable definitions
-    FILE* fp = fopen(xmlPath.c_str(), "w");
-
-    if (fp == NULL)
-    {
-        return;
-    }
-    bool firstGroup = true;
-    // Generate the XML
-    fprintf(fp, "<RegistryKeys>\n");
-#include "igc_regkeys.h"
-    fprintf(fp, "  </Group>\n");
-    fprintf(fp, "</RegistryKeys>\n");
-
-    fclose(fp);
-    fp = NULL;
-#endif
+    DumpIGCRegistryKeyDefinitions(registryKeyPath.c_str(), xmlPath.c_str());
 }
-
-#undef DECLARE_IGC_REGKEY
-#undef DECLARE_IGC_GROUP
-
 
 static void checkAndSetIfKeyHasNoDefaultValue(SRegKeyVariableMetaData* pRegKeyVariable)
 {
@@ -747,6 +738,105 @@ static void ParseHashRange(llvm::StringRef line, std::vector<HashRange>& ranges)
     } while (!vString.empty());
 }
 
+static void setIGCKeyOnHash(
+    std::vector<HashRange>& hashes, const unsigned value,
+    SRegKeyVariableMetaData* var)
+{
+    // hashes can be empty if the var is not set via Options.txt
+    for (size_t i = 0; i < hashes.size(); i++)
+        var->hashes.push_back(hashes[i]);
+    var->Set();
+    var->m_Value = value;
+}
+
+// Implicitly set the subkeys
+static void setImpliedIGCKeys()
+{
+    IGC_SET_IMPLIED_REGKEY(DisableIGCOptimizations, 1, DisableLLVMGenericOptimizations, true);
+    IGC_SET_IMPLIED_REGKEY(DisableIGCOptimizations, 1, DisableCodeSinking, true);
+    IGC_SET_IMPLIED_REGKEY(DisableIGCOptimizations, 1, DisableDeSSA, true);
+    //disable now until we figure out the issue
+    //IGC_SET_IMPLIED_REGKEY(DisableIGCOptimizations, DisablePayloadCoalescing, true);
+    IGC_SET_IMPLIED_REGKEY(DisableIGCOptimizations, 1, DisableSendS, true);
+    IGC_SET_IMPLIED_REGKEY(DisableIGCOptimizations, 1, EnableVISANoSchedule, true);
+    IGC_SET_IMPLIED_REGKEY(DisableIGCOptimizations, 1, DisableUniformAnalysis, true);
+    IGC_SET_IMPLIED_REGKEY(DisableIGCOptimizations, 1, DisablePushConstant, true);
+    IGC_SET_IMPLIED_REGKEY(DisableIGCOptimizations, 1, DisableConstantCoalescing, true);
+    IGC_SET_IMPLIED_REGKEY(DisableIGCOptimizations, 1, DisableURBWriteMerge, true);
+    IGC_SET_IMPLIED_REGKEY(DisableIGCOptimizations, 1, DisableCodeHoisting, true);
+    IGC_SET_IMPLIED_REGKEY(DisableIGCOptimizations, 1, DisableEmptyBlockRemoval, true);
+    IGC_SET_IMPLIED_REGKEY(DisableIGCOptimizations, 1, DisableSIMD32Slicing, true);
+    IGC_SET_IMPLIED_REGKEY(DisableIGCOptimizations, 1, DisableCSEL, true);
+    IGC_SET_IMPLIED_REGKEY(DisableIGCOptimizations, 1, DisableFlagOpt, true);
+    IGC_SET_IMPLIED_REGKEY(DisableIGCOptimizations, 1, DisableScalarAtomics, true);
+
+    IGC_SET_IMPLIED_REGKEY(DisableRayTracingOptimizations, 1, DisablePayloadSinking, true);
+    IGC_SET_IMPLIED_REGKEY(DisableRayTracingOptimizations, 1, DisablePromoteToScratch, true);
+    IGC_SET_IMPLIED_REGKEY(DisableRayTracingOptimizations, 1, DisableEarlyRemat, true);
+    IGC_SET_IMPLIED_REGKEY(DisableRayTracingOptimizations, 1, DisableLateRemat, true);
+    IGC_SET_IMPLIED_REGKEY(DisableRayTracingOptimizations, 1, DisableRTGlobalsKnownValues, true);
+    IGC_SET_IMPLIED_REGKEY(DisableRayTracingOptimizations, 1, DisablePreSplitOpts, true);
+    IGC_SET_IMPLIED_REGKEY(DisableRayTracingOptimizations, 1, DisableInvariantLoad, true);
+    IGC_SET_IMPLIED_REGKEY(DisableRayTracingOptimizations, 1, DisableRTStackOpts, true);
+    IGC_SET_IMPLIED_REGKEY(DisableRayTracingOptimizations, 1, DisablePrepareLoadsStores, true);
+    IGC_SET_IMPLIED_REGKEY(DisableRayTracingOptimizations, 1, DisableRayTracingConstantCoalescing, true);
+    IGC_SET_IMPLIED_REGKEY(DisableRayTracingOptimizations, 1, DisableMatchRegisterRegion, true);
+    IGC_SET_IMPLIED_REGKEY(DisableRayTracingOptimizations, 1, DisableFuseContinuations, true);
+    IGC_SET_IMPLIED_REGKEY(DisableRayTracingOptimizations, 1, DisableRaytracingIntrinsicAttributes, true);
+    IGC_SET_IMPLIED_REGKEY(DisableRayTracingOptimizations, 1, DisableShaderFusion, true);
+    IGC_SET_IMPLIED_REGKEY(DisableRayTracingOptimizations, 1, DisableExamineRayFlag, true);
+    IGC_SET_IMPLIED_REGKEY(DisableRayTracingOptimizations, 1, DisableSpillReorder, true);
+    IGC_SET_IMPLIED_REGKEY(DisableRayTracingOptimizations, 1, DisableCrossFillRemat, true);
+    IGC_SET_IMPLIED_REGKEY(DisableRayTracingOptimizations, 1, DisablePromoteContinuation, true);
+    IGC_SET_IMPLIED_REGKEY(DisableRayTracingOptimizations, 1, DisableRTAliasAnalysis, true);
+    IGC_SET_IMPLIED_REGKEY(DisableRayTracingOptimizations, 1, DisableRTFenceElision, true);
+    IGC_SET_IMPLIED_REGKEY(DisableRayTracingOptimizations, 1, DisableRTMemDSE, true);
+    IGC_SET_IMPLIED_REGKEY(DisableRayTracingOptimizations, 1, RematThreshold, 0);
+    IGC_SET_IMPLIED_REGKEY(DisableRayTracingOptimizations, 1, DisableDPSE, true);
+
+    IGC_SET_IMPLIED_REGKEY(ShaderDumpEnableAll, 1, ShaderDumpEnable, true);
+    IGC_SET_IMPLIED_REGKEY(ShaderDumpEnableAll, 1, EnableVISASlowpath, true);
+    IGC_SET_IMPLIED_REGKEY(ShaderDumpEnableAll, 1, EnableVISADumpCommonISA, true);
+
+    IGC_SET_IMPLIED_REGKEY(ShaderDumpEnable, 1, DumpLLVMIR, true);
+    IGC_SET_IMPLIED_REGKEY(ShaderDumpEnable, 1, EnableCosDump, true);
+    IGC_SET_IMPLIED_REGKEY(ShaderDumpEnable, 1, DumpOCLProgramInfo, true);
+    IGC_SET_IMPLIED_REGKEY(ShaderDumpEnable, 1, EnableVISAOutput, true);
+    IGC_SET_IMPLIED_REGKEY(ShaderDumpEnable, 1, EnableVISABinary, true);
+    IGC_SET_IMPLIED_REGKEY(ShaderDumpEnable, 1, EnableVISADumpCommonISA, true);
+    IGC_SET_IMPLIED_REGKEY(ShaderDumpEnable, 1, EnableCapsDump, true);
+    IGC_SET_IMPLIED_REGKEY(ShaderDumpEnable, 1, DumpPatchTokens, true);
+    IGC_SET_IMPLIED_REGKEY(ShaderDumpEnable, 1, RayTracingDumpYaml, true);
+
+    IGC_SET_IMPLIED_REGKEY(DumpTimeStatsPerPass, 1, DumpTimeStats, true);
+    IGC_SET_IMPLIED_REGKEY(DumpTimeStatsCoarse,  1, DumpTimeStats, true);
+    if (IGC_IS_FLAG_ENABLED(DumpTimeStatsPerPass) ||
+        IGC_IS_FLAG_ENABLED(DumpTimeStatsCoarse) ||
+        IGC_IS_FLAG_ENABLED(DumpTimeStats))
+    {
+        // Need to turn on this setting so per-shader .csv is generated
+        IGC::Debug::SetDebugFlag(IGC::Debug::DebugFlag::TIME_STATS_PER_SHADER, true);
+    }
+
+    IGC_SET_IMPLIED_REGKEY(ForceOCLSIMDWidth, 32, EnableOCLSIMD32, true);
+    IGC_SET_IMPLIED_REGKEY(ForceOCLSIMDWidth, 32, EnableOCLSIMD16, false);
+    IGC_SET_IMPLIED_REGKEY(ForceOCLSIMDWidth, 16, EnableOCLSIMD32, false);
+    IGC_SET_IMPLIED_REGKEY(ForceOCLSIMDWidth, 16, EnableOCLSIMD16, true);
+    IGC_SET_IMPLIED_REGKEY(ForceOCLSIMDWidth,  8, EnableOCLSIMD32, false);
+    IGC_SET_IMPLIED_REGKEY(ForceOCLSIMDWidth,  8, EnableOCLSIMD16, false);
+}
+
+void setImpliedRegkey(SRegKeyVariableMetaData& name,
+    const bool set,
+    SRegKeyVariableMetaData& subname,
+    const unsigned subvalue)
+{
+    if (set)
+    {
+        setIGCKeyOnHash(name.hashes, subvalue, &subname);
+    }
+}
+
 static void declareIGCKey(
     const std::string& line, const char* dataType, const char* regkeyName,
     std::vector<HashRange>& hashes, SRegKeyVariableMetaData* regKey)
@@ -754,7 +844,7 @@ static void declareIGCKey(
     bool isSet = false;
     debugString value = { 0 };
     setRegkeyFromOption(line, dataType, regkeyName, &value, isSet);
-    if (isSet)
+    if (isSet && !hashes.empty())
     {
         std::cout << std::endl << "** hashes ";
         for (size_t i = 0; i < hashes.size(); i++) {
@@ -794,6 +884,7 @@ static void LoadDebugFlagsFromFile()
 #undef DECLARE_IGC_REGKEY
 
     }
+    setImpliedIGCKeys();
 }
 
 void appendToOptionsLogFile(std::string const &message)
@@ -915,6 +1006,15 @@ static void LoadFromRegKeyOrEnvVarOrOptions(
             }
         }
     }
+    if (IGC_IS_FLAG_ENABLED(PrintDebugSettings))
+    {
+        std::cout << "*** Settings with non-default values ***" << std::endl;
+        for(DWORD i = 0; i < NUM_REGKEY_ENTRIES; i++)
+        {
+            if (pRegKeyVariable[i].m_isSetToNonDefaultValue)
+                std::cout << pRegKeyVariable[i].GetName() << " " << pRegKeyVariable[i].m_Value << std::endl;
+        }
+    }
 }
 
 /*****************************************************************************\
@@ -937,7 +1037,8 @@ void LoadRegistryKeys(const std::string& options, bool *RegFlagNameError)
     // only load the debug flags once before compiling to avoid any multi-threading issue
     static std::mutex loadFlags;
     static volatile bool flagsSet = false;
-    loadFlags.lock();
+    std::lock_guard<std::mutex> lock(loadFlags);
+
     if(!flagsSet)
     {
         flagsSet = true;
@@ -965,106 +1066,8 @@ void LoadRegistryKeys(const std::string& options, bool *RegFlagNameError)
             llvm::cl::ParseCommandLineOptions(args.size(), &args[0]);
         }
 
-        if(IGC_IS_FLAG_ENABLED(DisableIGCOptimizations))
-        {
-            IGC_SET_FLAG_VALUE(DisableLLVMGenericOptimizations, true);
-            IGC_SET_FLAG_VALUE(DisableCodeSinking, true);
-            IGC_SET_FLAG_VALUE(DisableDeSSA, true);
-            //disable now until we figure out the issue
-            //IGC_SET_FLAG_VALUE(DisablePayloadCoalescing, true);
-            IGC_SET_FLAG_VALUE(DisableSendS, true);
-            IGC_SET_FLAG_VALUE(EnableVISANoSchedule, true);
-            IGC_SET_FLAG_VALUE(DisableUniformAnalysis, true);
-            IGC_SET_FLAG_VALUE(DisablePushConstant, true);
-            IGC_SET_FLAG_VALUE(DisableConstantCoalescing, true);
-            IGC_SET_FLAG_VALUE(DisableURBWriteMerge, true);
-            IGC_SET_FLAG_VALUE(DisableCodeHoisting, true);
-            IGC_SET_FLAG_VALUE(DisableEmptyBlockRemoval, true);
-            IGC_SET_FLAG_VALUE(DisableSIMD32Slicing, true);
-            IGC_SET_FLAG_VALUE(DisableCSEL, true);
-            IGC_SET_FLAG_VALUE(DisableFlagOpt, true);
-            IGC_SET_FLAG_VALUE(DisableScalarAtomics, true);
-        }
-
-        if (IGC_IS_FLAG_ENABLED(DisableRayTracingOptimizations))
-        {
-            IGC_SET_FLAG_VALUE(DisablePayloadSinking, true);
-            IGC_SET_FLAG_VALUE(DisablePromoteToScratch, true);
-            IGC_SET_FLAG_VALUE(DisableEarlyRemat, true);
-            IGC_SET_FLAG_VALUE(DisableLateRemat, true);
-            IGC_SET_FLAG_VALUE(DisableRTGlobalsKnownValues, true);
-            IGC_SET_FLAG_VALUE(DisablePreSplitOpts, true);
-            IGC_SET_FLAG_VALUE(DisableInvariantLoad, true);
-            IGC_SET_FLAG_VALUE(DisableRTStackOpts, true);
-            IGC_SET_FLAG_VALUE(DisablePrepareLoadsStores, true);
-            IGC_SET_FLAG_VALUE(DisableRayTracingConstantCoalescing, true);
-            IGC_SET_FLAG_VALUE(DisableMatchRegisterRegion, true);
-            IGC_SET_FLAG_VALUE(DisableFuseContinuations, true);
-            IGC_SET_FLAG_VALUE(DisableRaytracingIntrinsicAttributes, true);
-            IGC_SET_FLAG_VALUE(DisableShaderFusion, true);
-            IGC_SET_FLAG_VALUE(DisableExamineRayFlag, true);
-            IGC_SET_FLAG_VALUE(DisableSpillReorder, true);
-            IGC_SET_FLAG_VALUE(DisablePromoteContinuation, true);
-            IGC_SET_FLAG_VALUE(DisableRTAliasAnalysis, true);
-            IGC_SET_FLAG_VALUE(DisableRTFenceElision, true);
-            IGC_SET_FLAG_VALUE(DisableRTMemDSE, true);
-            IGC_SET_FLAG_VALUE(RematThreshold, 0);
-            IGC_SET_FLAG_VALUE(DisableDPSE, true);
-        }
-
-        if (IGC_IS_FLAG_ENABLED(ShaderDumpEnableAll))
-        {
-            IGC_SET_FLAG_VALUE(ShaderDumpEnable, true);
-            IGC_SET_FLAG_VALUE(EnableVISASlowpath, true);
-            IGC_SET_FLAG_VALUE(EnableVISADumpCommonISA, true);
-        }
-
-        if (IGC_IS_FLAG_ENABLED(ShaderDumpEnable))
-        {
-            IGC_SET_FLAG_VALUE(DumpLLVMIR, true);
-            IGC_SET_FLAG_VALUE(EnableCosDump, true);
-            IGC_SET_FLAG_VALUE(DumpOCLProgramInfo, true);
-            IGC_SET_FLAG_VALUE(EnableVISAOutput, true);
-            IGC_SET_FLAG_VALUE(EnableVISABinary, true);
-            IGC_SET_FLAG_VALUE(EnableVISADumpCommonISA, true);
-            IGC_SET_FLAG_VALUE(EnableCapsDump, true);
-            IGC_SET_FLAG_VALUE(DumpPatchTokens, true);
-            IGC_SET_FLAG_VALUE(RayTracingDumpYaml, true);
-        }
-
-        if (IGC_IS_FLAG_ENABLED(DumpTimeStatsPerPass) ||
-            IGC_IS_FLAG_ENABLED(DumpTimeStatsCoarse))
-        {
-            IGC_SET_FLAG_VALUE(DumpTimeStats, true);
-            IGC::Debug::SetDebugFlag(IGC::Debug::DebugFlag::TIME_STATS_PER_SHADER, true);
-        }
-
-        if (IGC_IS_FLAG_ENABLED(DumpTimeStats))
-        {
-            // Need to turn on this setting so per-shader .csv is generated
-            IGC::Debug::SetDebugFlag(IGC::Debug::DebugFlag::TIME_STATS_PER_SHADER, true);
-        }
-
-        switch (IGC_GET_FLAG_VALUE(ForceOCLSIMDWidth))
-        {
-        case 32:
-            IGC_SET_FLAG_VALUE(EnableOCLSIMD32, true);
-            IGC_SET_FLAG_VALUE(EnableOCLSIMD16, false);
-            break;
-        case 16:
-            IGC_SET_FLAG_VALUE(EnableOCLSIMD32, false);
-            IGC_SET_FLAG_VALUE(EnableOCLSIMD16, true);
-            break;
-        case 8:
-            IGC_SET_FLAG_VALUE(EnableOCLSIMD32, false);
-            IGC_SET_FLAG_VALUE(EnableOCLSIMD16, false);
-            break;
-        default:
-            // Non-valid value is ignored (using default).
-            IGC_SET_FLAG_VALUE(ForceOCLSIMDWidth, 0);
-        }
+        setImpliedIGCKeys();
     }
-    loadFlags.unlock();
 }
 
 // Get all keys that have been set explicitly with a non-default value. Return

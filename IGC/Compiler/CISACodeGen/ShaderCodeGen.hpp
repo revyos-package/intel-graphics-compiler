@@ -241,6 +241,8 @@ public:
     void SaveStackState();
     void RestoreStackState();
 
+    void InitializeScratchSurfaceStateAddress();
+
     void        AllocateInput(CVariable* var, uint offset, uint instance = 0, bool forceLiveOut = false);
     void        AllocateOutput(CVariable* var, uint offset, uint instance = 0);
     CVariable* ImmToVariable(uint64_t immediate, VISA_Type type, bool isCodePatchCandidate = false);
@@ -346,6 +348,8 @@ public:
     bool isMessageTargetDataCacheDataPort;
     uint m_sendStallCycle;
     uint m_staticCycle;
+    uint m_loopNestedStallCycle;
+    uint m_loopNestedCycle;
     unsigned m_spillSize = 0;
     float m_spillCost = 0;          // num weighted spill inst / total inst
 
@@ -355,6 +359,8 @@ public:
     /// is the value passed to VISA so that VISA's spill, if any,
     /// will go after this space.
     uint m_ScratchSpaceSize;
+
+    CVariable* m_ScratchSurfaceAddress = nullptr;
 
     ShaderStats* m_shaderStats;
 
@@ -522,7 +528,7 @@ public:
     // Note that for PVC A0 simd16, PVCLSCEnabled() returns true
     // but no LSC is generated!
     bool PVCLSCEnabled() const {
-        return m_Platform->getPlatformInfo().eProductFamily == IGFX_PVC && m_Platform->hasLSC();
+        return m_Platform->isCoreChildOf(IGFX_XE_HPC_CORE) && m_Platform->hasLSC();
     }
 
     e_alignment getGRFAlignment() const { return CVariable::getAlignment(getGRFSize()); }
@@ -559,6 +565,17 @@ public:
     void SetHasStackCalls() { m_HasStackCalls = true; }
     bool IsIntelSymbolTableVoidProgram() const { return m_isIntelSymbolTableVoidProgram; }
     void SetIsIntelSymbolTableVoidProgram() { m_isIntelSymbolTableVoidProgram = true; }
+
+    ////////////////////////////////////////////////////////////////////
+    // NOTE: for vector load/stores instructions pass the
+    // optional instruction argument checks additional constraints
+    static Tristate shouldGenerateLSCQuery(
+        const CodeGenContext& Ctx,
+        llvm::Instruction* vectorLdStInst = nullptr,
+        SIMDMode Mode = SIMDMode::UNKNOWN);
+    bool shouldGenerateLSC(llvm::Instruction* vectorLdStInst = nullptr);
+    bool forceCacheCtrl(llvm::Instruction* vectorLdStInst = nullptr);
+    uint32_t totalBytesToStoreOrLoad(llvm::Instruction* vectorLdStInst);
 
 protected:
     bool CompileSIMDSizeInCommon(SIMDMode simdMode);

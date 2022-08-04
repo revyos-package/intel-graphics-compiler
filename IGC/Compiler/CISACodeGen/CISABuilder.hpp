@@ -114,7 +114,7 @@ namespace IGC
     class CEncoder
     {
     public:
-        void InitEncoder(bool canAbortOnSpill, bool hasStackCall, bool hasInlineAsmCall, VISAKernel* prevKernel);
+        void InitEncoder(bool canAbortOnSpill, bool hasStackCall, bool hasInlineAsmCall, bool hasAdditionalVisaAsmToLink, VISAKernel* prevKernel);
         void InitBuildParams(llvm::SmallVector<std::unique_ptr< char, std::function<void(char*)>>, 10> & params);
         void InitVISABuilderOptions(TARGET_PLATFORM VISAPlatform, bool canAbortOnSpill, bool hasStackCall, bool enableVISA_IR);
         SEncoderState CopyEncoderState();
@@ -221,8 +221,8 @@ namespace IGC
             uint channel,
             bool feedbackEnable);
 
-        void OWLoad(CVariable* dst, const ResourceDescriptor& resource, CVariable* offset, bool owordAligned, uint dstSize, uint dstOffset = 0);
-        void OWStore(CVariable* dst, e_predefSurface surfaceType, CVariable* bufidx, CVariable* offset, uint dstSize, uint srcOffset);
+        void OWLoad(CVariable* dst, const ResourceDescriptor& resource, CVariable* offset, bool owordAligned, uint bytesToBeRead, uint dstOffset = 0);
+        void OWStore(CVariable* data, e_predefSurface surfaceType, CVariable* bufidx, CVariable* offset, uint bytesToBeRead, uint srcOffset);
 
         void AddrAdd(CVariable* dst, CVariable* src0, CVariable* src1);
         void Barrier(e_barrierKind BarrierKind);
@@ -617,12 +617,12 @@ namespace IGC
 
         // CreateRelocationTable
         // input/output: buffer, bufferSize, tableEntries: for patch-token-based format.
-        void CreateRelocationTable(void*& buffer, unsigned& bufferSize, unsigned& tableEntries);
+        void CreateRelocationTable(VISAKernel* pMainKernel, void*& buffer, unsigned& bufferSize, unsigned& tableEntries);
         // input/output: relocations: for ZEBinary foramt
-        void CreateRelocationTable(SProgramOutput::RelocListTy& relocations);
+        void CreateRelocationTable(VISAKernel* pMainKernel, SProgramOutput::RelocListTy& relocations);
 
         // CreateFuncAttributeTable
-        void CreateFuncAttributeTable(void*& buffer, unsigned& bufferSize, unsigned& tableEntries, SProgramOutput::FuncAttrListTy& attrs);
+        void CreateFuncAttributeTable(VISAKernel* pMainKernel, void*& buffer, unsigned& bufferSize, unsigned& tableEntries, SProgramOutput::FuncAttrListTy& attrs);
 
         // CreateGlobalHostAccessTable
         typedef std::vector<vISA::HostAccessEntry> HostAccessList;
@@ -669,7 +669,6 @@ namespace IGC
         // Get Encoding bit values for rounding mode
         RMEncoding getEncoderRoundingMode_FP(ERoundingMode FP_RM);
         RMEncoding getEncoderRoundingMode_FPCvtInt(ERoundingMode FCvtI_RM);
-
         unsigned GetRawOpndSplitOffset(VISA_Exec_Size fromExecSize,
             VISA_Exec_Size toExecSize,
             unsigned thePart, CVariable* var) const;

@@ -23,6 +23,7 @@ SPDX-License-Identifier: MIT
 #include "RTStackFormat.h"
 #include "Probe/Assertion.h"
 
+#include "llvmWrapper/IR/Attributes.h"
 #include "llvmWrapper/IR/DerivedTypes.h"
 #include "llvmWrapper/Support/Alignment.h"
 #include "common/LLVMWarningsPush.hpp"
@@ -597,6 +598,7 @@ Value* RTBuilder::CreateSyncStackPtrIntrinsic(
     return StackPtr;
 }
 
+
 RTBuilder::SWStackPtrVal* RTBuilder::getSWStackPointer(const Twine& Name)
 {
     auto* CI = this->CreateSWStackPtrIntrinsic(nullptr, false, Name);
@@ -985,7 +987,8 @@ CallInst* RTBuilder::CreateBTDCall(Value* RecordPointer)
     return this->CreateCall(BTDCall, args);
 }
 
-StackIDReleaseIntrinsic* RTBuilder::CreateStackIDRelease(Value* StackID)
+StackIDReleaseIntrinsic* RTBuilder::CreateStackIDRelease(
+    Value* StackID, Value* Flag)
 {
     Module* module = this->GetInsertBlock()->getModule();
     Value* stackID = StackID ? StackID : this->getAsyncStackID();
@@ -994,7 +997,10 @@ StackIDReleaseIntrinsic* RTBuilder::CreateStackIDRelease(Value* StackID)
         module,
         GenISAIntrinsic::GenISA_StackIDRelease);
 
-    return cast<StackIDReleaseIntrinsic>(this->CreateCall(BTDCall, stackID));
+    auto* Predicate = Flag ? Flag : getTrue();
+
+    return cast<StackIDReleaseIntrinsic>(
+        this->CreateCall2(BTDCall, stackID, Predicate));
 }
 
 // Note: 'traceRayCtrl' should be already by 8 bits to its location
@@ -2218,79 +2224,97 @@ Value* RTBuilder::emitStateRegID(uint32_t BitStart, uint32_t BitEnd)
     return shrInst;
 }
 
-Value* RTBuilder::getSliceID()
-{
+std::pair<uint32_t, uint32_t> RTBuilder::getSliceIDBitsInSR0() const {
     if (Ctx.platform.GetPlatformFamily() == IGFX_GEN8_CORE ||
         Ctx.platform.GetPlatformFamily() == IGFX_GEN9_CORE)
     {
-        return emitStateRegID(14, 15);
+        return {14, 15};
     }
     else if (Ctx.platform.GetPlatformFamily() == IGFX_GEN12_CORE   ||
-             Ctx.platform.GetPlatformFamily() == IGFX_XE_HP_CORE   ||
-             Ctx.platform.GetPlatformFamily() == IGFX_XE_HPG_CORE)
+        Ctx.platform.GetPlatformFamily() == IGFX_XE_HP_CORE   ||
+        Ctx.platform.GetPlatformFamily() == IGFX_XE_HPG_CORE)
     {
-        return emitStateRegID(11, 13);
+        return {11, 13};
     }
     else if (Ctx.platform.GetPlatformFamily() == IGFX_XE_HPC_CORE)
     {
-        return emitStateRegID(12, 14);
+        return {12, 14};
     }
     else
     {
-        return emitStateRegID(12, 14);
+        return {12, 14};
     }
 }
 
-Value* RTBuilder::getSubsliceID()
-{
+std::pair<uint32_t, uint32_t> RTBuilder::getSubsliceIDBitsInSR0() const {
     if (Ctx.platform.GetPlatformFamily() == IGFX_GEN8_CORE ||
         Ctx.platform.GetPlatformFamily() == IGFX_GEN9_CORE)
     {
-        return emitStateRegID(12, 13);
+        return {12, 13};
     }
     else
     {
-        return emitStateRegID(8, 8);
+        return {8, 8};
     }
 }
 
-Value* RTBuilder::getDualSubsliceID()
-{
+std::pair<uint32_t, uint32_t> RTBuilder::getDualSubsliceIDBitsInSR0() const {
     if (Ctx.platform.GetPlatformFamily() == IGFX_GEN11_CORE   ||
         Ctx.platform.GetPlatformFamily() == IGFX_GEN11LP_CORE ||
         Ctx.platform.GetPlatformFamily() == IGFX_GEN12LP_CORE ||
         Ctx.platform.GetPlatformFamily() == IGFX_XE_HPC_CORE)
     {
-        return emitStateRegID(9, 11);
+        return {9, 11};
     }
     else if (Ctx.platform.GetPlatformFamily() == IGFX_GEN12_CORE   ||
-             Ctx.platform.GetPlatformFamily() == IGFX_XE_HP_CORE   ||
-             Ctx.platform.GetPlatformFamily() == IGFX_XE_HPG_CORE)
+        Ctx.platform.GetPlatformFamily() == IGFX_XE_HP_CORE   ||
+        Ctx.platform.GetPlatformFamily() == IGFX_XE_HPG_CORE)
     {
-        return emitStateRegID(9, 10);
+        return {9, 10};
     }
     else
     {
         IGC_ASSERT_MESSAGE(0, "No support for Dual Subslice in current platform");
-        return nullptr;
+        return {0,0};
     }
 }
 
+Value* RTBuilder::getSliceID()
+{
+    auto bitsInSR0 = getSliceIDBitsInSR0();
+    return emitStateRegID(bitsInSR0.first, bitsInSR0.second);
+}
+
+Value* RTBuilder::getSubsliceID()
+{
+    auto bitsInSR0 = getSubsliceIDBitsInSR0();
+    return emitStateRegID(bitsInSR0.first, bitsInSR0.second);
+}
+
+Value* RTBuilder::getDualSubsliceID()
+{
+    auto bitsInSR0 = getDualSubsliceIDBitsInSR0();
+    return emitStateRegID(bitsInSR0.first, bitsInSR0.second);
+}
+
+// globalDSSID is the combined value of sliceID and dssID on slice.
 Value* RTBuilder::getGlobalDSSID()
 {
-    Value* dssID = getDualSubsliceID();
-    Value* sliceID = getSliceID();
+    auto dssIDBits = getDualSubsliceIDBitsInSR0();
+    auto sliceIDBits = getSliceIDBitsInSR0();
 
-    Value* dssIDGlobal = this->CreateMul(
-        sliceID,
-        this->getInt32(NumDSSPerSlice),
-        VALUE_NAME("dssIDGlobalBase")
-    );
-    return this->CreateAdd(
-        dssIDGlobal,
-        dssID,
-        VALUE_NAME("GlobalDSSID")
-    );
+    if (dssIDBits.first < sliceIDBits.first && sliceIDBits.first == dssIDBits.second + 1)
+    {
+        return emitStateRegID(dssIDBits.first, sliceIDBits.second);
+    }
+    else
+    {
+        Value* dssID = emitStateRegID(dssIDBits.first, dssIDBits.second);
+        Value* sliceID = emitStateRegID(sliceIDBits.first, sliceIDBits.second);
+        unsigned shiftAmount = dssIDBits.second - dssIDBits.first + 1;
+        Value* globalDSSID = CreateShl(sliceID, shiftAmount);
+        return CreateOr(globalDSSID, dssID);
+    }
 }
 
 bool RTBuilder::isNonLocalAlloca(uint32_t AddrSpace)
@@ -3228,30 +3252,30 @@ Value* RTBuilder::createAllocaNumber(const AllocaInst* AI, uint32_t Number)
 void RTBuilder::setReturnAlignment(CallInst* CI, uint32_t AlignVal)
 {
     auto Attrs = CI->getAttributes();
-    AttrBuilder AB{ Attrs, AttributeList::ReturnIndex };
+    IGCLLVM::AttrBuilder AB { CI->getContext(), Attrs.getAttributes(AttributeList::ReturnIndex)};
     AB.addAlignmentAttr(AlignVal);
     auto AL =
-        Attrs.addAttributes(CI->getContext(), AttributeList::ReturnIndex, AB);
+        IGCLLVM::addAttributesAtIndex(Attrs, CI->getContext(), AttributeList::ReturnIndex, AB);
     CI->setAttributes(AL);
 }
 
 void RTBuilder::setNoAlias(CallInst* CI)
 {
     auto Attrs = CI->getAttributes();
-    AttrBuilder AB{ Attrs, AttributeList::ReturnIndex };
+    IGCLLVM::AttrBuilder AB{ CI->getContext(), Attrs.getAttributes(AttributeList::ReturnIndex) };
     AB.addAttribute(Attribute::AttrKind::NoAlias);
     auto AL =
-        Attrs.addAttributes(CI->getContext(), AttributeList::ReturnIndex, AB);
+        IGCLLVM::addAttributesAtIndex(Attrs, CI->getContext(), AttributeList::ReturnIndex, AB);
     CI->setAttributes(AL);
 }
 
 void RTBuilder::setDereferenceable(CallInst* CI, uint32_t Size)
 {
     auto Attrs = CI->getAttributes();
-    AttrBuilder AB{ Attrs, AttributeList::ReturnIndex };
+    IGCLLVM::AttrBuilder AB{ CI->getContext(), Attrs.getAttributes(AttributeList::ReturnIndex) };
     AB.addDereferenceableAttr(Size);
     auto AL =
-        Attrs.addAttributes(CI->getContext(), AttributeList::ReturnIndex, AB);
+        IGCLLVM::addAttributesAtIndex(Attrs, CI->getContext(), AttributeList::ReturnIndex, AB);
     CI->setAttributes(AL);
 }
 
@@ -3861,4 +3885,36 @@ void RTBuilder::setGlobalBufferPtr(Value* GlobalBufferPtr) {
 
 void RTBuilder::setDisableRTGlobalsKnownValues(bool Disable) {
     this->DisableRTGlobalsKnownValues = Disable;
+}
+
+GenIntrinsicInst* RTBuilder::getSpillAnchor(Value* V)
+{
+    auto* M = GetInsertBlock()->getModule();
+    CallInst* Anchor = this->CreateCall(
+        GenISAIntrinsic::getDeclaration(
+            M, GenISAIntrinsic::GenISA_rt_spill_anchor, V->getType()),
+        V,
+        VALUE_NAME(V->getName() + Twine(".anchor")));
+    return cast<GenIntrinsicInst>(Anchor);
+}
+
+void RTBuilder::setSpillSize(ContinuationHLIntrinsic& CI, uint32_t SpillSize)
+{
+    auto& C = CI.getContext();
+    MDNode* node = MDNode::get(
+        C,
+        ConstantAsMetadata::get(
+            ConstantInt::get(Type::getInt32Ty(C), SpillSize)));
+    CI.setMetadata(RTBuilder::SpillSize, node);
+}
+
+Optional<uint32_t> RTBuilder::getSpillSize(const ContinuationHLIntrinsic& CI)
+{
+    auto* MD = CI.getMetadata(RTBuilder::SpillSize);
+    if (!MD)
+        return None;
+
+    auto* CMD = cast<ConstantAsMetadata>(MD->getOperand(0));
+    auto* C = cast<ConstantInt>(CMD->getValue());
+    return static_cast<uint32_t>(C->getZExtValue());
 }

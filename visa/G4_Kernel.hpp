@@ -22,6 +22,7 @@ SPDX-License-Identifier: MIT
 #include <unordered_set>
 #include <utility>
 #include <vector>
+#include <tuple>
 
 namespace vISA
 {
@@ -105,6 +106,7 @@ public:
     void* getGTPinInfoBuffer(unsigned &bufferSize);
 
     void setScratchNextFree(unsigned next);
+    unsigned int getScratchNextFree() const;
 
     uint32_t getNumBytesScratchUse() const;
 
@@ -150,7 +152,78 @@ public:
     G4_INST* WAFlag_allOne;    // (W&P.anyh) mov  P  0xFFFFFFFF
     G4_INST* Inst_restore;     // (W) mov (1|M0)  P  t
     // G4_INST* WAFlag_spill;  // (W) mov (1|M0)  DW1  P  [used by postRA]
+    std::list<std::tuple<G4_INST*, G4_INST*, G4_INST*> > WASequenceInfo;
+
+    NoMaskWA_info_t(std::list<std::tuple<G4_INST*, G4_INST*, G4_INST*> >& aWASeqInfo)
+        : WASequenceInfo(std::move(aWASeqInfo))
+    {}
     G4_INST* getWAFlagDefInst() const { return WAFlag_allOne ? WAFlag_allOne : WAFlag_cmp; }
+};
+
+// NoMask WA Information
+class NoMaskWAInfo
+{
+public:
+    bool        HasWAInsts;       // true: there are NoMask inst that needs WA.
+    G4_Declare* WAFlagReserved;
+    G4_Declare* WATempReserved;
+};
+
+// Indirect Call WA info
+//    Every indirect call (one in a BB) has the following postRA will
+//    use this to update relative IP, etc.
+class IndirectCallWAInfo
+{
+public:
+    //  Call_BB:
+    //           Small_start
+    //           Small_patch
+    //           Big_start
+    //           Big_patch
+    //           if (BigEU)
+    //  BigBB:
+    //              big_call (original)
+    //           else
+    //  SmallBB:
+    //              small_call (new one)
+    //           endif
+    //
+    // G4_BB*   Call_BB;       // as map key
+    G4_BB*   Big_BB;
+    G4_BB*   Small_BB;
+    // SmallEU and BigEU's relative IP are calculated as follow:
+    //   Given
+    //     call v20            // v20 is absolute target addr
+    //   The relative IP is caculated as follows:
+    //     add  v10  -ip,  v20                    // start inst
+    //     add  v11   v10, 0x33 (-label_patch)    // patch inst
+    //     ...
+    //     call v11                               // call inst
+    //                                            // v11 is relative target addr
+    // This map keeps  patch inst --> <ip_start_inst, ip_end_inst>
+    // Once encoding is decided, label_path = IP(ip_end_inst) - IP(ip_start_inst)
+    //
+    G4_INST* IP_WA_placeholder;   // IP WA, will be replaced with call if present
+    G4_INST* Small_start;   // SmallEU start: add  t -ip      SmallTarget
+    G4_INST* Small_patch;   // SmallEU patch: add  rSmallT t  <patchVal>
+    G4_INST* Big_start;     // BigEU start :  add  t1 -ip      BigTarget
+    G4_INST* Big_patch;     // BigEU patch :  add  rBigT   t1 <patchVal>
+    G4_INST* Big_call;
+    G4_INST* Small_call;
+    IndirectCallWAInfo(G4_BB* aBig_BB, G4_BB* aSmall_BB,
+        G4_INST* aIP_WA,
+        G4_INST* aSmall_start, G4_INST* aSmall_patch,
+        G4_INST* aBig_start, G4_INST* aBig_patch,
+        G4_INST* aBig_call, G4_INST* aSmall_call)
+        : IP_WA_placeholder(aIP_WA),
+          Big_BB(aBig_BB), Small_BB(aSmall_BB),
+          Small_start(aSmall_start), Small_patch(aSmall_patch),
+          Big_start(aBig_start), Big_patch(aBig_patch),
+          Big_call(aBig_call), Small_call(aSmall_call)
+    {}
+
+    IndirectCallWAInfo()
+    {}
 };
 
 class G4_Kernel
@@ -171,6 +244,7 @@ private:
     bool regSharingHeuristics;
     Options *m_options;
     const Attributes* m_kernelAttrs;
+    const uint32_t m_function_id;
 
     RA_Type RAType;
     KernelDebugInfo* kernelDbgInfo = nullptr;
@@ -221,7 +295,7 @@ public:
     unsigned char minor_version;
 
     G4_Kernel(const PlatformInfo& pInfo, INST_LIST_NODE_ALLOCATOR& alloc,
-        Mem_Manager& m, Options* options, Attributes* anAttr,
+        Mem_Manager& m, Options* options, Attributes* anAttr, uint32_t funcId,
         unsigned char major, unsigned char minor);
     ~G4_Kernel();
 
@@ -237,6 +311,7 @@ public:
     G4_SubReg_Align getHalfGRFAlign() const {return platformInfo.getHalfGRFAlign();}
     unsigned getGenxDataportIOSize() const {return platformInfo.getGenxDataportIOSize();}
     unsigned getGenxSamplerIOSize() const {return platformInfo.getGenxSamplerIOSize();}
+    unsigned getMaxNumOfBarriers() const {return platformInfo.getMaxNumOfBarriers();}
 
     void *operator new(size_t sz, Mem_Manager& m) {return m.alloc(sz);}
 
@@ -261,6 +336,8 @@ public:
     void     setKernelID(uint64_t ID) { kernelID = ID; }
     uint64_t getKernelID() const { return kernelID; }
 
+    uint32_t getFunctionId() const { return m_function_id; }
+
     Options *getOptions() { return m_options; }
     const Attributes* getKernelAttrs() const { return m_kernelAttrs; }
     bool getBoolKernelAttr(Attributes::ID aID) const {
@@ -270,6 +347,7 @@ public:
         return getKernelAttrs()->getInt32KernelAttr(aID);
     }
     bool getOption(vISAOptions opt) const { return m_options->getOption(opt); }
+    uint32_t getuInt32Option(vISAOptions opt) const { return m_options->getuInt32Option(opt); }
     void computeChannelSlicing();
     void calculateSimdSize();
     G4_ExecSize getSimdSize() { return simdSize; }
@@ -314,10 +392,26 @@ public:
     unsigned calleeSaveStart() const;
     unsigned getNumCalleeSaveRegs() const;
 
+    enum StackCallABIVersion
+    {
+        VER_1 = 1, // This version is used pre-zebin
+        VER_2 = 2, // This version is used for zebin
+    };
+
     // return the number of reserved GRFs for stack call ABI
     // the reserved registers are at the end of the GRF file (e.g., r125-r127)
+    // for some architectures/ABI version, we dont need a copy of r0 and
+    // instructions can directly refer to r0 in code (eg, sends).
     uint32_t numReservedABIGRF() const {
-        return 3;
+        if (getuInt32Option(vISA_StackCallABIVer) == VER_1)
+            return 3;
+        else
+        {
+            // for ABI version > 1,
+            if (getOption(vISA_PreserveR0InR0))
+                return 2;
+            return 3;
+        }
     }
 
     // purpose of the GRFs reserved for stack call ABI
@@ -326,15 +420,30 @@ public:
     const int ThreadHeaderGRF = 2;
 
     uint32_t getFPSPGRF() const{
-        return getStackCallStartReg() + FPSPGRF;
+        // For ABI V1 return r125.
+        // For ABI V2 return r127.
+        if(getuInt32Option(vISA_StackCallABIVer) == VER_1)
+            return getStackCallStartReg() + FPSPGRF;
+        else
+            return (getNumRegTotal() - 1) - FPSPGRF;
     }
 
     uint32_t getSpillHeaderGRF() const{
-        return getStackCallStartReg() + SpillHeaderGRF;
+        // For ABI V1 return r126.
+        // For ABI V2 return r126.
+        if (getuInt32Option(vISA_StackCallABIVer) == VER_1)
+            return getStackCallStartReg() + SpillHeaderGRF;
+        else
+            return (getNumRegTotal() - 1) - SpillHeaderGRF;
     }
 
     uint32_t getThreadHeaderGRF() const{
-        return getStackCallStartReg() + ThreadHeaderGRF;
+        // For ABI V1 return r127.
+        // For ABI V2 return r125.
+        if (getuInt32Option(vISA_StackCallABIVer) == VER_1)
+            return getStackCallStartReg() + ThreadHeaderGRF;
+        else
+            return (getNumRegTotal() - 1) - ThreadHeaderGRF;
     }
 
     void renameAliasDeclares();
@@ -415,12 +524,30 @@ private:
     //   PreRA WA creates WA flag and applies WA. This map keeps info around.
     //   storage used will be freed after postRA WA is done.
     std::unordered_map<G4_BB*, NoMaskWA_info_t*> m_noMaskWAInfo;
+    // Passing info from preRA to postRA
+    NoMaskWAInfo* m_EUFusionNoMaskWAInfo;
 public:
+    void createNoMaskWAInfo(G4_Declare* aWAFlag, G4_Declare* aWATemp, bool aInstNeedWA)
+    {
+        NoMaskWAInfo* waInfo = new NoMaskWAInfo();
+        waInfo->WAFlagReserved = aWAFlag;
+        waInfo->WATempReserved = aWATemp;
+        waInfo->HasWAInsts = aInstNeedWA;
+
+        m_EUFusionNoMaskWAInfo = waInfo;
+    }
+    void deleteEUFusionNoMaskWAInfo()
+    {
+        delete m_EUFusionNoMaskWAInfo;
+        m_EUFusionNoMaskWAInfo = nullptr;
+    }
+    NoMaskWAInfo* getEUFusionNoMaskWAInfo() const { return m_EUFusionNoMaskWAInfo; }
     void addNoMaskWAInfo(G4_BB* aBB,
         G4_INST* aInstKill, G4_INST* aInstSave, G4_INST* aInstRestore,
-        G4_INST* aWAFlag_mov0, G4_INST* aWAFlag_cmp, G4_INST* aWAFlag_allOne)
+        G4_INST* aWAFlag_mov0, G4_INST* aWAFlag_cmp, G4_INST* aWAFlag_allOne,
+        std::list<std::tuple<G4_INST*, G4_INST*, G4_INST*> >& WASequenceInfo)
     {
-        NoMaskWA_info_t* pinfo = new NoMaskWA_info_t();
+        NoMaskWA_info_t* pinfo = new NoMaskWA_info_t(WASequenceInfo);
         pinfo->Inst_kill = aInstKill;
         pinfo->Inst_save = aInstSave;
         pinfo->WAFlag_mov0 = aWAFlag_mov0;
@@ -459,22 +586,12 @@ public:
     }
 #endif
 
-    // Call WA under EU fusion
-    //     add  v10  -ip,  v20                    // ip_start_inst
-    //     add  v11   v10, 0x33 (-label_patch)    // patch inst
-    //     ...
-    //     call v11                               // ip_end_inst
-    // This map keeps  patch inst --> <ip_start_inst, ip_end_inst>
-    // Once encoding is decided, label_path = IP(ip_end_inst) - IP(ip_start_inst)
-    //
-    // m_labelPatchInsts: keep the info described above
-    // m_instToBBs:  convenient map to BBs that those insts belong to
-    // m_waCallInsts: call insts whose targets should be defined outside the smallEU branch.
-    // m_maskOffWAInsts: insts whose MaskOff needs to be changed for this WA.
-    std::unordered_map<G4_INST*, std::pair<G4_INST*, G4_INST*>> m_labelPatchInsts;
-    std::unordered_map<G4_INST*, G4_BB*> m_instToBBs;
-    std::list<G4_INST*> m_waCallInsts;
+    // m_maskOffWAInsts: insts whose MaskOff will be changed for this call WA.
     std::unordered_map <G4_INST*, G4_BB*> m_maskOffWAInsts;
+    // m_indirectCallWAInfo : all info related to indirect call wa
+    // such as BBs for smallEU's call/bigEu's call. If ip-relative call,
+    // insts to calculate IP-relative address, etc.
+    std::unordered_map<G4_BB*, IndirectCallWAInfo> m_indirectCallWAInfo;
     void setMaskOffset(G4_INST* I, G4_InstOption MO) {
         // For call WA
         assert((I->getMaskOffset() + I->getExecSize()) <= 16);

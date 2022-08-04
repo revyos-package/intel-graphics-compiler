@@ -295,6 +295,8 @@ bool WIAnalysisRunner::run()
     auto& F = *m_func;
     if (m_pMdUtils->findFunctionsInfoItem(&F) == m_pMdUtils->end_FunctionsInfo())
         return false;
+    if (IGC::isIntelSymbolTableVoidProgram(&F))
+        return false;
 
     m_depMap.Initialize(m_TT);
     m_TT->RegisterListener(&m_depMap);
@@ -1298,6 +1300,7 @@ WIAnalysis::WIDependancy WIAnalysisRunner::calculate_dep(const CallInst* inst)
         intrinsic_name == llvm_ptr_to_pair ||
         intrinsic_name == llvm_pair_to_ptr ||
         intrinsic_name == llvm_fma ||
+        intrinsic_name == llvm_canonicalize ||
         GII_id == GenISAIntrinsic::GenISA_uitof_rtz ||
         GII_id == GenISAIntrinsic::GenISA_ftobf ||
         GII_id == GenISAIntrinsic::GenISA_bftof ||
@@ -1328,6 +1331,7 @@ WIAnalysis::WIDependancy WIAnalysisRunner::calculate_dep(const CallInst* inst)
         GII_id == GenISAIntrinsic::GenISA_dual_subslice_id ||
         GII_id == GenISAIntrinsic::GenISA_eu_id        ||
         GII_id == GenISAIntrinsic::GenISA_eu_thread_id ||
+        GII_id == GenISAIntrinsic::GenISA_movcr ||
         GII_id == GenISAIntrinsic::GenISA_hw_thread_id ||
         GII_id == GenISAIntrinsic::GenISA_hw_thread_id_alloca ||
         GII_id == GenISAIntrinsic::GenISA_StackAlloca ||
@@ -1605,7 +1609,7 @@ WIAnalysis::WIDependancy WIAnalysisRunner::calculate_dep(const CallInst* inst)
 
         // Iterate over all input dependencies. If all are uniform - propagate it.
         // otherwise - return RANDOM
-        unsigned numParams = inst->getNumArgOperands();
+        unsigned numParams = IGCLLVM::getNumArgOperands(inst);
         WIAnalysis::WIDependancy dep = WIAnalysis::UNIFORM_GLOBAL;
         for (unsigned i = 0; i < numParams; ++i)
         {

@@ -163,7 +163,7 @@ namespace IGC
     bool GetStatelessBufferInfo(llvm::Value* pointer, unsigned& bufIdOrGRFOffset, IGC::BufferType& bufferTy, llvm::Value*& bufferSrcPtr, bool& isDirectBuf);
     // try to evaluate the address if it is constant.
     bool EvalConstantAddress(llvm::Value* address, unsigned int& offset, const llvm::DataLayout* pDL, llvm::Value* ptrSrc = nullptr);
-    bool getConstantAddress(llvm::Instruction& I, ConstantAddress& cl, CodeGenContext* pContext, bool& directBuf, bool& statelessBuf, bool& bindlessBuf);
+    bool getConstantAddress(llvm::Instruction& I, ConstantAddress& cl, CodeGenContext* pContext, bool& directBuf, bool& statelessBuf, bool& bindlessBuf, unsigned int& TableOffset);
 
 
     bool isSampleLoadGather4InfoInstruction(const llvm::Instruction* inst);
@@ -177,6 +177,10 @@ namespace IGC
     bool isSubGroupIntrinsic(const llvm::Instruction* I);
     bool isSubGroupIntrinsicPVC(const llvm::Instruction* I);
     bool hasSubGroupIntrinsicPVC(llvm::Function& F);
+
+    bool isBarrierIntrinsic(const llvm::Instruction* I);
+
+    bool isUserFunctionCall(const llvm::Instruction* I);
 
     bool IsStatelessMemLoadIntrinsic(llvm::GenISAIntrinsic::ID id);
     bool IsStatelessMemStoreIntrinsic(llvm::GenISAIntrinsic::ID id);
@@ -197,6 +201,8 @@ namespace IGC
     BufferType DecodeAS4GFXResource(unsigned addrSpace, bool& directIdx, unsigned& bufId);
     BufferType DecodeBufferType(unsigned addrSpace);
     int getConstantBufferLoadOffset(llvm::LoadInst* ld);
+
+    unsigned getNumberOfExitBlocks(llvm::Function& function);
 
     bool isDummyBasicBlock(llvm::BasicBlock* BB);
 
@@ -229,10 +235,12 @@ namespace IGC
         return (pF == getIntelSymbolTableVoidProgram(pF->getParent()));
     }
 
-    inline bool ForceAlwaysInline()
+    int getFunctionControl(const CodeGenContext* pContext);
+
+    inline bool ForceAlwaysInline(const CodeGenContext* pContext)
     {
         // return true if FunctionControl is set to INLINE, and SelectiveFunctionControl does not force fcalls.
-        return IGC_GET_FLAG_VALUE(FunctionControl) == FLAG_FCALL_FORCE_INLINE &&
+        return getFunctionControl(pContext) == FLAG_FCALL_FORCE_INLINE &&
             (IGC_GET_FLAG_VALUE(SelectiveFunctionControl) == FLAG_FCALL_DEFAULT ||
                 IGC_GET_FLAG_VALUE(SelectiveFunctionControl) == FLAG_FCALL_FORCE_INLINE);
     }
@@ -528,4 +536,20 @@ namespace IGC
     std::pair<llvm::Value*, unsigned int> GetURBBaseAndOffset(llvm::Value* pUrbOffset);
 
     std::vector<std::pair<unsigned int, std::string>> GetPrintfStrings(llvm::Module &M);
+
+    template<typename Fn>
+    struct Defer
+    {
+        Defer(Fn F) : F(F) {}
+        ~Defer() {
+            if (Do) F();
+        }
+        void operator()() {
+            if (Do) F();
+            Do = false;
+        }
+    private:
+        bool Do = true;
+        Fn F;
+};
 } // namespace IGC

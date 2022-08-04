@@ -293,7 +293,10 @@ namespace IGC
         unsigned int eltId = 0;
         unsigned int size = 0;
     };
-
+    struct ConstantAddressDescriptorTable : ConstantAddress
+    {
+        unsigned int tableOffset = 0;
+    };
     bool operator < (const ConstantAddress &a, const ConstantAddress &b);
 
     //to hold metadata of every function
@@ -303,7 +306,6 @@ namespace IGC
         WorkGroupWalkOrderMD workGroupWalkOrder;
         std::vector<FuncArgMD> funcArgs;
         FunctionTypeMD functionType = KernelFunction;
-        std::map<ConstantAddress, uint32_t> inlineDynConstants;
         RayTraceShaderInfo rtInfo;
         ResourceAllocMD resAllocMD;
         std::vector<unsigned> maxByteOffsets;
@@ -408,6 +410,10 @@ namespace IGC
         bool allowDisableRematforCS                     = false;
 
         bool DisableIncSpillCostAllAddrTaken            = false;
+        bool DisableCPSOmaskWA                          = false;
+
+        bool DisableFastestGopt                         = false;
+        bool WaForceHalfPromotion                       = false;
     };
 
     enum class ThreadIDLayout
@@ -440,6 +446,9 @@ namespace IGC
         bool forceTileYWalk = false;
         // enable atomic branch optimization
         bool atomicBranch = false;
+        // resource index for hf packing (resourceRangeID, indexIntoRange)
+        std::vector<std::vector<unsigned int>> ResForHfPacking;
+
     };
 
 
@@ -530,7 +539,7 @@ namespace IGC
         std::vector<StatelessPushInfo> pushableAddresses;
 
         // Indices of RuntimeValues that can be used to compute surface state
-        // offsets for the bindless push.
+        // offsets for the bindless push along with the Descriptor Table Offset.
         std::vector<unsigned int> bindlessPushInfo;
 
         // Dynamic buffer offsets info.
@@ -587,6 +596,15 @@ namespace IGC
         unsigned int numReplicas = 0;
     };
 
+    struct SrvMapData
+    {
+        unsigned int resourceRangeID;
+        unsigned int indexIntoRange;
+        bool hfCandidate = false;
+        unsigned int runtimeValue;
+        unsigned int ptrAddressSpace;
+    };
+
     struct URBLayoutInfo
     {
         bool has64BVertexHeaderInput = false;
@@ -596,6 +614,7 @@ namespace IGC
 
     struct SPIRVCapabilities
     {
+
         bool globalVariableDecorationsINTEL = false;
     };
 
@@ -623,6 +642,7 @@ namespace IGC
         std::vector<PointerAddressRelocInfo> GlobalBufferAddressRelocInfo;
         std::vector<PointerAddressRelocInfo> ConstantBufferAddressRelocInfo;
         std::map<uint32_t, uint32_t> forceLscCacheList;
+        std::vector<SrvMapData> SrvMap;
         std::vector<uint32_t> RasterizerOrderedByteAddressBuffer;
         unsigned int MinNOSPushConstantSize = 0;
         llvm::MapVector<llvm::GlobalVariable*, int> inlineProgramScopeOffsets;
@@ -643,14 +663,13 @@ namespace IGC
 
         unsigned int privateMemoryPerWI = 0;
 
+        std::map<llvm::Function*, unsigned int> PrivateMemoryPerFG;
+
         SPIRVCapabilities capabilities;
 
         std::array<uint64_t, NUM_SHADER_RESOURCE_VIEW_SIZE> m_ShaderResourceViewMcsMask{};
         unsigned int computedDepthMode = 0; //Defaults to 0 meaning depth mode is off
         bool isHDCFastClearShader = false;
-        // set by LowerGPCallArg pass
-        bool hasNoLocalToGenericCast = false;
-        bool hasNoPrivateToGenericCast = false;
     };
     void serialize(const IGC::ModuleMetaData &moduleMD, llvm::Module* module);
     void deserialize(IGC::ModuleMetaData &deserializedMD, const llvm::Module* module);

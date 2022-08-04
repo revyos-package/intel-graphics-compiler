@@ -366,16 +366,21 @@ namespace IGC
                             // Patch constant output read
                             llvm::Value* attributeIndex = inst->getOperand(0);
 
-                            if (llvm::ConstantInt * constAttributeIndex = llvm::dyn_cast<llvm::ConstantInt>(attributeIndex))
+                            // Constant, so global offset is sufficient in urb read message
+                            // the payload constant header size in oword units
+                            const unsigned int tessellationFactorSizeIn16B = 2;
+                            const unsigned int patchConstantSpaceOffset = tessellationFactorSizeIn16B;
+
+                            if (llvm::ConstantInt* constAttributeIndex = llvm::dyn_cast<llvm::ConstantInt>(attributeIndex))
                             {
-                                // Constant, so global offset is sufficient in urb read message
+
                                 urbOffset = builder.getInt32(
-                                    int_cast<unsigned int>(constAttributeIndex->getZExtValue()) + vertexHeaderSize);
+                                    int_cast<unsigned int>(constAttributeIndex->getZExtValue()) + patchConstantSpaceOffset);
                             }
                             else
                             {
                                 // Runtime value, so per-slot offset is required in urb read message
-                                urbOffset = builder.CreateAdd(attributeIndex, builder.getInt32(vertexHeaderSize));
+                                urbOffset = builder.CreateAdd(attributeIndex, builder.getInt32(patchConstantSpaceOffset));
                             }
                         }
                         else
@@ -751,11 +756,12 @@ namespace IGC
 
         m_hsProps.m_ForcedDispatchMask = GetForcedDispatchMask(kernel);
 
-        pGlobal = module->getGlobalVariable("ShaderHasClipCullInput");
-        auto clipCullAsInput = (pGlobal == nullptr) ? false : true;
+        auto clipCullAsInput = false;
         IGC::CodeGenContext* ctx = getAnalysis<CodeGenContextWrapper>().getCodeGenContext();
-        if (ctx->getModuleMetaData()->URBInfo.has64BVertexHeaderInput) {
+        if (ctx->getModuleMetaData()->URBInfo.has64BVertexHeaderInput)
+        {
             // In case we have no linking information we need the URB header to have a fixed size
+            IGC_ASSERT(ctx->getModuleMetaData()->URBInfo.hasVertexHeader);
             clipCullAsInput = true;
         }
 

@@ -169,6 +169,16 @@ class Optimizer
     void removeEmptyBlocks() { fg.removeEmptyBlocks(); }
     void reassignBlockIDs() { fg.reassignBlockIDs(); }
     void evalAddrExp() { kernel.evalAddrExp(); }
+
+    void ACCSchedule()
+    {
+        kernel.fg.resetLocalDataFlowData();
+        kernel.fg.localDataFlowAnalysis();
+
+        preRA_ACC_Scheduler Sched(kernel, mem);
+        Sched.run();
+    }
+
     void preRA_Schedule()
     {
         if (kernel.useRegSharingHeuristics())
@@ -266,12 +276,18 @@ private:
     void replaceRetWithJmpi();
     void doNoMaskWA();
     void newDoNoMaskWA();
+    void prepareNoMaskWA();
+    void applyNoMaskWA();
     void applyFusedCallWA();
-    void setDMaskFusedCallWA();
+    void finishFusedCallWA_preSWSB();
     void finishFusedCallWA();
     void doNoMaskWA_postRA();
     void newDoNoMaskWA_postRA();
     bool NoMaskWAUseRAList() const { return true; }
+    bool allPostRANoMaskWA() const {
+        return (builder.getuint32Option(vISA_newTmpNoMaskWA) >= 2 ||
+            kernel.getInt32KernelAttr(Attributes::ATTR_Target) == VISA_CM);
+    }
     void insertFenceAtEntry();
     void expandMulPostSchedule();
     void expandMadwPostSchedule();
@@ -288,8 +304,13 @@ private:
         InstListType& insts, G4_INST* fcall, int64_t adjust_off);
     // a helper function to create the instructions to get ip from call's dst
     // This is a WA for platforms can't support ip register
-    // The give add_with_ip must be an add instruction with ip register as its src0
-    void replaceIPWithCall(InstListType& insts, G4_INST* add_with_ip);
+    // The inst_with_ip must be:
+    //    1. an add instruction with ip register as its src0.
+    //       its src0 will be replaced with call's dst. or
+    //    2. a mov instruction.
+    //       its dst is used. No change to the mov instruction.
+    // In both case, the dst of inst_with_ip is used to save IP.
+    void replaceIPWithCall(InstListType& insts, G4_INST* inst_with_ip);
 
     void insertDummyMad(G4_BB* bb, INST_LIST_ITER inst_it);
 
@@ -404,6 +425,7 @@ public:
         PI_zeroSomeARF,
         PI_addSWSBInfo,
         PI_expandMadwPostSchedule,
+        PI_ACCSchedule,
         PI_NUM_PASSES
     };
 
@@ -432,6 +454,26 @@ public:
     {
         numBankConflicts = 0;
         initOptimizations();
+    }
+    ~Optimizer()
+    {
+        // Normally, noMask Info will be freed in postRA workaround.
+        // But in case RA fails, postRA will not be invoked. Thus, need
+        // to free memory allocated in preRA_HWWorkaround() here as well.
+        if (builder.useNewNoMaskWA())
+        {
+            if (builder.hasFusedEUNoMaskWA())
+            {
+                if (allPostRANoMaskWA())
+                {
+                    kernel.deleteEUFusionNoMaskWAInfo();
+                }
+                else
+                {
+                    kernel.clearNoMaskInfo();
+                }
+            }
+        }
     }
     int optimization();
 

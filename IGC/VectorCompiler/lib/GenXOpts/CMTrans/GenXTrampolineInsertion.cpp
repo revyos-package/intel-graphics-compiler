@@ -99,9 +99,13 @@ public:
 void GenXTrampolineInsertion::visitFunction(Function &F) {
   if (GenXIntrinsic::isAnyNonTrivialIntrinsic(&F))
     return;
+  if (vc::InternalIntrinsic::isInternalNonTrivialIntrinsic(&F))
+    return;
   if (vc::isEmulationFunction(F))
     return;
   if (vc::isKernel(&F))
+    return;
+  if (vc::isCMCallable(F))
     return;
 
   if (!F.hasLocalLinkage()) {

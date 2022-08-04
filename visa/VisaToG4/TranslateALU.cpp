@@ -109,7 +109,7 @@ int IR_Builder::translateVISAArithmeticInst(
         }
 
         // do not check type of sources, float and integer are supported
-        createInst(
+        auto inst = createInst(
             predOpnd,
             GetGenOpcodeFromVISAOpcode(opcode),
             condMod,
@@ -121,6 +121,19 @@ int IR_Builder::translateVISAArithmeticInst(
             src2Opnd,
             instOpt,
             true);
+
+        if (opcode == ISA_MADW)
+        {
+            G4_DstRegRegion* accDstOpnd = createDst(
+                phyregpool.getAcc0Reg(),
+                0,
+                0,
+                1,
+                dstOpnd->getType());
+
+            inst->setImplAccDst(accDstOpnd);
+            inst->setOptionOn(InstOpt_AccWrCtrl); // to be consistent with impl Acc.
+        }
     }
     else
     {
@@ -263,7 +276,7 @@ int IR_Builder::translateVISACompareInst(
     G4_CondMod* condMod = NULL;
     G4_ExecSize exsize = toExecSize(execsize);
     G4_InstOpts inst_opt = Get_Gen4_Emask(emask, exsize);
-    const char *varName = "PTemp";
+    const char* varName = getNameString(mem, 50, "PTemp_%d", kernel.Declares.size());
 
     uint8_t numWords = (exsize + 15)/16;
     if (needs32BitFlag(inst_opt))
@@ -278,7 +291,6 @@ int IR_Builder::translateVISACompareInst(
         numWords,
         1,
         Type_UW);
-    dcl->setNumberFlagElements(exsize);
 
     condMod = createCondMod(
         Get_G4_CondModifier_From_Common_ISA_CondModifier(relOp),

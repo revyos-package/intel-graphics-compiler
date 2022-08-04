@@ -1,6 +1,6 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (C) 2017-2021 Intel Corporation
+Copyright (C) 2017-2022 Intel Corporation
 
 SPDX-License-Identifier: MIT
 
@@ -46,6 +46,79 @@ SPDX-License-Identifier: MIT
 
 using namespace vISA;
 
+//
+// Helper class for processGoto to merge join's execution masks.
+// For example,
+//    (p1) goto (8|M8) label
+//         ....
+//    (p2) goto (4|M4) label
+//         ....
+//    label:
+//         join (16|M0)
+// Merge( (8|M8) and (4|M4)) will be (16|M0)!
+//
+// Normally, we don't see this kind of code. But visa will generate macro sequence
+// like the following, and we have to match join's execMask to all of its gotos. We
+// do so by tracking excution mask (execSize + mask offset).
+//
+//        (p) goto (8|M8) L
+//        ......
+//        L:
+//            join (8|M8)            // not join (8|M0)
+//
+class ExecMaskInfo
+{
+    uint8_t ExecSize;    // 1|2|4|8|16|32
+    uint8_t MaskOffset;  // 0|4|8|12|16|20|24|28
+
+    void mergeEM(ExecMaskInfo& aEM)
+    {
+        // The new execMask should cover at least [left, right)
+        const uint32_t left = std::min(MaskOffset, aEM.getMaskOffset());
+        const uint32_t right = std::max(MaskOffset + ExecSize, aEM.getMaskOffset() + aEM.getExecSize());
+        // Divide 32 channels into 8 quarters
+        uint32_t lowQuarter = left / 4;
+        uint32_t highQuarter = (right - 1) / 4;
+        if (lowQuarter < 4 && highQuarter >= 4)
+        {
+            // (32, M0)
+            ExecSize = 32;
+            MaskOffset = 0;
+        }
+        else if (lowQuarter < 2 && highQuarter >= 2)
+        {
+            // (16, M0|M16)
+            ExecSize = 16;
+            MaskOffset = 0;
+        }
+        else if (lowQuarter < 6 && highQuarter >= 6)
+        {
+            // (16, M16)
+            ExecSize = 16;
+            MaskOffset = 16;
+        }
+        // at this time, the range resides in one of [Q0,Q1], [Q2,Q3], [Q4,Q5], and [Q6,Q7].
+        else
+        {
+            // (4|8, ...)
+            ExecSize = (lowQuarter != highQuarter ? 8 : 4);
+            MaskOffset = left;
+        }
+    }
+
+public:
+    ExecMaskInfo() : ExecSize(0), MaskOffset(0) {};
+    ExecMaskInfo(uint8_t aE, uint8_t aM) : ExecSize(aE), MaskOffset(aM) {}
+
+    uint8_t getExecSize() const { return ExecSize; }
+    uint8_t getMaskOffset() const { return MaskOffset; }
+
+    void mergeExecMask(G4_ExecSize aExSize, uint8_t aMaskOffset)
+    {
+        ExecMaskInfo anotherEM{ aExSize, aMaskOffset };
+        mergeEM(anotherEM);
+    }
+};
 
 void GlobalOpndHashTable::HashNode::insert(uint16_t newLB, uint16_t newRB)
 {
@@ -289,9 +362,7 @@ G4_BB* FlowGraph::beginBB(Label_BB_Map& map, G4_INST* first)
     else
     {
         // no label for this BB, create one!
-        std::string prefix = builder->kernel.getName();
-        std::string name = prefix + "_auto_" + std::to_string(autoLabelId++);
-        G4_Label* label = builder->createLabel(name, LABEL_BLOCK);
+        G4_Label* label = builder->createLocalBlockLabel();
         labelInst = createNewLabelInst(label);
         newLabelInst = true;
     }
@@ -347,11 +418,12 @@ G4_BB* FlowGraph::createNewBB(bool insertInFG)
     return bb;
 }
 
-G4_BB* FlowGraph::createNewBBWithLabel(const char* LabelPrefix, int Lineno, int CISAoff)
+G4_BB* FlowGraph::createNewBBWithLabel(const char* LabelSuffix, int Lineno, int CISAoff)
 {
     G4_BB* newBB = createNewBB(true);
-    std::string name = LabelPrefix + std::to_string(newBB->getId());
-    G4_Label* lbl = builder->createLabel(name, LABEL_BLOCK);
+    G4_Label* lbl = LabelSuffix != nullptr
+        ? builder->createLocalBlockLabel(LabelSuffix)
+        : builder->createLocalBlockLabel();
     G4_INST* inst = createNewLabelInst(lbl, Lineno, CISAoff);
     newBB->push_back(inst);
     return newBB;
@@ -423,9 +495,7 @@ bool FlowGraph::matchBranch(int &sn, INST_LIST& instlist, INST_LIST_ITER &it)
         assert(inst->asCFInst()->getJip() == nullptr && "IF should not have a label at this point");
 
         // create if_label
-        std::string createdLabel = "_AUTO_GENERATED_IF_LABEL_" + std::to_string(sn);
-        sn++;
-        if_label = builder->createLabel(createdLabel, LABEL_BLOCK);
+        if_label = builder->createLocalBlockLabel("if");
         inst->asCFInst()->setJip(if_label);
 
         // look for else/endif
@@ -452,9 +522,7 @@ bool FlowGraph::matchBranch(int &sn, INST_LIST& instlist, INST_LIST_ITER &it)
                 it1++;
 
                 // add endif label to "else"
-                std::string createdLabel = "__AUTO_GENERATED_ELSE_LABEL__" + std::to_string(sn);
-                sn++;
-                else_label = builder->createLabel(createdLabel, LABEL_BLOCK);
+                else_label = builder->createLocalBlockLabel("else");
                 inst->asCFInst()->setJip(else_label);
 
                 // insert if-else label
@@ -631,8 +699,7 @@ void FlowGraph::normalizeFlowGraph()
                 addPredSuccEdges(newNode, retBB);
 
                 // Create and insert label inst
-                std::string name = "L_AUTO_" + std::to_string(newNode->getId());
-                G4_Label* lbl = builder->createLabel(name, LABEL_BLOCK);
+                G4_Label* lbl = builder->createLocalBlockLabel();
                 G4_INST* inst = createNewLabelInst(lbl, lInst->getLineNo(), lInst->getCISAOff());
                 newNode->push_back(inst);
                 insert(++it, newNode);
@@ -1152,7 +1219,7 @@ void FlowGraph::handleExit(G4_BB* firstSubroutineBB)
                 }
                 else
                 {
-                    //generate EOT send
+                    // generate EOT send
                     G4_INST* lastInst = bb->back();
                     bb->pop_back();
                     bool needsEOTSend = true;
@@ -1165,15 +1232,16 @@ void FlowGraph::handleExit(G4_BB* firstSubroutineBB)
                             !(secondToLastInst->getMsgDesc()->getSrc1LenRegs() > 2 &&
                                 VISA_WA_CHECK(builder->getPWaTable(), WaSendsSrc1SizeLimitWhenEOT)))
                         {
-                            G4_SendDescRaw *rawDesc = secondToLastInst->getMsgDescRaw();
-                            MUST_BE_TRUE(rawDesc, "expected raw descriptor");
-                            rawDesc->setEOT();
-                            if (secondToLastInst->isSplitSend())
+                            G4_SendDesc *desc = secondToLastInst->getMsgDesc();
+                            desc->setEOT();
+                            if (secondToLastInst->isSplitSend() && secondToLastInst->getMsgDescRaw())
                             {
-                                if (secondToLastInst->getSrc(3)->isImm())
+                                bool mustUpdateExDescOperand = true;
+                                if (mustUpdateExDescOperand && secondToLastInst->getSrc(3)->isImm())
                                 {
                                     secondToLastInst->setSrc(
-                                        builder->createImm(rawDesc->getExtendedDesc(), Type_UD), 3);
+                                        builder->createImm(
+                                          secondToLastInst->getMsgDescRaw()->getExtendedDesc(), Type_UD), 3);
                                 }
                             }
                             needsEOTSend = false;
@@ -1215,15 +1283,14 @@ void FlowGraph::handleExit(G4_BB* firstSubroutineBB)
             insert(iter, exitBB);
         }
 
-        std::string exitBBStr("__EXIT_BB");
-        G4_Label *exitLabel = builder->createLabel(exitBBStr, LABEL_BLOCK);
+        G4_Label *exitLabel = builder->createLocalBlockLabel("EXIT_BB");
         G4_INST* label = createNewLabelInst(exitLabel);
         exitBB->push_back(label);
 
         if (!(builder->getFCPatchInfo() &&
             builder->getFCPatchInfo()->getFCComposableKernel()))
         {
-            // Dont insert EOT send for FC composable kernels
+            // Don't insert EOT send for FC composable kernels
             exitBB->addEOTSend();
         }
 
@@ -1244,7 +1311,7 @@ void FlowGraph::handleExit(G4_BB* firstSubroutineBB)
                 if ((*lastBBIt) == retBB)
                 {
                     // This condition is BB layout dependent.
-                    // However, we dont change BB layout in JIT
+                    // However, we don't change BB layout in JIT
                     // and in case we do it in future, we
                     // will need to insert correct jumps
                     // there to preserve correctness.
@@ -1320,7 +1387,7 @@ void FlowGraph::handleReturn(Label_BB_Map& labelMap, FuncInfoHashTable& funcInfo
                     // return edge has not been added yet.
                     G4_INST* I0 = retAddr->getFirstInst();
                     if (I0 == nullptr) I0 = last;
-                    G4_BB* newRetBB = createNewBBWithLabel("Label_return_BB", I0->getLineNo(), I0->getCISAOff());
+                    G4_BB* newRetBB = createNewBBWithLabel("Return_BB", I0->getLineNo(), I0->getCISAOff());
                     bb->removeSuccEdge(retAddr);
                     retAddr->removePredEdge(bb);
                     addPredSuccEdges(bb, newRetBB, true);
@@ -1478,8 +1545,7 @@ G4_BB* FlowGraph::mergeSubRoutineReturn(G4_Label* subroutineLabel)
         //
         // Create a label for the newBB and insert return to new BB
         //
-        std::string str = "LABEL__" + std::to_string(newBB->getId());
-        G4_Label* lab = builder->createLabel(str, LABEL_BLOCK);
+        G4_Label* lab = builder->createLocalBlockLabel();
         G4_INST* labelInst = createNewLabelInst(lab);
 
         // exitBB is really just a dummy one for analysis, and does not need a return
@@ -1566,8 +1632,7 @@ void FlowGraph::decoupleInitBlock(G4_BB* bb, FuncInfoHashTable& funcInfoHashTabl
     newInitBB->setBBType(G4_BB_INIT_TYPE);
     addPredSuccEdges(newInitBB, oldInitBB);
 
-    std::string blockName = "LABEL__EMPTYBB__" + std::to_string(newInitBB->getId());
-    G4_Label* label = builder->createLabel(blockName, LABEL_BLOCK);
+    G4_Label* label = builder->createLocalBlockLabel("LABEL__EMPTYBB");
     G4_INST* labelInst = createNewLabelInst(label);
     newInitBB->push_back(labelInst);
 }
@@ -1591,8 +1656,7 @@ void FlowGraph::decoupleReturnBlock(G4_BB* bb)
     oldRetBB->unsetBBType(G4_BB_RETURN_TYPE);
     newRetBB->setBBType(G4_BB_RETURN_TYPE);
 
-    std::string str = "LABEL__EMPTYBB__" + std::to_string(newRetBB->getId());
-    G4_Label* label = builder->createLabel(str, LABEL_BLOCK);
+    G4_Label* label = builder->createLocalBlockLabel("LABEL__EMPTYBB");
     G4_INST* labelInst = createNewLabelInst(label);
     newRetBB->push_back(labelInst);
 }
@@ -1920,8 +1984,8 @@ void FlowGraph::removeRedundantLabels()
         {
             G4_INST* removedBlockInst = bb->front();
             if (removedBlockInst->getLabel()->isFuncLabel() ||
-                strncmp(removedBlockInst->getLabelStr(), "LABEL__EMPTYBB", 14) == 0 ||
-                strncmp(removedBlockInst->getLabelStr(), "__AUTO_GENERATED_DUMMY_LAST_BB", 30) == 0)
+                isLocalLabelEndsWith(removedBlockInst->getLabelStr(), "LABEL__EMPTYBB") ||
+                isLocalLabelEndsWith(removedBlockInst->getLabelStr(), "DUMMY_LAST_BB"))
             {
                 continue;
             }
@@ -2228,15 +2292,14 @@ void FlowGraph::removeEmptyBlocks()
 
             //
             // The removal candidates will have a unique successor and a single label
-            // starting with LABEL__EMPTYBB as the only instruction besides a JMP.
+            // ending with LABEL__EMPTYBB as the only instruction besides a JMP.
             //
             if (bb->size() > 0 && bb->size() < 3)
             {
                 INST_LIST::iterator removedBlockInst = bb->begin();
 
                 if ((*removedBlockInst)->isLabel() == false ||
-                    strncmp((*removedBlockInst)->getLabelStr(),
-                        "LABEL__EMPTYBB", 14) != 0)
+                    !isLocalLabelEndsWith((*removedBlockInst)->getLabelStr(), "LABEL__EMPTYBB"))
                 {
                     ++it;
                     continue;
@@ -2347,8 +2410,7 @@ void FlowGraph::mergeFReturns()
         {
             G4_BB* newExit = createNewBB();
             assert(!builder->getIsKernel() && "Not expecting fret in kernel");
-            std::string str = "__MERGED_FRET_EXIT_BLOCK";
-            dumLabel = builder->createLabel(str, LABEL_BLOCK);
+            dumLabel = builder->createLocalBlockLabel("MERGED_FRET_EXIT_BB");
             G4_INST* label = createNewLabelInst(dumLabel);
             newExit->push_back(label);
             G4_INST* fret = builder->createInternalCFInst(
@@ -2416,8 +2478,7 @@ void FlowGraph::linkDummyBB()
     {
         G4_BB *dumBB = createNewBB();
         MUST_BE_TRUE(dumBB != NULL, ERROR_FLOWGRAPH);
-        std::string str("__AUTO_GENERATED_DUMMY_LAST_BB");
-        G4_Label *dumLabel = builder->createLabel(str, LABEL_BLOCK);
+        G4_Label* dumLabel = builder->createLocalBlockLabel("DUMMY_LAST_BB");
         G4_INST* label = createNewLabelInst(dumLabel);
         dumBB->push_back(label);
         BBs.push_back(dumBB);
@@ -3051,9 +3112,10 @@ G4_BB* FlowGraph::getUniqueReturnBlock()
 
 /*
 * Insert a join at the beginning of this basic block, immediately after the label
-* If a join is already present, nothing will be done
+* If a join is already present, make sure the join will cover the given 'execSize' and
+* 'maskOffset'.
 */
-void FlowGraph::insertJoinToBB(G4_BB* bb, G4_ExecSize execSize, G4_Label* jip)
+void FlowGraph::insertJoinToBB(G4_BB* bb, G4_ExecSize execSize, G4_Label* jip, uint8_t maskOffset)
 {
     MUST_BE_TRUE(bb->size() > 0, "empty block");
     INST_LIST_ITER iter = bb->begin();
@@ -3067,7 +3129,8 @@ void FlowGraph::insertJoinToBB(G4_BB* bb, G4_ExecSize execSize, G4_Label* jip)
     if (iter == bb->end())
     {
         // insert join at the end
-        G4_INST* jInst = builder->createInternalCFInst(NULL, G4_join, execSize, jip, NULL, InstOpt_NoOpt);
+        G4_InstOption instMask = G4_INST::offsetToMask(execSize, maskOffset, builder->hasNibCtrl());
+        G4_INST* jInst = builder->createInternalCFInst(NULL, G4_join, execSize, jip, NULL, instMask);
         bb->push_back(jInst, false);
     }
     else
@@ -3076,22 +3139,34 @@ void FlowGraph::insertJoinToBB(G4_BB* bb, G4_ExecSize execSize, G4_Label* jip)
 
         if (secondInst->opcode() == G4_join)
         {
-            if (execSize > secondInst->getExecSize())
+            G4_ExecSize origExSize = secondInst->getExecSize();
+            uint8_t origMaskOffset = (uint8_t)secondInst->getMaskOffset();
+            ExecMaskInfo joinEM{ origExSize, origMaskOffset };
+            joinEM.mergeExecMask(execSize, maskOffset);
+            if (joinEM.getExecSize() > origExSize)
             {
-                secondInst->setExecSize(execSize);
+                secondInst->setExecSize(G4_ExecSize{ joinEM.getExecSize() });
+            }
+            if (joinEM.getMaskOffset() != origMaskOffset)
+            {
+                G4_InstOption nMask =
+                    G4_INST::offsetToMask(joinEM.getExecSize(), joinEM.getMaskOffset(), builder->hasNibCtrl());
+                secondInst->setMaskOption(nMask);
             }
         }
         else
         {
-            G4_INST* jInst = builder->createInternalCFInst(NULL, G4_join, execSize, jip, NULL, InstOpt_NoOpt);
+            G4_InstOption instMask = G4_INST::offsetToMask(execSize, maskOffset, builder->hasNibCtrl());
+            G4_INST* jInst = builder->createInternalCFInst(NULL, G4_join, execSize, jip, NULL, instMask);
             bb->insertBefore(iter, jInst, false);
         }
     }
 }
 
-typedef std::pair<G4_BB*, G4_ExecSize> BlockSizePair;
+// For tracking execMask information of join.
+typedef std::pair<G4_BB*, ExecMaskInfo> BlockSizePair;
 
-static void addBBToActiveJoinList(std::list<BlockSizePair>& activeJoinBlocks, G4_BB* bb, G4_ExecSize execSize)
+static void addBBToActiveJoinList(std::list<BlockSizePair>& activeJoinBlocks, G4_BB* bb, G4_ExecSize execSize, uint8_t maskOff)
 {
     // add goto target to list of active blocks that need a join
     std::list<BlockSizePair>::iterator listIter;
@@ -3101,22 +3176,20 @@ static void addBBToActiveJoinList(std::list<BlockSizePair>& activeJoinBlocks, G4
         if (aBB->getId() == bb->getId())
         {
             // block already in list, update exec size if necessary
-            if (execSize > (*listIter).second)
-            {
-                (*listIter).second = execSize;
-            }
+            ExecMaskInfo& EM = (*listIter).second;
+            EM.mergeExecMask(execSize, maskOff);
             break;
         }
         else if (aBB->getId() > bb->getId())
         {
-            activeJoinBlocks.insert(listIter, BlockSizePair(bb, execSize));
+            (void) activeJoinBlocks.insert(listIter, BlockSizePair(bb, ExecMaskInfo(execSize, maskOff)));
             break;
         }
     }
 
     if (listIter == activeJoinBlocks.end())
     {
-        activeJoinBlocks.push_back(BlockSizePair(bb, execSize));
+        activeJoinBlocks.push_back(BlockSizePair(bb, ExecMaskInfo(execSize, maskOff)));
     }
 }
 
@@ -3157,8 +3230,7 @@ G4_Label* FlowGraph::insertEndif(G4_BB* bb, G4_ExecSize execSize, bool createLab
     // endifs a new label will be created for each of them.
     if (createLabel)
     {
-        std::string name = "_auto" + std::to_string(autoLabelId++);
-        G4_Label* label = builder->createLabel(name, LABEL_BLOCK);
+        G4_Label* label = builder->createLocalBlockLabel();
         endifWithLabels.emplace(endifInst, label);
         return label;
     }
@@ -3210,8 +3282,7 @@ void FlowGraph::setJIPForEndif(G4_INST* endif, G4_INST* target, G4_BB* targetBB)
 
         if (label == NULL)
         {
-            std::string name = "_auto" + std::to_string(autoLabelId++);
-            label = builder->createLabel(name, LABEL_BLOCK);
+            label = builder->createLocalBlockLabel();
             endifWithLabels.emplace(target, label);
         }
     }
@@ -3249,6 +3320,9 @@ void FlowGraph::convertGotoToJmpi(G4_INST *gotoInst)
 */
 void FlowGraph::processGoto(bool HasSIMDCF)
 {
+    // For a given loop (StartBB, EndBB) (EndBB->StartBB is a backedge), this function
+    // return a BB in which an out-of-loop join will be inserted.
+    //
     // For all BBs in [StartBB, EndBB) (including StartBB, but not including EndBB) that
     // jump after EndBB (forward jump), return the earliest (closest to EndBB). If no such
     // BB, return nullptr.
@@ -3258,7 +3332,7 @@ void FlowGraph::processGoto(bool HasSIMDCF)
         const G4_BB* StartBB,
         const G4_BB* EndBB) -> G4_BB*
     {
-        // Existing active joins must be considered. For example,
+        // Existing active joins (passed in as "activeJoins") must be considered. For example,
         //    goto L0  (non-uniform)
         //    ...
         //  Loop:
@@ -3271,9 +3345,40 @@ void FlowGraph::processGoto(bool HasSIMDCF)
         //     ...
         //  L1:
         // Since 'goto L0' is non-uniform, 'goto L1' must be tranlated into goto and a join must
-        // be inserted at L1.  If goto L0 is not considered (no active join at L0) and 'goto L1' can
-        // be converted into jmpi (thus no join will be inserted at L1, which is wrong.
-        std::list<BlockSizePair> tmpActiveJoins(activeJoins);
+        // be inserted at L1.  This "goto L0" is outside of the loop (outside of [StartBB, EndBB)).
+        // If it is not considered, this function thinks there is no active joins at L0 and 'goto L1'
+        // would be converted into jmpi incorrectly.
+
+        // list of BB that will have a join at the begin of each BB.
+        // The list is in the order of the increasing BB id.
+        std::list<G4_BB*> tmpActiveJoins;
+        // initialize tmpActiveJoins with activeJoins
+        for (auto II = activeJoins.begin(), IE = activeJoins.end(); II != IE; ++II)
+        {
+            tmpActiveJoins.push_back(II->first);
+        }
+
+        auto orderedInsert = [](std::list<G4_BB*>& tmpActiveJoins, G4_BB* aBB)
+        {
+            auto II = tmpActiveJoins.begin(), IE = tmpActiveJoins.end();
+            for (; II != IE; ++II)
+            {
+                G4_BB* bb = *II;
+                if (bb->getId() == aBB->getId())
+                {
+                    break;
+                }
+                else if (bb->getId() > aBB->getId())
+                {
+                    tmpActiveJoins.insert(II, aBB);
+                    break;
+                }
+            }
+            if (II == IE)
+            {
+                tmpActiveJoins.push_back(aBB);
+            }
+        };
 
         const G4_BB* bb = StartBB;
         while (bb != EndBB)
@@ -3282,7 +3387,7 @@ void FlowGraph::processGoto(bool HasSIMDCF)
             if (!tmpActiveJoins.empty())
             {
                 // adjust active join lists if a join is reached.
-                if (bb == tmpActiveJoins.front().first)
+                if (bb == tmpActiveJoins.front())
                 {
                     tmpActiveJoins.pop_front();
                 }
@@ -3302,7 +3407,7 @@ void FlowGraph::processGoto(bool HasSIMDCF)
             G4_BB* targetBB = currBB->Succs.back();
             assert(lastInst->asCFInst()->getUip() == targetBB->getLabel());
             if (lastInst->asCFInst()->isUniform() &&
-                (tmpActiveJoins.empty() || tmpActiveJoins.front().first->getId() >= targetBB->getId()))
+                (tmpActiveJoins.empty() || tmpActiveJoins.front()->getId() >= targetBB->getId()))
             {
                 // Non-crossing uniform goto will be jmpi, and thus no join needed.
                 //
@@ -3319,12 +3424,11 @@ void FlowGraph::processGoto(bool HasSIMDCF)
                 //  it must be translated to goto, not jmpi.  Thus, join is needed at L1.
                 continue;
             }
-            // Here, use SIMD1 as execsize does not matter here.
-            addBBToActiveJoinList(tmpActiveJoins, targetBB, g4::SIMD1);
+            orderedInsert(tmpActiveJoins, targetBB);
         }
 
         // Need to remove join at EndBB if present (looking for joins after EndBB)
-        if (!tmpActiveJoins.empty() && tmpActiveJoins.front().first == EndBB)
+        if (!tmpActiveJoins.empty() && tmpActiveJoins.front() == EndBB)
         {
             tmpActiveJoins.pop_front();
         }
@@ -3334,7 +3438,7 @@ void FlowGraph::processGoto(bool HasSIMDCF)
             // no new join
             return nullptr;
         }
-        return tmpActiveJoins.front().first;
+        return tmpActiveJoins.front();
     };
 
     // list of active blocks where a join needs to be inserted, sorted in lexical order
@@ -3354,7 +3458,9 @@ void FlowGraph::processGoto(bool HasSIMDCF)
             {
                 // This block is the target of one or more forward goto,
                 // or the fall-thru of a backward goto, needs to insert a join
-                G4_ExecSize execSize = activeJoinBlocks.front().second;
+                ExecMaskInfo& EM = activeJoinBlocks.front().second;
+                uint8_t eSize = EM.getExecSize();
+                uint8_t mOff = EM.getMaskOffset();
                 G4_Label* joinJIP = NULL;
 
                 activeJoinBlocks.pop_front();
@@ -3365,7 +3471,7 @@ void FlowGraph::processGoto(bool HasSIMDCF)
                     joinJIP = joinBlock->getLabel();
                 }
 
-                insertJoinToBB(bb, execSize, joinJIP);
+                insertJoinToBB(bb, G4_ExecSize{eSize}, joinJIP, mOff);
             }
         }
 
@@ -3406,7 +3512,8 @@ void FlowGraph::processGoto(bool HasSIMDCF)
                     // join) within the loop body will has its JIP set to this join.
                     if (G4_BB* afterLoopJoinBB = getEarliestJmpOutBB(activeJoinBlocks, bb, predBB))
                     {
-                        addBBToActiveJoinList(activeJoinBlocks, afterLoopJoinBB, eSize);
+                        // conservatively use maskoffset = 0.
+                        addBBToActiveJoinList(activeJoinBlocks, afterLoopJoinBB, eSize, 0);
                     }
                 }
                 else
@@ -3420,7 +3527,7 @@ void FlowGraph::processGoto(bool HasSIMDCF)
                     // add join to the fall-thru BB
                     if (G4_BB* fallThruBB = predBB->getPhysicalSucc())
                     {
-                        addBBToActiveJoinList(activeJoinBlocks, fallThruBB, eSize);
+                        addBBToActiveJoinList(activeJoinBlocks, fallThruBB, eSize, (uint8_t)lastInst->getMaskOffset());
                         lastInst->asCFInst()->setJip(fallThruBB->getLabel());
                     }
                 }
@@ -3447,7 +3554,7 @@ void FlowGraph::processGoto(bool HasSIMDCF)
                 // set goto JIP to the first active block
                 G4_ExecSize eSize = lastInst->getExecSize() > g4::SIMD1 ?
                     lastInst->getExecSize() : pKernel->getSimdSize();
-                addBBToActiveJoinList(activeJoinBlocks, gotoTargetBB, eSize);
+                addBBToActiveJoinList(activeJoinBlocks, gotoTargetBB, eSize, (uint8_t)lastInst->getMaskOffset());
                 G4_BB* joinBlock = activeJoinBlocks.front().first;
                 if (lastInst->getExecSize() == g4::SIMD1)
                 {   // For simd1 goto, convert it to a goto with the right execSize.

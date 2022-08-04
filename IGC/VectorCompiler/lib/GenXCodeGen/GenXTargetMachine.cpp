@@ -48,6 +48,7 @@ SPDX-License-Identifier: MIT
 #include "llvm/Analysis/Passes.h"
 #include "llvm/Analysis/TargetTransformInfo.h"
 #include "llvm/CodeGen/Passes.h"
+#include "llvm/CodeGen/TargetLoweringObjectFileImpl.h"
 #include "llvm/CodeGen/TargetPassConfig.h"
 #include "llvm/IR/LegacyPassManager.h"
 #include "llvm/IR/Verifier.h"
@@ -55,7 +56,7 @@ SPDX-License-Identifier: MIT
 #include "llvm/Pass.h"
 #include "llvm/PassRegistry.h"
 #include "llvm/Support/CommandLine.h"
-#include "llvm/Support/TargetRegistry.h"
+#include "llvmWrapper/Support/TargetRegistry.h"
 #include "llvm/Transforms/IPO.h"
 #include "llvm/Transforms/IPO/AlwaysInliner.h"
 #include "llvm/Transforms/IPO/PassManagerBuilder.h"
@@ -145,6 +146,7 @@ void initializeGenXPasses(PassRegistry &registry) {
   initializeGenXStackUsagePass(registry);
   initializeGenXOCLRuntimeInfoPass(registry);
   initializeGenXStructSplitterPass(registry);
+  initializeGenXCloneIndirectFunctionsPass(registry);
   initializeGenXTrampolineInsertionPass(registry);
   initializeGenXPredRegionLoweringPass(registry);
   initializeGenXLinkageCorruptorPass(registry);
@@ -193,6 +195,13 @@ public:
 
 } // namespace
 
+static std::unique_ptr<TargetLoweringObjectFile> createTLOF(const Triple &TT) {
+  if (TT.isOSWindows())
+    return std::make_unique<TargetLoweringObjectFileCOFF>();
+  else
+    return std::make_unique<TargetLoweringObjectFileELF>();
+}
+
 GenXTargetMachine::GenXTargetMachine(const Target &T, const Triple &TT,
                                      StringRef CPU, StringRef FS,
                                      const TargetOptions &Options,
@@ -204,7 +213,8 @@ GenXTargetMachine::GenXTargetMachine(const Target &T, const Triple &TT,
                                  RM ? RM.getValue() : Reloc::Model::Static,
                                  CM ? CM.getValue() : CodeModel::Model::Small,
                                  OL),
-      BC(std::move(BC)), Is64Bit(Is64Bit), Subtarget(TT, CPU.str(), FS.str()) {}
+      TLOF(createTLOF(getTargetTriple())), BC(std::move(BC)), Is64Bit(Is64Bit),
+      Subtarget(TT, CPU.str(), FS.str()) {}
 
 GenXTargetMachine::~GenXTargetMachine() = default;
 
@@ -609,6 +619,7 @@ void GenXTargetMachine::adjustPassManager(PassManagerBuilder &PMBuilder) {
     PM.add(createCFGSimplificationPass());
     PM.add(createInstructionCombiningPass());
     PM.add(createDeadCodeEliminationPass());
+    // PM.add(createGlobalDCEPass());
   };
   PMBuilder.addExtension(PassManagerBuilder::EP_ModuleOptimizerEarly,
                          AddPacketize);
@@ -655,16 +666,16 @@ void GenXTargetMachine::adjustPassManager(PassManagerBuilder &PMBuilder) {
                            AddLowerLoadStore);
   }
 
-  // Trampoline insertion.
   if (Subtarget.isOCLRuntime()) {
-    auto AddTrampolineInsertion = [](const PassManagerBuilder &Builder,
-                                     PassManagerBase &PM) {
+    auto AddIndirect = [](const PassManagerBuilder &Builder,
+                          PassManagerBase &PM) {
+      PM.add(createGenXCloneIndirectFunctionsPass());
       PM.add(createGenXTrampolineInsertionPass());
     };
     PMBuilder.addExtension(PassManagerBuilder::EP_ModuleOptimizerEarly,
-                           AddTrampolineInsertion);
+                           AddIndirect);
     PMBuilder.addExtension(PassManagerBuilder::EP_EnabledOnOptLevel0,
-                           AddTrampolineInsertion);
+                           AddIndirect);
   }
 
   // Have to internalize functions before CM implicit parameters as all
@@ -684,7 +695,8 @@ void GenXTargetMachine::adjustPassManager(PassManagerBuilder &PMBuilder) {
   // CM implicit parameters.
   auto AddCMImpParam = [this](const PassManagerBuilder &Builder,
                               PassManagerBase &PM) {
-    PM.add(createCMImpParamPass(!Subtarget.isOCLRuntime()));
+    PM.add(createCMImpParamPass(!Subtarget.isOCLRuntime(),
+                                Subtarget.hasThreadPayloadInMemory()));
   };
   PMBuilder.addExtension(PassManagerBuilder::EP_ModuleOptimizerEarly,
                          AddCMImpParam);

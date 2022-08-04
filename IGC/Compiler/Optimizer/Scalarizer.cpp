@@ -9,6 +9,7 @@ SPDX-License-Identifier: MIT
 #include "Compiler/Optimizer/Scalarizer.h"
 #include "Compiler/IGCPassSupport.h"
 #include "GenISAIntrinsics/GenIntrinsicInst.h"
+#include "Compiler/CodeGenContextWrapper.hpp"
 #include "Compiler/CISACodeGen/helper.h"
 #include "common/LLVMWarningsPush.hpp"
 #include "llvmWrapper/IR/DerivedTypes.h"
@@ -50,6 +51,7 @@ namespace VectorizerUtils {
 #define PASS_CFG_ONLY false
 #define PASS_ANALYSIS false
 IGC_INITIALIZE_PASS_BEGIN(ScalarizeFunction, PASS_FLAG, PASS_DESCRIPTION, PASS_CFG_ONLY, PASS_ANALYSIS)
+IGC_INITIALIZE_PASS_DEPENDENCY(CodeGenContextWrapper)
 IGC_INITIALIZE_PASS_END(ScalarizeFunction, PASS_FLAG, PASS_DESCRIPTION, PASS_CFG_ONLY, PASS_ANALYSIS)
 
 char ScalarizeFunction::ID = 0;
@@ -79,8 +81,8 @@ ScalarizeFunction::~ScalarizeFunction()
 
 bool ScalarizeFunction::runOnFunction(Function& F)
 {
-
-    if (!IGC::ForceAlwaysInline())
+    CodeGenContext* pCtx = getAnalysis<CodeGenContextWrapper>().getCodeGenContext();
+    if (!IGC::ForceAlwaysInline(pCtx))
     {
         if (F.isDeclaration()) return false;
     }
@@ -194,7 +196,7 @@ void ScalarizeFunction::buildExclusiveSet()
         std::vector<llvm::Value*> workset;
         if (GenIntrinsicInst * GII = dyn_cast<GenIntrinsicInst>(currInst))
         {
-            unsigned numOperands = GII->getNumArgOperands();
+            unsigned numOperands = IGCLLVM::getNumArgOperands(GII);
             for (unsigned i = 0; i < numOperands; i++)
             {
                 Value* operand = GII->getArgOperand(i);
@@ -389,7 +391,7 @@ void ScalarizeFunction::recoverNonScalarizableInst(Instruction* Inst)
     // Iterate over all arguments. Check that they all exist (or rebuilt)
     if (CallInst * CI = dyn_cast<CallInst>(Inst))
     {
-        unsigned numOperands = CI->getNumArgOperands();
+        unsigned numOperands = IGCLLVM::getNumArgOperands(CI);
         for (unsigned i = 0; i < numOperands; i++)
         {
             Value* operand = CI->getArgOperand(i);
@@ -1012,7 +1014,8 @@ void ScalarizeFunction::scalarizeInstruction(GetElementPtrInst* GI)
         auto op1 = baseValue->getType()->isVectorTy() ? operand1[i] : baseValue;
         auto op2 = indexValue->getType()->isVectorTy() ? operand2[i] : indexValue;
 
-        Value* newGEP = GetElementPtrInst::Create(nullptr, op1, op2, "", GI);
+        Type *BaseTy = cast<PointerType>(op1->getType())->getPointerElementType();
+        Value* newGEP = GetElementPtrInst::Create(BaseTy, op1, op2, "", GI);
         Value* constIndex = ConstantInt::get(Type::getInt32Ty(context()), i);
         Instruction* insert = InsertElementInst::Create(assembledVector,
             newGEP, constIndex, "assembled.vect", GI);

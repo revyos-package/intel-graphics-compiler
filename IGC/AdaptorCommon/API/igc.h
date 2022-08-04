@@ -93,8 +93,10 @@ typedef enum {
 #define IsStage1FastestCompile(flag, prev_ctx_ptr) (!IsStage2RestSIMDs(prev_ctx_ptr) && flag == FLAG_CG_STAGE1_FASTEST_COMPILE)
 #define IsStage1BestPerf(flag, prev_ctx_ptr)    (!IsStage2RestSIMDs(prev_ctx_ptr) && flag == FLAG_CG_STAGE1_BEST_PERF)
 #define IsAllSIMDs(flag, prev_ctx_ptr)          (!IsStage2RestSIMDs(prev_ctx_ptr) && flag == FLAG_CG_ALL_SIMDS)
-#define IsStage1(pCtx)   (IsStage1BestPerf(pCtx->m_CgFlag, pCtx->m_StagingCtx) || \
+#define IsStagingContextStage1(pCtx)   (IsStage1BestPerf(pCtx->m_CgFlag, pCtx->m_StagingCtx) || \
                           IsStage1FastCompile(pCtx->m_CgFlag, pCtx->m_StagingCtx))
+#define IsStage1(pCtx) (IsStagingContextStage1(pCtx) || \
+                        IsStage1FastestCompile(pCtx->m_CgFlag, pCtx->m_StagingCtx))
 #define HasSavedIR(pCtx) (pCtx && IsStage2RestSIMDs(pCtx->m_StagingCtx) && \
                           pCtx->m_StagingCtx->m_savedBitcodeCharArraySize > 0)
 
@@ -112,8 +114,8 @@ typedef enum {
       (!IGC_IS_FLAG_ENABLED(ExtraRetrySIMD16) && (!HasSimd(8, stats) || DoSimd32(stats)))))
 
 // We don't need compile continuation if no staged compilation enabled denoted by RegKeys.
-#define HasCompileContinuation(Ail, flag, prev_ctx_ptr, stats) ( \
-    (IGC_IS_FLAG_ENABLED(StagedCompilation) || Ail) && \
+#define HasCompileContinuation(flag, prev_ctx_ptr, stats) ( \
+    (IGC_IS_FLAG_ENABLED(StagedCompilation)) && \
     (ContinueFastCompileStage1(flag, prev_ctx_ptr, stats) || \
      ContinueBestPerfStage1(flag, prev_ctx_ptr, stats)))
 
@@ -172,7 +174,8 @@ typedef enum
     FCEXP_SPILL_COMPRESSION             = ( 0x1 << 0x8 ),
     FCEXP_LOCAL_DECL_SPLIT_GLOBAL_RA    = ( 0x1 << 0x9 ),
     FCEXP_QUICKTOKEN_ALLOC              = ( 0x1 << 0xa ),
-    FCEXP_TOBE_DESIGNED                 = ( 0x1 << 0xb ),
+    FCEXP_DISABLE_UNROLL                = ( 0x1 << 0xb ),
+    FCEXP_TOBE_DESIGNED                 = ( 0x1 << 0xc ),
 } FCEXP_FLAG_t;
 
 #endif // __IGC_H

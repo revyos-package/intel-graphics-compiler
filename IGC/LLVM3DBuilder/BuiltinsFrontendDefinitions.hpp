@@ -3657,23 +3657,24 @@ inline llvm::CallInst* LLVM3DBuilder<preserveNames, T, Inserter>::create_countbi
 template<bool preserveNames, typename T, typename Inserter>
 inline llvm::Value*
 LLVM3DBuilder<preserveNames, T, Inserter>::create_waveInverseBallot(
-    llvm::Value* src)
+    llvm::Value* src,
+    llvm::Value* helperLaneMode)
 {
     llvm::Module* module = this->GetInsertBlock()->getParent()->getParent();
     llvm::Function* pFunc = llvm::GenISAIntrinsic::getDeclaration(
         module,
         llvm::GenISAIntrinsic::GenISA_WaveInverseBallot);
-    return this->CreateCall(pFunc, src);
+    return this->CreateCall2(pFunc, src, helperLaneMode ? helperLaneMode : this->getInt32(0));
 }
 
 template<bool preserveNames, typename T, typename Inserter>
-inline llvm::Value* LLVM3DBuilder<preserveNames, T, Inserter>::create_waveBallot(llvm::Value* src)
+inline llvm::Value* LLVM3DBuilder<preserveNames, T, Inserter>::create_waveBallot(llvm::Value* src, llvm::Value* helperLaneMode)
 {
     llvm::Module* module = this->GetInsertBlock()->getParent()->getParent();
     llvm::Function* pFunc = llvm::GenISAIntrinsic::getDeclaration(
         module,
         llvm::GenISAIntrinsic::GenISA_WaveBallot);
-    return this->CreateCall(pFunc, src);
+    return this->CreateCall2(pFunc, src, helperLaneMode ? helperLaneMode : this->getInt32(0));
 }
 
 template<bool preserveNames, typename T, typename Inserter>
@@ -3698,30 +3699,31 @@ inline llvm::Value* LLVM3DBuilder<preserveNames, T, Inserter>::create_waveshuffl
 }
 
 template<bool preserveNames, typename T, typename Inserter>
-inline llvm::Value* LLVM3DBuilder<preserveNames, T, Inserter>::create_waveAll(llvm::Value* src, llvm::Value* type)
+inline llvm::Value* LLVM3DBuilder<preserveNames, T, Inserter>::create_waveAll(llvm::Value* src, llvm::Value* type, llvm::Value* helperLaneMode)
 {
     llvm::Module* module = this->GetInsertBlock()->getParent()->getParent();
     llvm::Function* pFunc = llvm::GenISAIntrinsic::getDeclaration(
         module,
         llvm::GenISAIntrinsic::GenISA_WaveAll,
         src->getType());
-    return this->CreateCall2(pFunc, src, type);
+    return this->CreateCall3(pFunc, src, type, helperLaneMode ? helperLaneMode : this->getInt32(0));
 }
 
 template<bool preserveNames, typename T, typename Inserter>
 inline llvm::Value* LLVM3DBuilder<preserveNames, T, Inserter>::create_wavePrefix(
-    llvm::Value* src, llvm::Value* type, bool inclusive, llvm::Value *Mask)
+    llvm::Value* src, llvm::Value* type, bool inclusive, llvm::Value *Mask, llvm::Value* helperLaneMode)
 {
     // If a nullptr is passed in for 'Mask' (as is the default), just include
     // all lanes.
     Mask = Mask ? Mask : this->getInt1(true);
+    helperLaneMode = helperLaneMode ? helperLaneMode : this->getInt32(0);
 
     llvm::Module* module = this->GetInsertBlock()->getParent()->getParent();
     llvm::Function* pFunc = llvm::GenISAIntrinsic::getDeclaration(
         module,
         llvm::GenISAIntrinsic::GenISA_WavePrefix,
         src->getType());
-    return this->CreateCall4(pFunc, src, type, this->getInt1(inclusive), Mask);
+    return this->CreateCall5(pFunc, src, type, this->getInt1(inclusive), Mask, helperLaneMode);
 }
 
     // We currently use the combination of 'convergent' and
@@ -3734,13 +3736,12 @@ inline llvm::Value* LLVM3DBuilder<preserveNames, T, Inserter>::create_wavePrefix
 inline llvm::CallInst* setUnsafeToHoistAttr(llvm::CallInst *CI)
     {
         CI->setConvergent();
-#if LLVM_VERSION_MAJOR >= 7
+#if LLVM_VERSION_MAJOR >= 14
+        CI->setOnlyAccessesInaccessibleMemory();
+        CI->removeAttributeAtIndex(llvm::AttributeList::FunctionIndex, llvm::Attribute::ReadNone);
+#else
         CI->setOnlyAccessesInaccessibleMemory();
         CI->removeAttribute(llvm::AttributeList::FunctionIndex, llvm::Attribute::ReadNone);
-#else
-        CI->addAttribute(
-            llvm::AttributeSet::FunctionIndex, llvm::Attribute::InaccessibleMemOnly);
-        CI->removeAttribute(llvm::AttributeSet::FunctionIndex, llvm::Attribute::ReadNone);
 #endif
         llvm::OperandBundleDef OpDef("nohoist", llvm::None);
 
@@ -3757,12 +3758,12 @@ inline llvm::CallInst* setUnsafeToHoistAttr(llvm::CallInst *CI)
 template<bool preserveNames, typename T, typename Inserter>
 inline llvm::Value*
 LLVM3DBuilder<preserveNames, T, Inserter>::create_wavePrefixBitCount(
-    llvm::Value* src, llvm::Value *Mask)
+    llvm::Value* src, llvm::Value *Mask, llvm::Value* helperLaneMode)
 {
     //bits = ballot(bBit);
     //laneMaskLT = (1 << WaveGetLaneIndex()) - 1;
     //prefixBitCount = countbits(bits & laneMaskLT);
-    llvm::Value* ballot = this->create_waveBallot(src);
+    llvm::Value* ballot = this->create_waveBallot(src, helperLaneMode);
     if (Mask)
         ballot = this->CreateAnd(ballot, Mask);
     llvm::Value* shlLaneId = this->CreateShl(
@@ -3780,7 +3781,8 @@ LLVM3DBuilder<preserveNames, T, Inserter>::create_wavePrefixBitCount(
 template<bool preserveNames, typename T, typename Inserter>
 inline llvm::Value* LLVM3DBuilder<preserveNames, T, Inserter>::create_waveMatch(
     llvm::Instruction *inst,
-    llvm::Value       *src)
+    llvm::Value       *src,
+    llvm::Value* helperLaneMode)
 {
 
     // Note that we will stay in the loop above as long as there is at least
@@ -3808,7 +3810,7 @@ inline llvm::Value* LLVM3DBuilder<preserveNames, T, Inserter>::create_waveMatch(
     else
         CmpRes = this->CreateICmpEQ(FirstValue, src);
 
-    auto *Mask = this->create_waveBallot(CmpRes);
+    auto *Mask = this->create_waveBallot(CmpRes, helperLaneMode);
 
     // Replace the current terminator to either exit the loop
     // or branch back for another iteration.
@@ -3829,7 +3831,8 @@ LLVM3DBuilder<preserveNames, T, Inserter>::create_waveMultiPrefix(
     llvm::Instruction *I,
     llvm::Value *Val,
     llvm::Value *Mask,
-    IGC::WaveOps OpKind)
+    IGC::WaveOps OpKind,
+    llvm::Value* helperLaneMode)
 {
     // This implementation is similar create_waveMatch() in that we loop
     // until all subsets of lanes are processed.
@@ -3844,10 +3847,10 @@ LLVM3DBuilder<preserveNames, T, Inserter>::create_waveMultiPrefix(
 
     // Now generate the code for a single iteration of the code
     auto *FirstValue = this->readFirstLane(Mask);
-    auto *ParticipatingLanes = this->create_waveInverseBallot(FirstValue);
+    auto *ParticipatingLanes = this->create_waveInverseBallot(FirstValue, helperLaneMode);
 
     auto *WavePrefix = this->create_wavePrefix(
-        Val, this->getInt8((uint8_t)OpKind), false, ParticipatingLanes);
+        Val, this->getInt8((uint8_t)OpKind), false, ParticipatingLanes, helperLaneMode);
 
     // Replace the current terminator to either exit the loop
     // or branch back for another iteration.
@@ -3866,7 +3869,8 @@ inline llvm::Value*
 LLVM3DBuilder<preserveNames, T, Inserter>::create_waveMultiPrefixBitCount(
     llvm::Instruction *I,
     llvm::Value *Val,
-    llvm::Value *Mask)
+    llvm::Value *Mask,
+    llvm::Value* helperLaneMode)
 {
     // Similar structure to waveMatch and waveMultiPrefix
     auto *PreHeader = I->getParent();
@@ -3881,13 +3885,13 @@ LLVM3DBuilder<preserveNames, T, Inserter>::create_waveMultiPrefixBitCount(
     // Now generate the code for a single iteration of the code
     auto *FirstValue = this->readFirstLane(Mask);
 
-    auto *Count = this->create_wavePrefixBitCount(Val, FirstValue);
+    auto *Count = this->create_wavePrefixBitCount(Val, FirstValue, helperLaneMode);
 
     // Replace the current terminator to either exit the loop
     // or branch back for another iteration.
     auto *Br = BodyBlock->getTerminator();
     this->SetInsertPoint(Br);
-    auto *ParticipatingLanes = this->create_waveInverseBallot(FirstValue);
+    auto *ParticipatingLanes = this->create_waveInverseBallot(FirstValue, helperLaneMode);
     this->CreateCondBr(ParticipatingLanes, EndBlock, BodyBlock);
     Br->eraseFromParent();
 
@@ -3927,11 +3931,11 @@ inline llvm::Value* LLVM3DBuilder<preserveNames, T, Inserter>::getSimdSize()
 }
 
 template<bool preserveNames, typename T, typename Inserter>
-inline llvm::Value* LLVM3DBuilder<preserveNames, T, Inserter>::getFirstLaneID()
+inline llvm::Value* LLVM3DBuilder<preserveNames, T, Inserter>::getFirstLaneID(llvm::Value* helperLaneMode)
 {
     //fbl(WaveBallot(true))
     llvm::Module* module = this->GetInsertBlock()->getParent()->getParent();
-    llvm::Value* ballot = this->create_waveBallot(this->getInt1(1));
+    llvm::Value* ballot = this->create_waveBallot(this->getInt1(1), helperLaneMode);
     llvm::Function* pFunc = llvm::GenISAIntrinsic::getDeclaration(
         module,
         llvm::GenISAIntrinsic::GenISA_firstbitLo);
@@ -3939,10 +3943,10 @@ inline llvm::Value* LLVM3DBuilder<preserveNames, T, Inserter>::getFirstLaneID()
 }
 
 template<bool preserveNames, typename T, typename Inserter>
-inline llvm::Value* LLVM3DBuilder<preserveNames, T, Inserter>::readFirstLane(llvm::Value* src)
+inline llvm::Value* LLVM3DBuilder<preserveNames, T, Inserter>::readFirstLane(llvm::Value* src, llvm::Value* helperLaneMode)
 {
-    llvm::Value* firstLaneID = this->getFirstLaneID();
-    return this->create_waveshuffleIndex(src, firstLaneID);
+    llvm::Value* firstLaneID = this->getFirstLaneID(helperLaneMode);
+    return this->create_waveshuffleIndex(src, firstLaneID, helperLaneMode);
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -4927,5 +4931,19 @@ inline llvm::Value* LLVM3DBuilder<preserveNames, T, Inserter>::CreateCPSActualCo
 }
 
 
+
+template<bool preserveNames, typename T, typename Inserter>
+inline llvm::GenIntrinsicInst* LLVM3DBuilder<preserveNames, T, Inserter>::CreateLaunder(
+    llvm::Value* pSrcVal)
+{
+    llvm::Module* module = this->GetInsertBlock()->getModule();
+    llvm::Function*  pFunc = llvm::GenISAIntrinsic::getDeclaration(
+        module,
+        llvm::GenISAIntrinsic::GenISA_launder,
+        pSrcVal->getType());
+    auto* CI = this->CreateCall(
+        pFunc, pSrcVal, VALUE_NAME(pSrcVal->getName() + llvm::Twine(".launder")));
+    return llvm::cast<llvm::GenIntrinsicInst>(CI);
+}
 
 #endif // BUILTINS_FRONTEND_DEFINITIONS_HPP

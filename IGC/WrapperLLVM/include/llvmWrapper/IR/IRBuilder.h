@@ -167,6 +167,17 @@ namespace IGCLLVM
 #endif
         }
 
+#if LLVM_VERSION_MAJOR < 11
+        using llvm::IRBuilder<T, InserterTyDef()>::CreateShuffleVector;
+
+        inline llvm::Value *CreateShuffleVector(llvm::Value *V1, llvm::Value *V2, llvm::ArrayRef<int> Mask,
+                                              const llvm::Twine &Name="") {
+            std::vector<int> IntVec = Mask.vec();
+            std::vector<uint32_t> UIntVec(IntVec.begin(), IntVec.end());
+            return llvm::IRBuilder<T, InserterTyDef()>::CreateShuffleVector(V1, V2, UIntVec, Name);
+        }
+#endif
+
 #if LLVM_VERSION_MAJOR >= 11
       inline llvm::CallInst* CreateCall(llvm::Value* Callee, llvm::ArrayRef<llvm::Value*> Args = llvm::None,
                                            const llvm::Twine& Name = "", llvm::MDNode* FPMathTag = nullptr) {
@@ -199,19 +210,19 @@ namespace IGCLLVM
 #if LLVM_VERSION_MAJOR >= 13
         inline llvm::LoadInst* CreateLoad(llvm::Value* Ptr, const char *Name)
         {
-            Type* ptrType = Ptr->getType()->getPointerElementType();
+            llvm::Type* ptrType = Ptr->getType()->getPointerElementType();
             return llvm::IRBuilder<T, InserterTyDef()>::CreateLoad(ptrType, Ptr, Name);
         }
 
         inline llvm::LoadInst* CreateLoad(llvm::Value* Ptr, const Twine &Name = "")
         {
-            Type* ptrType = Ptr->getType()->getPointerElementType();
+            llvm::Type* ptrType = Ptr->getType()->getPointerElementType();
             return llvm::IRBuilder<T, InserterTyDef()>::CreateLoad(ptrType, Ptr, Name);
         }
 
         inline llvm::LoadInst* CreateLoad(llvm::Value* Ptr, bool isVolatile, const Twine &Name = "")
         {
-            Type* ptrType = Ptr->getType()->getPointerElementType();
+            llvm::Type* ptrType = Ptr->getType()->getPointerElementType();
             return llvm::IRBuilder<T, InserterTyDef()>::CreateLoad(ptrType, Ptr, isVolatile, Name);
         }
 
@@ -219,13 +230,13 @@ namespace IGCLLVM
 
         inline llvm::LoadInst* CreateAlignedLoad(llvm::Value* Ptr, IGCLLVM::Align Align, const llvm::Twine& Name = "")
         {
-            Type* ptrType = Ptr->getType()->getPointerElementType();
+            llvm::Type* ptrType = Ptr->getType()->getPointerElementType();
             return llvm::IRBuilder<T, InserterTyDef()>::CreateAlignedLoad(ptrType, Ptr, Align, Name);
         }
 
         inline llvm::LoadInst* CreateAlignedLoad(llvm::Value* Ptr, IGCLLVM::Align Align, bool isVolatile, const llvm::Twine& Name = "")
         {
-            Type* ptrType = Ptr->getType()->getPointerElementType();
+            llvm::Type* ptrType = Ptr->getType()->getPointerElementType();
             return llvm::IRBuilder<T, InserterTyDef()>::CreateAlignedLoad(ptrType, Ptr, Align, isVolatile, Name);
         }
 
@@ -241,7 +252,7 @@ namespace IGCLLVM
 
         inline llvm::Value* CreateInBoundsGEP(llvm::Value *Ptr, llvm::ArrayRef<llvm::Value*> IdxList,
                            const llvm::Twine &Name = "") {
-            Type *Ty = cast<PointerType>(Ptr->getType()->getScalarType())->getElementType();
+            llvm::Type *Ty = cast<PointerType>(Ptr->getType()->getScalarType())->getElementType();
             return llvm::IRBuilder<T, InserterTyDef()>::CreateInBoundsGEP(Ty, Ptr, IdxList, Name);
         }
 
@@ -249,7 +260,7 @@ namespace IGCLLVM
 
         inline llvm::Value* CreateGEP(llvm::Value* Ptr, llvm::ArrayRef<llvm::Value*> IdxList,
             const llvm::Twine& Name = "") {
-            Type* Ty = cast<PointerType>(Ptr->getType()->getScalarType())->getElementType();
+            llvm::Type* Ty = cast<PointerType>(Ptr->getType()->getScalarType())->getElementType();
             return llvm::IRBuilder<T, InserterTyDef()>::CreateGEP(Ty, Ptr, IdxList, Name);
         }
 
@@ -288,6 +299,14 @@ namespace IGCLLVM
               Ty, Ptr, Alignment, Mask, PassThru, Name);
         }
 
+#endif
+
+#if LLVM_VERSION_MAJOR >= 14
+        Value* CreatePtrDiff(Value *LHS, Value *RHS, const Twine &Name = "") {
+          auto *PtrTy = cast<PointerType>(LHS->getType());
+          Type *Ty = PtrTy->getElementType();
+          return llvm::IRBuilder<T, InserterTyDef()>::CreatePtrDiff(Ty, LHS, RHS, Name);
+        }
 #endif
 
         inline llvm::Value* CreateConstInBoundsGEP2_64(

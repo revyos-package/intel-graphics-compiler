@@ -21,9 +21,9 @@ SPDX-License-Identifier: MIT
 ///
 //===----------------------------------------------------------------------===//
 
-#define DEBUG_TYPE "cmabi"
 
 #include "llvmWrapper/Analysis/CallGraph.h"
+#include "llvmWrapper/IR/Attributes.h"
 #include "llvmWrapper/IR/DerivedTypes.h"
 #include "llvmWrapper/IR/Instructions.h"
 #include "llvmWrapper/Support/Alignment.h"
@@ -31,11 +31,13 @@ SPDX-License-Identifier: MIT
 #include "Probe/Assertion.h"
 
 #include "vc/GenXOpts/GenXOpts.h"
+#include "vc/Support/GenXDiagnostic.h"
 #include "vc/Utils/GenX/BreakConst.h"
 #include "vc/Utils/GenX/GlobalVariable.h"
 #include "vc/Utils/GenX/KernelInfo.h"
 #include "vc/Utils/GenX/Printf.h"
 #include "vc/Utils/GenX/TransformArgCopy.h"
+#include "vc/Utils/GenX/TypeSize.h"
 #include "vc/Utils/General/DebugInfo.h"
 #include "vc/Utils/General/FunctionAttrs.h"
 #include "vc/Utils/General/InstRebuilder.h"
@@ -82,7 +84,14 @@ SPDX-License-Identifier: MIT
 #include <unordered_set>
 #include <vector>
 
+#define DEBUG_TYPE "cmabi"
+
 using namespace llvm;
+
+static cl::opt<unsigned>
+    MaxCMABIByvalSize("vc-max-cmabi-byval-size", cl::init(128), cl::Hidden,
+                      cl::desc("Maximum struct size to be passed by value for "
+                               "internal functions in bytes."));
 
 STATISTIC(NumArgumentsTransformed, "Number of pointer arguments transformed");
 
@@ -210,32 +219,6 @@ private:
   GlobalSetTy Globals;
 };
 
-// Diagnostic information for error/warning for overlapping arg
-class DiagnosticInfoOverlappingArgs : public DiagnosticInfo {
-private:
-  std::string Description;
-  StringRef Filename;
-  unsigned Line;
-  unsigned Col;
-
-  static const int KindID;
-
-  static int getKindID() { return KindID; }
-
-public:
-  // Initialize from an Instruction and an Argument.
-  DiagnosticInfoOverlappingArgs(Instruction *Inst,
-      const Twine &Desc, DiagnosticSeverity Severity = DS_Error);
-  void print(DiagnosticPrinter &DP) const override;
-
-  static bool classof(const DiagnosticInfo *DI) {
-    return DI->getKind() == getKindID();
-  }
-};
-
-const int DiagnosticInfoOverlappingArgs::KindID =
-    llvm::getNextAvailablePluginDiagnosticKind();
-
 class CMABIAnalysis : public ModulePass {
   // This map captures all global variables to be localized.
   std::vector<LocalizationInfo *> LocalizationInfoObjs;
@@ -323,12 +306,6 @@ private:
   // \brief Create allocas for globals and replace their uses.
   void LocalizeGlobals(LocalizationInfo &LI);
 
-  // Return true if pointer type arugment is only used to
-  // load or store a simple value. This helps decide whehter
-  // it is safe to convert ptr arg to by-value arg or
-  // simple-value copy-in-copy-out.
-  bool OnlyUsedBySimpleValueLoadStore(Value *Arg);
-
   // \brief Diagnose illegal overlapping by-ref args.
   void diagnoseOverlappingArgs(CallInst *CI);
 
@@ -390,7 +367,7 @@ bool CMABI::runOnSCC(CallGraphSCC &SCC) {
       continue;
     for (auto ui = F->use_begin(), ue = F->use_end(); ui != ue; ++ui) {
       auto CI = dyn_cast<CallInst>(ui->getUser());
-      if (CI && CI->getNumArgOperands() == ui->getOperandNo())
+      if (CI && IGCLLVM::getNumArgOperands(CI) == ui->getOperandNo())
         diagnoseOverlappingArgs(CI);
     }
   }
@@ -428,14 +405,14 @@ void CMABI::LocalizeGlobals(LocalizationInfo &LI) {
 
     Instruction &FirstI = *Fn->getEntryBlock().begin();
     Type *ElemTy = GV->getType()->getElementType();
+    IGCLLVM::Align GVAlign = IGCLLVM::getCorrectAlign(GV->getAlignment());
     AllocaInst *Alloca = new AllocaInst(ElemTy, vc::AddrSpace::Private,
+                                        /*ArraySize=*/nullptr, GVAlign,
                                         GV->getName() + ".local", &FirstI);
 
-    if (GV->getAlignment())
-      Alloca->setAlignment(IGCLLVM::getCorrectAlign(GV->getAlignment()));
-
     if (!isa<UndefValue>(GV->getInitializer()))
-      new StoreInst(GV->getInitializer(), Alloca, &FirstI);
+      new StoreInst(GV->getInitializer(), Alloca, /*isVolatile=*/false,
+                    GVAlign, &FirstI);
 
     vc::DIBuilder::createDbgDeclareForLocalizedGlobal(*Alloca, *GV, FirstI);
 
@@ -483,61 +460,15 @@ CallGraphNode *CMABI::ProcessNode(CallGraphNode *CGN) {
     return nullptr;
   }
 
-  SmallVector<Argument*, 16> PointerArgs;
-  for (auto &Arg: F->args())
-    if (Arg.getType()->isPointerTy())
-      PointerArgs.push_back(&Arg);
-
-  // Check if there is any pointer arguments or globals to localize.
-  if (PointerArgs.empty() && LI.empty())
-    return 0;
-
   // Check transformable arguments.
-  SmallPtrSet<Argument*, 8> ArgsToTransform;
-  for (Argument *PtrArg: PointerArgs) {
-    Type *ArgTy = cast<PointerType>(PtrArg->getType())->getElementType();
-    // Only transform to simple types.
-    if ((ArgTy->isVectorTy() || OnlyUsedBySimpleValueLoadStore(PtrArg)) &&
-        (ArgTy->isIntOrIntVectorTy() || ArgTy->isFPOrFPVectorTy()))
-      ArgsToTransform.insert(PtrArg);
-  }
+  vc::TypeSizeWrapper MaxStructSize = vc::ByteSize * MaxCMABIByvalSize;
+  SmallPtrSet<Argument *, 8> ArgsToTransform =
+      vc::collectArgsToTransform(*F, MaxStructSize);
 
   if (ArgsToTransform.empty() && LI.empty())
     return 0;
 
   return TransformNode(*F, ArgsToTransform, LI);
-}
-
-bool CMABI::OnlyUsedBySimpleValueLoadStore(Value *Arg) {
-  for (const auto &U : Arg->users()) {
-    auto *I = dyn_cast<Instruction>(U);
-    if (!I)
-      return false;
-
-    if (auto LI = dyn_cast<LoadInst>(U)) {
-      if (Arg != LI->getPointerOperand())
-        return false;
-    }
-    else if (auto SI = dyn_cast<StoreInst>(U)) {
-      if (Arg != SI->getPointerOperand())
-        return false;
-    }
-    else if (auto GEP = dyn_cast<GetElementPtrInst>(U)) {
-      if (Arg != GEP->getPointerOperand())
-        return false;
-      else if (!GEP->hasAllZeroIndices())
-        return false;
-      if (!OnlyUsedBySimpleValueLoadStore(U))
-        return false;
-    }
-    else if (isa<AddrSpaceCastInst>(U) || isa<PtrToIntInst>(U)) {
-      if (!OnlyUsedBySimpleValueLoadStore(U))
-        return false;
-    }
-    else
-      return false;
-  }
-  return true;
 }
 
 // \brief Fix argument passing for kernels: i1 -> i8.
@@ -564,9 +495,9 @@ CallGraphNode *CMABI::TransformKernel(Function *F) {
         ArgTys.push_back(Ty);
     } else {
       // Unchanged argument
-      AttributeSet attrs = PAL.getParamAttributes(ArgIndex);
+      AttributeSet attrs = IGCLLVM::getParamAttrs(PAL, ArgIndex);
       if (attrs.hasAttributes()) {
-        AttrBuilder B(attrs);
+        IGCLLVM::AttrBuilder B{ Context, attrs };
         AttrVec = AttrVec.addParamAttributes(Context, ArgTys.size(), B);
       }
       ArgTys.push_back(I->getType());
@@ -578,10 +509,10 @@ CallGraphNode *CMABI::TransformKernel(Function *F) {
     "type out of sync, expect bool arguments");
 
   // Add any function attributes.
-  AttributeSet FnAttrs = PAL.getFnAttributes();
+  AttributeSet FnAttrs = IGCLLVM::getFnAttrs(PAL);
   if (FnAttrs.hasAttributes()) {
-    AttrBuilder B(FnAttrs);
-    AttrVec = AttrVec.addAttributes(Context, AttributeList::FunctionIndex, B);
+    IGCLLVM::AttrBuilder B(Context, FnAttrs);
+    AttrVec = IGCLLVM::addAttributesAtIndex(AttrVec, Context, AttributeList::FunctionIndex, B);
   }
 
   // Create the new function body and insert it into the module.
@@ -783,7 +714,7 @@ void CMABI::diagnoseOverlappingArgs(CallInst *CI)
   std::set<std::pair<unsigned, unsigned>> Reported;
   // Using ArgIndex starting at 1 so we can reserve 0 to mean "element does not
   // come from any by-ref arg".
-  for (unsigned ArgIndex = 1, NumArgs = CI->getNumArgOperands();
+  for (unsigned ArgIndex = 1, NumArgs = IGCLLVM::getNumArgOperands(CI);
       ArgIndex <= NumArgs; ++ArgIndex) {
     Value *Arg = CI->getOperand(ArgIndex - 1);
     if (!Arg->getType()->isPointerTy())
@@ -946,10 +877,10 @@ void CMABI::diagnoseOverlappingArgs(CallInst *CI)
           if (Reported.insert(std::pair<unsigned, unsigned>(ArgIdx1, ArgIdx2))
                 .second) {
             // Not already reported.
-            DiagnosticInfoOverlappingArgs Err(CI, "by reference arguments "
-                + Twine(ArgIdx1) + " and " + Twine(ArgIdx2) + " overlap",
-                DS_Error);
-            Inst->getContext().diagnose(Err);
+            vc::fatal(Inst->getContext(), "CMABI",
+                      "by reference arguments " + Twine(ArgIdx1) + " and " +
+                          Twine(ArgIdx2) + " overlap",
+                      CI);
           }
         }
         (*Entry)[i] = std::max((*Entry)[i], (*VectorToMerge)[i]);
@@ -972,41 +903,6 @@ void CMABI::diagnoseOverlappingArgs(CallInst *CI)
     }
   }
 }
-
-/***********************************************************************
- * DiagnosticInfoOverlappingArgs initializer from Instruction
- *
- * If the Instruction has a DebugLoc, then that is used for the error
- * location.
- * Otherwise, the location is unknown.
- */
-DiagnosticInfoOverlappingArgs::DiagnosticInfoOverlappingArgs(Instruction *Inst,
-    const Twine &Desc, DiagnosticSeverity Severity)
-    : DiagnosticInfo(getKindID(), Severity), Line(0), Col(0)
-{
-  auto DL = Inst->getDebugLoc();
-  if (!DL) {
-    Filename = DL.get()->getFilename();
-    Line = DL.getLine();
-    Col = DL.getCol();
-  }
-  Description = Desc.str();
-}
-
-/***********************************************************************
- * DiagnosticInfoOverlappingArgs::print : print the error/warning message
- */
-void DiagnosticInfoOverlappingArgs::print(DiagnosticPrinter &DP) const
-{
-  std::string Loc(
-        (Twine(!Filename.empty() ? Filename : "<unknown>")
-        + ":" + Twine(Line)
-        + (!Col ? Twine() : Twine(":") + Twine(Col))
-        + ": ")
-      .str());
-  DP << Loc << Description;
-}
-
 
 char CMABI::ID = 0;
 INITIALIZE_PASS_BEGIN(CMABI, "cmabi", "Fix ABI issues for the genx backend", false, false)
@@ -1414,7 +1310,7 @@ void ArgRefPattern::process(DominatorTree &DT) {
     Builder.SetInsertPoint(LI);
     Value *SrcVal = Builder.CreateLoad(
         BaseAlloca->getType()->getPointerElementType(), BaseAlloca);
-    SmallVector<Value *, 8> Args(CopyInRegion->arg_operands());
+    SmallVector<Value *, 8> Args(IGCLLVM::args(CopyInRegion));
     Args[0] = SrcVal;
     Value *Val = Builder.CreateCall(RdFn, Args);
     LI->replaceAllUsesWith(Val);

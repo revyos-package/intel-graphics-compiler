@@ -129,7 +129,7 @@ int ScalarVisaModule::getFPReg() const {
     return regFP;
 }
 
-llvm::StringRef ScalarVisaModule::GetVISAFuncName(llvm::StringRef OldName) const
+llvm::StringRef ScalarVisaModule::GetVISAFuncName() const
 {
     // when igc.device.enqueue metadata is used, function name
     // doesnt match between llvm::Function and VISA. this
@@ -139,6 +139,7 @@ llvm::StringRef ScalarVisaModule::GetVISAFuncName(llvm::StringRef OldName) const
     //
     // when device enqueue is not used, llvm's function name
     // matches that used by VISA.
+    auto OldName = getFunction()->getName();
     auto& Module = *getFunction()->getParent();
 
     // check if llvm function name is different than VISA function name
@@ -575,7 +576,6 @@ ScalarVisaModule::GetVariableLocation(const llvm::Instruction* pInst) const
         // the program. This will help debugger examine their
         // values anywhere in the code till they are in scope.
         unsigned int reg = m_pShader->GetDebugInfoData().getVISADclId(pVar, 0);
-        IGC_ASSERT_MESSAGE(reg < GENERAL_REGISTER_NUM, "Bad VISA general register");
 
         if (pType->isVectorTy())
         {

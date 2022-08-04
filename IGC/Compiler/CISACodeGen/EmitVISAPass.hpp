@@ -15,6 +15,7 @@ SPDX-License-Identifier: MIT
 #include "Simd32Profitability.hpp"
 #include "GenCodeGenModule.h"
 #include "VariableReuseAnalysis.hpp"
+#include "CastToGASAnalysis.h"
 #include "Compiler/MetaDataUtilsWrapper.h"
 #include "common/LLVMWarningsPush.hpp"
 #include <llvm/IR/DataLayout.h>
@@ -60,6 +61,7 @@ public:
         AU.addRequired<Simd32ProfitabilityAnalysis>();
         AU.addRequired<CodeGenContextWrapper>();
         AU.addRequired<VariableReuseAnalysis>();
+        AU.addRequired<CastToGASWrapperPass>();
         AU.setPreservesAll();
     }
 
@@ -171,6 +173,7 @@ public:
     // Emit lifetime start right before inst V. If ForAllInstance is true, emit lifestart
     // for both instances; otherwise, just the current instance set in the calling context.
     void emitLifetimeStart(CVariable* Var, llvm::BasicBlock* BB, llvm::Instruction* I, bool ForAllInstance);
+    bool waveShuffleCase(CVariable* Var, BasicBlock* BB, Instruction* I, bool ForAllInstance);
 
     // set the predicate with current active channels
     void emitPredicateFromChannelIP(CVariable* dst, CVariable* alias = NULL);
@@ -217,6 +220,7 @@ public:
     void emitPatchInstanceId(llvm::Instruction* inst);
     void emitSimdSize(llvm::Instruction* inst);
     void emitSimdShuffle(llvm::Instruction* inst);
+    void emitCrossInstanceMov(const SSource& source, const DstModifier& modifier);
     void emitSimdShuffleDown(llvm::Instruction* inst);
     void emitSimdBlockRead(llvm::Instruction* inst, llvm::Value* ptrVal = nullptr);
     void emitSimdBlockWrite(llvm::Instruction* inst, llvm::Value* ptrVal = nullptr);
@@ -459,7 +463,8 @@ public:
     void emitLLVMbswap(llvm::IntrinsicInst* inst);
     void emitDP4A(llvm::GenIntrinsicInst* GII,
         const SSource* source = nullptr,
-        const DstModifier& modifier = DstModifier());
+        const DstModifier& modifier = DstModifier(),
+        bool isAccSigned = true);
 
     void emitLLVMStackSave(llvm::IntrinsicInst* inst);
     void emitLLVMStackRestore(llvm::IntrinsicInst* inst);
@@ -470,10 +475,13 @@ public:
     void emitSyncStackID(llvm::GenIntrinsicInst* I);
     void emitTraceRay(llvm::TraceRayIntrinsic *I, bool RayQueryEnable);
     void emitReadTraceRaySync(llvm::GenIntrinsicInst* I);
+
+
     void emitBTD(
         CVariable* GlobalBufferPtr,
         CVariable* StackID,
         CVariable* ShaderRecord,
+        CVariable* Flag,
         bool releaseStackID);
     void emitBindlessThreadDispatch(llvm::BTDIntrinsic *I);
     void emitStackIDRelease(llvm::StackIDReleaseIntrinsic *I);
@@ -593,11 +601,14 @@ public:
     void emitLifetimeStartAtEndOfBB(llvm::BasicBlock* BB);
     void emitDebugPlaceholder(llvm::GenIntrinsicInst* I);
     void emitDummyInst(llvm::GenIntrinsicInst* GII);
+    void emitLaunder(llvm::GenIntrinsicInst* GII);
     void emitImplicitArgIntrinsic(llvm::GenIntrinsicInst* I);
     void emitStoreImplBufferPtr(llvm::GenIntrinsicInst* I);
     void emitStoreLocalIdBufferPtr(llvm::GenIntrinsicInst* I);
     void emitLoadImplBufferPtr(llvm::GenIntrinsicInst* I);
     void emitLoadLocalIdBufferPtr(llvm::GenIntrinsicInst* I);
+
+
 
 
     std::pair<llvm::Value*, llvm::Value*> getPairOutput(llvm::Value*) const;
@@ -624,7 +635,7 @@ public:
     {
         if (llvm::CallInst * pCall = llvm::dyn_cast<llvm::CallInst>(pInst))
         {
-            if (op < pCall->getNumArgOperands())
+            if (op < IGCLLVM::getNumArgOperands(pCall))
             {
                 return pInst->getOperand(op);
             }
@@ -806,6 +817,9 @@ private:
 
     bool m_currFuncHasSubroutine = false;
 
+    bool m_canGenericPointToPrivate = false;
+    bool m_canGenericPointToLocal = false;
+
     // Used to relocate phi-mov to different BB. phiMovToBB is the map from "fromBB"
     // to "toBB" (meaning to move phi-mov from "fromBB" to "toBB"). See MovPhiSources.
     llvm::DenseMap<llvm::BasicBlock*, llvm::BasicBlock*>  phiMovToBB;
@@ -873,6 +887,7 @@ private:
     void SetRoundingMode_FPCvtInt(ERoundingMode RM_FPCvtInt);
     bool setRMExplicitly(llvm::Instruction* inst);
     void ResetRoundingMode(llvm::Instruction* inst);
+
     // returns true if the instruction does not care about the rounding mode settings
     bool ignoreRoundingMode(llvm::Instruction* inst) const;
 
@@ -920,7 +935,7 @@ private:
     LSC_FENCE_OP getLSCMemoryFenceOp(bool IsGlobalMemFence, bool InvalidateL1) const;
     bool m_isDuplicate;
     CVariable* m_tmpDest = nullptr;
-
+    std::set<CoalescingEngine::CCTuple*> lifetimeStartAdded;
 };
 
 } // namespace IGC

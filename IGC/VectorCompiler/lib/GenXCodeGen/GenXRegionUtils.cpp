@@ -22,6 +22,7 @@ SPDX-License-Identifier: MIT
 
 #include "llvm/ADT/SmallBitVector.h"
 #include "llvm/Analysis/ConstantFolding.h"
+#include "llvm/Analysis/TargetFolder.h"
 #include "llvm/Analysis/TargetLibraryInfo.h"
 #include "llvm/Analysis/ValueTracking.h"
 #include "llvm/IR/Constants.h"
@@ -112,7 +113,8 @@ static cl::opt<bool>
  * available, but the caller wants the constant offset separated out like
  * that.
  */
-Region genx::makeRegionWithOffset(Instruction *Inst, bool WantParentWidth) {
+Region genx::makeRegionWithOffset(const Instruction *Inst,
+                                  bool WantParentWidth) {
   unsigned OperandNum = 0;
   switch (GenXIntrinsic::getGenXIntrinsicID(Inst)) {
   case GenXIntrinsic::genx_rdregioni:
@@ -139,13 +141,13 @@ Region genx::makeRegionWithOffset(Instruction *Inst, bool WantParentWidth) {
  * This also works with rdpredregion and wrpredregion, with Offset in
  * bits rather than bytes, and with ElementBytes set to 1.
  */
-Region genx::makeRegionFromBaleInfo(Instruction *Inst, const BaleInfo &BI,
+Region genx::makeRegionFromBaleInfo(const Instruction *Inst, const BaleInfo &BI,
                                     bool WantParentWidth) {
   Region Result;
   // Determine where to get the subregion value from and which arg index
   // the region parameters start at.
   unsigned ArgIdx = 0;
-  Value *Subregion = 0;
+  const Value *Subregion = nullptr;
   IGC_ASSERT(isa<CallInst>(Inst));
   auto CallI = cast<CallInst>(Inst);
   IGC_ASSERT(CallI->getCalledFunction());
@@ -973,7 +975,8 @@ static Value *simplifyBitCastWithRegionWrite(Instruction *WrR,
   if (!ConvertRes)
     return nullptr;
   auto [NewVecTy, R] = *ConvertRes;
-  IRBuilder<> IRB(WrR);
+  IRBuilder<TargetFolder> IRB(WrR->getParent(), BasicBlock::iterator(WrR),
+                              TargetFolder(DL));
   IGC_ASSERT(vc::isBitCastAllowed(*OldVal, *NewVecTy));
   auto *OldValCast =
       IRB.CreateBitCast(OldVal, NewVecTy, OldVal->getName() + ".cast");
@@ -1054,8 +1057,12 @@ static Value *simplifyBitCastFromRegionRead(BitCastInst *BCI,
     return nullptr;
   auto [NewVecTy, R] = *ConvertRes;
   IGC_ASSERT(vc::isBitCastAllowed(*OldVal, *NewVecTy));
+  IRBuilder<TargetFolder>(BCI->getParent(), BasicBlock::iterator(BCI),
+                          TargetFolder(DL));
   auto *NewBCI =
-      IRBuilder<>(BCI).CreateBitCast(OldVal, NewVecTy, BCI->getName());
+      IRBuilder<TargetFolder>(BCI->getParent(), BasicBlock::iterator(BCI),
+                              TargetFolder(DL))
+          .CreateBitCast(OldVal, NewVecTy, BCI->getName());
   auto *NewRdR =
       R.createRdRegion(NewBCI, RdR->getName(), BCI, RdR->getDebugLoc());
   return NewRdR;

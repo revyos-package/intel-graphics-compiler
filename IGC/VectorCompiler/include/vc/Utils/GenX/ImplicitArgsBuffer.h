@@ -14,6 +14,8 @@ SPDX-License-Identifier: MIT
 #ifndef VC_UTILS_GENX_IMPLICITARGSBUFFER_H
 #define VC_UTILS_GENX_IMPLICITARGSBUFFER_H
 
+#include "vc/Utils/General/Types.h"
+
 #include <llvm/ADT/Twine.h>
 #include <llvm/IR/IRBuilder.h>
 
@@ -25,6 +27,15 @@ class Module;
 } // namespace llvm
 
 namespace vc {
+
+// Depending on target architecture payload (kernel arguments) can be passed
+// either through memory (pointer to the buffer with arguments is passed in r0.0
+// register) or directly through registers (hardware itself initializes special
+// registers with the arguments).
+enum class ThreadPayloadKind {
+  InMemory,
+  OnRegister,
+};
 
 // Indirect data heap pointer is provided in r0.0[31:PtrOffsetInR00]
 constexpr unsigned PtrOffsetInR00 = 6;
@@ -71,13 +82,25 @@ inline const char TypeName[] = "vc.implicit.args.buf.type";
 // created.
 llvm::StructType &getType(llvm::Module &M);
 
+// Returns the address space of a pointer to implicit arguments buffer.
+AddrSpace::Enum getPtrAddrSpace(ThreadPayloadKind Kind);
+
 // Returns the type of a pointer to implicit arguments buffer.
-llvm::PointerType &getPtrType(llvm::Module &M);
+llvm::PointerType &getPtrType(llvm::Module &M, ThreadPayloadKind Kind);
 
 // Inserts instructions to access a pointer to implicit arguments buffer.
 // Returns the pointer value. Instructions are inserted via the provided IR
 // builder.
+// Different code must be inserted depending on thread payload kind \p Kind.
+// Implicit args buffer predefined variable must be available before calling
+// this function for payload on registers case.
+llvm::Value &getPointer(llvm::IRBuilder<> &IRB, ThreadPayloadKind Kind);
+template <ThreadPayloadKind Kind>
 llvm::Value &getPointer(llvm::IRBuilder<> &IRB);
+template <>
+llvm::Value &getPointer<ThreadPayloadKind::InMemory>(llvm::IRBuilder<> &IRB);
+template <>
+llvm::Value &getPointer<ThreadPayloadKind::OnRegister>(llvm::IRBuilder<> &IRB);
 
 // Inserts instructions that access requested buffer field.
 // Arguments:
@@ -131,11 +154,26 @@ llvm::Value &getBasePtr(llvm::Value &BufferPtr, llvm::IRBuilder<> &IRB,
 // Arguments:
 //    \p BufferPtr - a pointer to the implicit args buffer. Should be obtained
 //                   via vc::ImplicitArgs::Buffer::getPointer interface.
+//                   It is not used in payload on register case but still must
+//                   be provided to have a uniform interface between different
+//                   payload kinds.
 //    \p IRB - IR builder to insert the instructions.
 //    \p Name - a name of the returned value and a prefix for other constructed
 //              value names.
 llvm::Value &getPointer(llvm::Value &BufferPtr, llvm::IRBuilder<> &IRB,
+                        ThreadPayloadKind Kind,
                         const llvm::Twine &Name = "ia.local.id.ptr");
+template <ThreadPayloadKind Kind>
+llvm::Value &getPointer(llvm::Value &BufferPtr, llvm::IRBuilder<> &IRB,
+                        const llvm::Twine &Name = "ia.local.id.ptr");
+template <>
+llvm::Value &getPointer<ThreadPayloadKind::InMemory>(llvm::Value &BufferPtr,
+                                                     llvm::IRBuilder<> &IRB,
+                                                     const llvm::Twine &Name);
+template <>
+llvm::Value &getPointer<ThreadPayloadKind::OnRegister>(llvm::Value &BufferPtr,
+                                                       llvm::IRBuilder<> &IRB,
+                                                       const llvm::Twine &Name);
 
 // Inserts instructions that load a field from local ID structure.
 // Arguments:

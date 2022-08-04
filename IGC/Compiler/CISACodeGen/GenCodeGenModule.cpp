@@ -18,7 +18,7 @@ SPDX-License-Identifier: MIT
 #include "common/LLVMWarningsPush.hpp"
 #include "llvm/Config/llvm-config.h"
 #include "llvm/IR/Argument.h"
-#include "llvm/IR/Attributes.h"
+#include "llvmWrapper/IR/Attributes.h"
 #include "llvmWrapper/Analysis/InlineCost.h"
 #include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/SCCIterator.h"
@@ -368,7 +368,7 @@ static bool DeduceNonNullAttribute(Module& M)
             if (NotNull) {
                 // FIXME: Below lines possibly can be refactored to be simpler.
                 AttributeList attrSet = AttributeList::get(Arg.getParent()->getContext(), Arg.getArgNo() + 1, llvm::Attribute::NonNull);
-                Arg.addAttr(attrSet.getAttribute(Arg.getArgNo() + 1, llvm::Attribute::NonNull));
+                Arg.addAttr(IGCLLVM::getAttribute(attrSet, Arg.getArgNo() + 1, llvm::Attribute::NonNull));
                 Modifided = true;
             }
         }
@@ -589,10 +589,8 @@ void GenXFunctionGroupAnalysis::setGroupAttributes()
 {
     for (auto FG : Groups)
     {
-        for (auto FI = FG->begin(), FE = FG->end(); FI != FE; ++FI)
+        for (const Function* F : *FG)
         {
-            Function* F = *FI;
-
             // Ignore indirect functions
             if (F->hasFnAttribute("referenced-indirectly"))
             {
@@ -607,7 +605,7 @@ void GenXFunctionGroupAnalysis::setGroupAttributes()
             // function attribute "hasVLA" should be set at ProcessFuncAttributes pass
             if (F->hasFnAttribute("hasVLA"))
             {
-                FG->m_hasVaribleLengthAlloca = true;
+                FG->m_hasVariableLengthAlloca = true;
             }
 
             // check if FG uses recursion. The "hasRecursion" attribute is set in
@@ -618,9 +616,9 @@ void GenXFunctionGroupAnalysis::setGroupAttributes()
             }
 
             // For the remaining attributes we need to loop through all the call instructions
-            for (auto ii = inst_begin(*FI), ei = inst_end(*FI); ii != ei; ii++)
+            for (auto ii = inst_begin(F), ei = inst_end(F); ii != ei; ii++)
             {
-                if (CallInst* call = dyn_cast<CallInst>(&*ii))
+                if (const CallInst* call = dyn_cast<CallInst>(&*ii))
                 {
                     Function* calledF = call->getCalledFunction();
                     if (call->isInlineAsm())
@@ -981,9 +979,9 @@ InlineCost SubroutineInliner::getInlineCost(IGCLLVM::CallSiteRef CS)
         if (CS.hasFnAttr(llvm::Attribute::AlwaysInline))
             return IGCLLVM::InlineCost::getAlways();
 
-        int FCtrl = IGC_GET_FLAG_VALUE(FunctionControl);
+        int FCtrl = getFunctionControl(pCtx);
 
-        if (IGC::ForceAlwaysInline())
+        if (IGC::ForceAlwaysInline(pCtx))
             return IGCLLVM::InlineCost::getAlways();
 
         if (pCtx->m_enableSubroutine == false)

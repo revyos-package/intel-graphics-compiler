@@ -26,7 +26,7 @@ class PassRegistry;
 //
 // CMImpParam - Transforms to enable implicit parameters
 //
-Pass *createCMImpParamPass(bool);
+Pass *createCMImpParamPass(bool, bool);
 
 //===----------------------------------------------------------------------===//
 //
@@ -72,6 +72,9 @@ void initializeGenXBTIAssignmentPass(PassRegistry &);
 
 ModulePass *createGenXTranslateSPIRVBuiltinsPass();
 void initializeGenXTranslateSPIRVBuiltinsPass(PassRegistry &);
+
+ModulePass *createGenXCloneIndirectFunctionsPass();
+void initializeGenXCloneIndirectFunctionsPass(PassRegistry &);
 
 ModulePass *createGenXTrampolineInsertionPass();
 void initializeGenXTrampolineInsertionPass(PassRegistry &);

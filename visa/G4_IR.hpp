@@ -267,6 +267,67 @@ namespace vISA
 //forward declaration for the binary of an instruction
 class BinInst;
 
+
+///
+/// A hashtable of <declare, node> where every node is a vector of
+/// {LB, RB} (left-bounds and right-bounds)
+/// A source operand (either SrcRegRegion or Predicate) is considered to be global
+/// if it is not fully defined in one BB
+///
+class GlobalOpndHashTable
+{
+    Mem_Manager& mem;
+    std_arena_based_allocator<uint32_t> private_arena_allocator;
+
+    static uint32_t packBound(uint16_t lb, uint16_t rb)
+    {
+        return (rb << 16) + lb;
+    }
+
+    static uint16_t getLB(uint32_t value)
+    {
+        return (uint16_t) (value & 0xFFFF);
+    }
+    static uint16_t getRB(uint32_t value)
+    {
+        return (uint16_t) (value >> 16);
+    }
+
+    struct HashNode
+    {
+        // each elements is {LB, RB} pair where [0:15] is LB and [16:31] is RB
+        std::vector<uint32_t, std_arena_based_allocator<uint32_t>> bounds;
+
+        HashNode(uint16_t lb, uint16_t rb, std_arena_based_allocator<uint32_t>& m)
+            : bounds(m)
+        {
+            bounds.push_back(packBound(lb, rb));
+        }
+
+        void *operator new(size_t sz, Mem_Manager& m) {return m.alloc(sz);}
+
+        void insert(uint16_t newLB, uint16_t newRB);
+        bool isInNode(uint16_t lb, uint16_t rb) const;
+    };
+
+    // "global" refers to declares with elements that are used without a preceding define in the same BB
+    std::map<G4_Declare*, HashNode*> globalVars;
+    // for debugging it's often useful to dump out the global operands, not just declares.
+    // Note that this may not be an exhaustive list, for example it does not cover dst global operands;
+    // for accuracy one should use isOpndGlobal()
+    std::vector<G4_Operand*> globalOpnds;
+
+public:
+    GlobalOpndHashTable(Mem_Manager& m) : mem(m) { }
+
+    void addGlobalOpnd(G4_Operand * opnd);
+    // returns true if def may possibly define a global variable
+    bool isOpndGlobal(G4_Operand * def) const;
+    void clearHashTable();
+
+    void dump(std::ostream &os = std::cerr) const;
+}; // GlobalOpndHashTable
+
 class G4_FCALL
 {
     uint16_t argSize;
@@ -334,6 +395,7 @@ protected:
     unsigned short evenlySplitInst : 1;
     unsigned short skipPostRA : 1;  // for NoMaskWA; to be deleted
     unsigned short doPostRA : 1;  // for NoMaskWA
+    unsigned short canBeAcc : 1; //The inst can be ACC, including the inst's dst and the use operands in the DU chain.
     G4_ExecSize    execSize;
 
     BinInst *bin;
@@ -554,12 +616,6 @@ public:
             return nullptr;
         return (G4_SendDescRaw *)msgDesc;
     }
-    const G4_SendDescLdSt * getMsgDescLdSt() const {
-        const auto *msgDesc = getMsgDesc();
-        if (msgDesc == nullptr || !getMsgDesc()->isRaw())
-            return nullptr;
-        return (const G4_SendDescLdSt *)msgDesc;
-    }
 
     virtual bool mayExceedTwoGRF() const
     {
@@ -766,7 +822,6 @@ public:
     bool isNoDDChkInst()   const { return (option & InstOpt_NoDDChk)    ? true : false; }
     bool isNoDDClrInst()   const { return (option & InstOpt_NoDDClr)    ? true : false; }
     bool isBreakPointInst() const { return (option & InstOpt_BreakPoint) ? true : false; }
-
     // true if inst reads/writes acc either implicitly or explicitly
     bool useAcc() const
     {
@@ -1024,6 +1079,13 @@ public:
     bool canDstBeAcc() const;
     bool canSrcBeAcc(Gen4_Operand_Number opndNum) const;
 
+    bool canInstBeAcc(GlobalOpndHashTable* ght);
+
+    bool canInstBeAcc() const
+    {
+        return canBeAcc;
+    };
+
     bool canSrcBeAccBeforeHWConform(Gen4_Operand_Number opndNum) const;
 
     bool canSrcBeAccAfterHWConform(Gen4_Operand_Number opndNum) const;
@@ -1136,6 +1198,7 @@ private:
 } // namespace vISA
 
 std::ostream& operator<<(std::ostream& os, vISA::G4_INST& inst);
+std::ostream& operator<<(std::ostream& os, vISA::G4_Operand& opnd);
 
 namespace vISA
 {
@@ -1499,8 +1562,6 @@ public:
     //    thread should also terminate with a send to TS.
     bool canBeEOT() const
     {
-        if (!msgDesc->isRaw())
-            return false;
         bool canEOT = getMsgDesc()->getDstLenRegs() == 0 &&
             (getMsgDesc()->getSFID() != SFID::NULL_SFID &&
                 getMsgDesc()->getSFID() != SFID::SAMPLER);
@@ -1887,13 +1948,6 @@ class G4_Declare
     // ToDo: they should be moved out of G4_Declare and stored as maps in RA/spill
     G4_Declare* spillDCL;  // if an addr/flag var is spilled, SpillDCL is the location (GRF) holding spilled value
 
-    // this should only be called by builder
-    void setNumberFlagElements(uint8_t numEl)
-    {
-        assert(regFile == G4_FLAG && "may only be called on a flag");
-        numFlagElements = numEl;
-    }
-
 public:
     G4_Declare(const IR_Builder& builder,
                const char*    n,
@@ -2087,6 +2141,12 @@ public:
         assert(regFile == G4_FLAG && "should only be called for flag vars");
         return numFlagElements;
     }
+    void setNumberFlagElements(uint8_t numEl)
+    {
+        assert(regFile == G4_FLAG && "may only be called on a flag");
+        numFlagElements = numEl;
+    }
+
 
     G4_Type          getElemType() const {return elemInfo.getType();}
     uint16_t         getElemSize() const {return elemInfo.getElemSize();}
@@ -2095,13 +2155,10 @@ public:
 
     int getOffsetFromBase()
     {
-        if (offsetFromBase == -1)
+        offsetFromBase = 0;
+        for (const G4_Declare *dcl = this; dcl->getAliasDeclare() != NULL; dcl = dcl->getAliasDeclare())
         {
-            offsetFromBase = 0;
-            for (const G4_Declare *dcl = this; dcl->getAliasDeclare() != NULL; dcl = dcl->getAliasDeclare())
-            {
-                offsetFromBase += dcl->getAliasOffset();
-            }
+            offsetFromBase += dcl->getAliasOffset();
         }
         return offsetFromBase;
     }

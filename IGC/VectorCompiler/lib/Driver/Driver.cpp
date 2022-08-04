@@ -42,7 +42,6 @@ SPDX-License-Identifier: MIT
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/Support/StringSaver.h"
-#include "llvm/Support/TargetRegistry.h"
 #include "llvm/Support/Timer.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Target/TargetOptions.h"
@@ -51,6 +50,7 @@ SPDX-License-Identifier: MIT
 #include "llvm/Transforms/Scalar.h"
 
 #include "llvmWrapper/Option/OptTable.h"
+#include "llvmWrapper/Support/TargetRegistry.h"
 #include "llvmWrapper/Target/TargetMachine.h"
 
 #include "Probe/Assertion.h"
@@ -692,6 +692,10 @@ static Error fillApiOptions(const opt::ArgList &ApiOptions,
     Opts.UsePlain2DImages = true;
   if (ApiOptions.hasArg(OPT_vc_enable_preemption))
     Opts.EnablePreemption = true;
+  if (ApiOptions.hasArg(OPT_library_compilation_ze))
+    Opts.SaveStackCallLinkage = true;
+  if (ApiOptions.hasArg(OPT_vc_disable_non_overlapping_region_opt))
+    Opts.ForceDisableNonOverlappingRegionOpt = true;
 
   if (opt::Arg *A = ApiOptions.getLastArg(OPT_fp_contract)) {
     StringRef Val = A->getValue();

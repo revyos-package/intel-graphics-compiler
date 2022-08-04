@@ -1,6 +1,6 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (C) 2017-2021 Intel Corporation
+Copyright (C) 2017-2022 Intel Corporation
 
 SPDX-License-Identifier: MIT
 
@@ -85,7 +85,6 @@ SPDX-License-Identifier: MIT
 /// GenXLiveness has another go at splitting them up.
 ///
 //===----------------------------------------------------------------------===//
-#define DEBUG_TYPE "GENX_LOWERING"
 
 #include "GenX.h"
 #include "GenXGotoJoin.h"
@@ -125,11 +124,14 @@ SPDX-License-Identifier: MIT
 
 #include "vc/Support/GenXDiagnostic.h"
 #include "vc/Utils/GenX/GlobalVariable.h"
+#include "vc/Utils/GenX/KernelInfo.h"
 
 #include <algorithm>
 #include <iterator>
 #include <numeric>
 #include "Probe/Assertion.h"
+
+#define DEBUG_TYPE "GENX_LOWERING"
 
 using namespace llvm;
 using namespace genx;
@@ -167,8 +169,6 @@ public:
 
 const int DiagnosticInfoLowering::KindID =
     llvm::getNextAvailablePluginDiagnosticKind();
-
-using IRChecker = vc::IRChecker<DiagnosticInfoLowering>;
 
 DiagnosticInfoLowering::DiagnosticInfoLowering(const Instruction *Inst,
                                                const Twine &Desc,
@@ -219,6 +219,7 @@ private:
   bool splitGatherScatter(CallInst *CI, unsigned IID);
   bool processTwoAddressOpnd(CallInst *CI);
   bool processInst(Instruction *Inst);
+  bool lowerAllAny(CallInst *CI);
   bool lowerRdRegion(Instruction *Inst);
   bool lowerWrRegion(Instruction *Inst);
   bool lowerRdPredRegion(Instruction *Inst);
@@ -267,6 +268,7 @@ private:
   bool lowerFAbs(CallInst *CI);
   bool lowerF32MathIntrinsic(CallInst *CI, GenXIntrinsic::ID GenXID);
   bool lowerF32FastMathIntrinsic(CallInst *CI, GenXIntrinsic::ID GenXID);
+  bool lowerSlmInit(CallInst *CI);
   bool generatePredicatedWrrForNewLoad(CallInst *CI);
 };
 
@@ -363,7 +365,7 @@ bool GenXLowering::processTwoAddressOpnd(CallInst *CI) {
     Type *Ty = CI->getArgOperand(*OpNum)->getType();
     IGC_ASSERT_MESSAGE(Ty == CI->getType(), "two address op type out of sync");
 
-    for (unsigned i = 0; i < CI->getNumArgOperands(); ++i) {
+    for (unsigned i = 0; i < IGCLLVM::getNumArgOperands(CI); ++i) {
       auto Op = dyn_cast<Constant>(CI->getArgOperand(i));
       // Check if the predicate operand is all true.
       if (Op && Op->getType()->getScalarSizeInBits() == 1) {
@@ -945,7 +947,7 @@ bool GenXLowering::splitGatherScatter(CallInst *CI, unsigned IID) {
   IGC_ASSERT(!Widths.empty());
   unsigned NumChannels = NumVectorElements;
   if (MaskIdx != NONEED) {
-    IRChecker::argOperandIsConstantInt(*CI, MaskIdx, "channel mask");
+    vc::checkArgOperandIsConstantInt(*CI, MaskIdx, "channel mask");
     NumChannels = (unsigned)cast<ConstantInt>(CI->getArgOperand(MaskIdx))
                       ->getZExtValue();
     NumChannels = (NumChannels & 1) + ((NumChannels & 2) >> 1) +
@@ -960,7 +962,7 @@ bool GenXLowering::splitGatherScatter(CallInst *CI, unsigned IID) {
   if (IID == GenXIntrinsic::genx_svm_scatter ||
       IID == GenXIntrinsic::genx_svm_gather) {
     const unsigned NumBlocksOpIDX = 1;
-    IRChecker::argOperandIsConstantInt(*CI, NumBlocksOpIDX, "log2 num blocks");
+    vc::checkArgOperandIsConstantInt(*CI, NumBlocksOpIDX, "log2 num blocks");
     NumBlks = (unsigned)cast<ConstantInt>(CI->getArgOperand(NumBlocksOpIDX))
                   ->getZExtValue();
     NumBlks = (1 << NumBlks);
@@ -993,7 +995,7 @@ bool GenXLowering::splitGatherScatter(CallInst *CI, unsigned IID) {
   for (auto CurWidth : Widths) {
     SmallVector<Value *, 8> Args;
     // initialize the args with the old values
-    for (unsigned ArgI = 0; ArgI < CI->getNumArgOperands(); ++ArgI)
+    for (unsigned ArgI = 0; ArgI < IGCLLVM::getNumArgOperands(CI); ++ArgI)
       Args.push_back(CI->getArgOperand(ArgI));
     // Predicate
     if (PredIdx != NONEED) {
@@ -1709,7 +1711,7 @@ bool GenXLowering::widenSIMD8GatherScatter(CallInst *CI, unsigned IID) {
   }
 
   SmallVector<Value *, 8> Args;
-  for (unsigned i = 0; i < CI->getNumArgOperands(); ++i) {
+  for (unsigned i = 0; i < IGCLLVM::getNumArgOperands(CI); ++i) {
     Args.push_back(CI->getArgOperand(i));
   }
   Args[PredIdx] = ExpandPredicate(CI, PredIdx, WidenSIMD);
@@ -3011,96 +3013,112 @@ bool GenXLowering::translateLegacyToLSC(CallInst *CI, unsigned IID) {
   case GenXIntrinsic::genx_svm_block_ld:
   case GenXIntrinsic::genx_svm_block_ld_unaligned: {
     unsigned AddrIdx = 0;
-    auto Length =
-        cast<IGCLLVM::FixedVectorType>(CI->getType())->getNumElements();
-    IGC_ASSERT(Length <= 128);
-    SmallVector<Value *, 12> Args;
-    Args.push_back(OnePred1);                         // #0, 1xi1 Predicate
-    Args.push_back(ConstantInt::get(I8Ty, LSC_LOAD)); // #1, subopcode
-    Args.push_back(CZeroInt8);                        // #2, L1 control
-    Args.push_back(CZeroInt8);                        // #3, L3 control
-    if (IID == GenXIntrinsic::genx_svm_block_ld_unaligned)
-      Args.push_back(ConstantInt::get(I16Ty, 1)); // #4, scale
-    else
-      Args.push_back(ConstantInt::get(I16Ty, 16)); // #4, scale
-    Args.push_back(CZeroInt32);                    // #5, immed-offset
-    Args.push_back(LSCDatumSize(CI));              // #6
-    Args.push_back(ConstantInt::get(
-        I8Ty, LSCVectorSize(Length))); // #7, num-elem is the Length
-    Args.push_back(
-        ConstantInt::get(I8Ty, LSC_DATA_ORDER_TRANSPOSE)); // #8, transpose
-    Args.push_back(CZeroInt8); // #9, no-channel-mask
-                               // create 1x vector for address
+
+    // create 1x vector for address
     Value *AddrV = CI->getArgOperand(AddrIdx);
     auto AddrV1Ty = IGCLLVM::FixedVectorType::get(AddrV->getType(), 1);
     auto AddrV1 = CastInst::CreateBitOrPointerCast(
         AddrV, AddrV1Ty, AddrV->getName() + VALUE_NAME(".lsc"), CI);
-    Args.push_back(AddrV1);     // #10, address
-    Args.push_back(CZeroInt32); // #11, SurfaceIndex
+
+    // LSC transposed messages only support D32 and D64 elements
+    auto *OldVT = cast<IGCLLVM::FixedVectorType>(CI->getType());
+    auto *VT = adjustVTForTransposedMessage(OldVT);
+    auto Length = VT->getNumElements();
+    IGC_ASSERT(Length <= 128);
+
+    SmallVector<Value *, 12> Args = {
+        OnePred1,                                      // #0, 1xi1 Predicate
+        ConstantInt::get(I8Ty, LSC_LOAD),              // #1, subopcode
+        CZeroInt8,                                     // #2, L1 control
+        CZeroInt8,                                     // #3, L3 control
+        ConstantInt::get(I16Ty, 1),                    // #4, scale
+        CZeroInt32,                                    // #5, immed-offset
+        LSCDatumSize(VT),                              // #6
+        ConstantInt::get(I8Ty, LSCVectorSize(Length)), // #7, num-elem is Length
+        ConstantInt::get(I8Ty, LSC_DATA_ORDER_TRANSPOSE), // #8, transpose
+        CZeroInt8,                                        // #9, no-channel-mask
+        AddrV1,                                           // #10, address
+        CZeroInt32,                                       // #11, SurfaceIndex
+    };
 
     // now we sure that all can be converted, so increase statistics
     NumLegacy += 1;
 
     // create the call to 32 wide lsc.load.stateless instructions.
-    Type *Tys[] = {CI->getType(), Args[0]->getType(), Args[10]->getType()};
+    Type *Tys[] = {VT, OnePred1->getType(), AddrV1Ty};
     auto Decl = GenXIntrinsic::getGenXDeclaration(
         CI->getModule(), GenXIntrinsic::genx_lsc_load_stateless, Tys);
-    auto NewInst = CallInst::Create(Decl, Args, CI->getName() + VALUE_NAME(".lsc"), CI);
+    auto *NewInst =
+        CallInst::Create(Decl, Args, CI->getName() + VALUE_NAME(".lsc"), CI);
+    NewInst->setDebugLoc(DL);
 
     LLVM_DEBUG(dbgs() << "Legacy intrinsic:\n");
     LLVM_DEBUG(CI->dump());
     LLVM_DEBUG(dbgs() << "Translated to:\n");
     LLVM_DEBUG(NewInst->dump());
 
-    NewInst->setDebugLoc(DL);
-    CI->replaceAllUsesWith(NewInst);
+    // Cast the loaded vector back to the required data type
+    Value *Casted = NewInst;
+    if (VT != OldVT)
+      Casted = CastInst::CreateBitOrPointerCast(
+          NewInst, OldVT, NewInst->getName() + VALUE_NAME(".cast.lsc"), CI);
+    CI->replaceAllUsesWith(Casted);
     ToErase.push_back(CI);
   } break;
   case GenXIntrinsic::genx_svm_block_st: {
-    unsigned DataIdx = 1;
-    unsigned AddrIdx = 0;
-    auto Length =
-        cast<IGCLLVM::FixedVectorType>(CI->getArgOperand(DataIdx)->getType())
-            ->getNumElements();
-    IGC_ASSERT(Length <= 128);
-    SmallVector<Value *, 13> Args;
-    Args.push_back(OnePred1);                          // #0, 1xi1 Predicate
-    Args.push_back(ConstantInt::get(I8Ty, LSC_STORE)); // #1, subopcode
-    Args.push_back(CZeroInt8);                         // #2, L1 control
-    Args.push_back(CZeroInt8);                         // #3, L3 control
-    Args.push_back(ConstantInt::get(I16Ty, 16));       // #4, scale
-    Args.push_back(CZeroInt32);                        // #5, immed-offset
-    Args.push_back(LSCDatumSize(CI->getArgOperand(DataIdx))); // #6
-    Args.push_back(ConstantInt::get(
-        I8Ty, LSCVectorSize(Length))); // #7, num-elem is the Length
-    Args.push_back(
-        ConstantInt::get(I8Ty, LSC_DATA_ORDER_TRANSPOSE)); // #8, transpose
-    Args.push_back(CZeroInt8); // #9, no-channel-mask
-                               // create 1x vector for address
+    constexpr unsigned AddrIdx = 0;
+    constexpr unsigned DataIdx = 1;
+
+    // create 1x vector for address
     Value *AddrV = CI->getArgOperand(AddrIdx);
     auto AddrV1Ty = IGCLLVM::FixedVectorType::get(AddrV->getType(), 1);
     auto AddrV1 = CastInst::CreateBitOrPointerCast(
         AddrV, AddrV1Ty, AddrV->getName() + VALUE_NAME(".lsc"), CI);
-    Args.push_back(AddrV1);                     // #10, address
-    Args.push_back(CI->getArgOperand(DataIdx)); // #11, Data
-    Args.push_back(CZeroInt32);                 // #12, SurfaceIndex
+
+    // LSC transposed messages only support D32 and D64 elements
+    Value *Data = CI->getArgOperand(DataIdx);
+    auto *OldVT = cast<IGCLLVM::FixedVectorType>(Data->getType());
+    auto *VT = adjustVTForTransposedMessage(OldVT);
+
+    if (VT != OldVT)
+      Data = CastInst::CreateBitOrPointerCast(
+          Data, VT, Data->getName() + VALUE_NAME(".cast.lsc"), CI);
+
+    auto Length =
+        cast<IGCLLVM::FixedVectorType>(Data->getType())->getNumElements();
+    IGC_ASSERT(Length <= 128);
+
+    SmallVector<Value *, 13> Args = {
+        OnePred1,                                      // #0, 1xi1 Predicate
+        ConstantInt::get(I8Ty, LSC_STORE),             // #1, subopcode
+        CZeroInt8,                                     // #2, L1 control
+        CZeroInt8,                                     // #3, L3 control
+        ConstantInt::get(I16Ty, 1),                    // #4, scale
+        CZeroInt32,                                    // #5, immed-offset
+        LSCDatumSize(VT),                              // #6
+        ConstantInt::get(I8Ty, LSCVectorSize(Length)), // #7, num-elem is Length
+        ConstantInt::get(I8Ty, LSC_DATA_ORDER_TRANSPOSE), // #8, transpose
+        CZeroInt8,                                        // #9, no-channel-mask
+        AddrV1,                                           // #10, address
+        Data,                                             // #11, Data
+        CZeroInt32,                                       // #12, SurfaceIndex
+    };
 
     // now we sure that all can be converted, so increase statistics
     NumLegacy += 1;
 
     // create the call to 32 wide lsc.store.stateless instructions.
-    Type *Tys[] = {Args[0]->getType(), Args[10]->getType(),
-                   Args[11]->getType()};
+    Type *Tys[] = {OnePred1->getType(), AddrV1Ty, VT};
     auto Decl = GenXIntrinsic::getGenXDeclaration(
         CI->getModule(), GenXIntrinsic::genx_lsc_store_stateless, Tys);
     auto NewInst = CallInst::Create(Decl, Args, "", CI);
+    NewInst->setDebugLoc(DL);
 
     LLVM_DEBUG(dbgs() << "Legacy intrinsic:\n");
     LLVM_DEBUG(CI->dump());
     LLVM_DEBUG(dbgs() << "Translated to:\n");
     LLVM_DEBUG(NewInst->dump());
 
-    NewInst->setDebugLoc(DL);
     CI->replaceAllUsesWith(NewInst);
     ToErase.push_back(CI);
   } break;
@@ -3236,7 +3254,7 @@ bool GenXLowering::processInst(Instruction *Inst) {
     unsigned IntrinsicID = GenXIntrinsic::not_any_intrinsic;
     if (Function *Callee = CI->getCalledFunction()) {
       IntrinsicID = vc::getAnyIntrinsicID(Callee);
-      IGC_ASSERT(CI->getNumArgOperands() < GenXIntrinsicInfo::OPNDMASK);
+      IGC_ASSERT(IGCLLVM::getNumArgOperands(CI) < GenXIntrinsicInfo::OPNDMASK);
     }
     if (ST) {
       // use gather/scatter to implement SLM oword load/store on
@@ -3274,6 +3292,9 @@ bool GenXLowering::processInst(Instruction *Inst) {
       return generatePredicatedWrrForNewLoad(CI);
 
     switch (IntrinsicID) {
+    case GenXIntrinsic::genx_all:
+    case GenXIntrinsic::genx_any:
+      return lowerAllAny(CI);
     case GenXIntrinsic::genx_rdregioni:
     case GenXIntrinsic::genx_rdregionf:
       return lowerRdRegion(Inst);
@@ -3333,6 +3354,8 @@ bool GenXLowering::processInst(Instruction *Inst) {
       return lowerGenXIMad(CI, IntrinsicID);
     case GenXIntrinsic::genx_lzd:
       return lowerLzd(Inst);
+    case GenXIntrinsic::genx_slm_init:
+      return lowerSlmInit(CI);
     case Intrinsic::masked_load:
       return lowerLLVMMaskedLoad(CI);
     case Intrinsic::masked_store:
@@ -3352,9 +3375,10 @@ bool GenXLowering::processInst(Instruction *Inst) {
       return lowerSqrt(CI);
     case Intrinsic::sadd_sat:
     case Intrinsic::ssub_sat:
-      vc::diagnose(Inst->getContext(), "GenXLowering", Inst,
-                   "Sorry not implemented: GenX backend cannot handle this "
-                   "intrinsic yet");
+      vc::fatal(Inst->getContext(), "GenXLowering",
+                "Sorry not implemented: GenX backend cannot handle this "
+                "intrinsic yet",
+                Inst);
       break;
     case Intrinsic::uadd_sat:
       return lowerUAddWithSat(CI);
@@ -3413,6 +3437,54 @@ bool GenXLowering::processInst(Instruction *Inst) {
     Inst->getContext().emitError(Inst,
         "GenX backend cannot handle allocas with CMRT yet");
   return false;
+}
+
+/***********************************************************************
+ * lowerAllAny : handle all and any intrinsics
+ *
+ * Return:  whether any change was made, and thus the current instruction
+ *          is now marked for erasing
+ *
+ */
+bool GenXLowering::lowerAllAny(CallInst *CI) {
+  auto *Op = CI->getArgOperand(0);
+
+  auto *SrcTy = Op->getType();
+  if (SrcTy->isIntOrIntVectorTy(1))
+    return false;
+
+  IGC_ASSERT(SrcTy->isVectorTy());
+
+  IRBuilder<> Builder(CI);
+
+  auto NElem = cast<IGCLLVM::FixedVectorType>(SrcTy)->getNumElements();
+  Type *Int1Ty = Type::getInt1Ty(CI->getContext());
+  Type *Ty = IGCLLVM::FixedVectorType::get(Int1Ty, NElem);
+
+  Value *Arg = nullptr;
+
+  if (auto *Ext = dyn_cast<SExtInst>(Op))
+    Arg = Ext->getOperand(0);
+  else if (auto *Ext = dyn_cast<ZExtInst>(Op))
+    Arg = Ext->getOperand(0);
+  else
+    Arg = Builder.CreateICmpNE(Op, ConstantInt::get(SrcTy, 0));
+
+  Value *NewInst = nullptr;
+
+  if (NElem > 1) {
+    auto IntrID = GenXIntrinsic::getGenXIntrinsicID(CI);
+    auto *Fn = GenXIntrinsic::getGenXDeclaration(CI->getModule(), IntrID, {Ty});
+    NewInst =
+        Builder.CreateCall(Fn, {Arg}, CI->getName() + VALUE_NAME(".lowered"));
+  } else
+    NewInst = Builder.CreateBitCast(Arg, Int1Ty,
+                                    CI->getName() + VALUE_NAME(".lowered"));
+
+  CI->replaceAllUsesWith(NewInst);
+
+  ToErase.push_back(CI);
+  return true;
 }
 
 /***********************************************************************
@@ -4938,17 +5010,37 @@ bool GenXLowering::lowerMul64(Instruction *Inst) {
   auto Src0 = SplitBuilder.splitOperandLoHi(0);
   auto Src1 = SplitBuilder.splitOperandLoHi(1);
 
-  // create muls and adds
-  auto *ResL = Builder.CreateMul(Src0.Lo, Src1.Lo);
-  // create the mulh intrinsic to the get the carry-part
-  Type *tys[2] = {ResL->getType(), Src0.Lo->getType()};
-  // build argument list
-  SmallVector<llvm::Value *, 2> args{Src0.Lo, Src1.Lo};
   auto *M = Inst->getModule();
-  Function *IntrinFunc =
-      GenXIntrinsic::getGenXDeclaration(M, GenXIntrinsic::genx_umulh, tys);
+  Value *Cari = nullptr;
+  Value *ResL = nullptr;
 
-  auto *Cari = Builder.CreateCall(IntrinFunc, args, ".cari");
+  if (ST->useMulDDQ()) {
+    // Create uumul intrinsic for DxD->Q multiplication
+    Type *tys[2] = {Inst->getType(), Src0.Lo->getType()};
+    Function *IntrinsicUUMul =
+        GenXIntrinsic::getGenXDeclaration(M, GenXIntrinsic::genx_uumul, tys);
+    SmallVector<llvm::Value *, 2> args{Src0.Lo, Src1.Lo};
+
+    auto *UUMul = Builder.CreateCall(IntrinsicUUMul, args);
+    auto Res = SplitBuilder.splitValueLoHi(*UUMul);
+
+    Cari = Res.Hi;
+    ResL = Res.Lo;
+  } else {
+    // Create mul instruction and mulh intrinsic
+    ResL = Builder.CreateMul(Src0.Lo, Src1.Lo);
+
+    // create the mulh intrinsic to the get the carry-part
+    Type *tys[2] = {ResL->getType(), Src0.Lo->getType()};
+    // build argument list
+    SmallVector<llvm::Value *, 2> args{Src0.Lo, Src1.Lo};
+    Function *IntrinFunc =
+        GenXIntrinsic::getGenXDeclaration(M, GenXIntrinsic::genx_umulh, tys);
+
+    Cari = Builder.CreateCall(IntrinFunc, args, ".cari");
+  }
+
+  // create muls and adds
   auto *Temp0 = Builder.CreateMul(Src0.Lo, Src1.Hi);
   auto *Temp1 = Builder.CreateAdd(Cari, Temp0);
   auto *Temp2 = Builder.CreateMul(Src0.Hi, Src1.Lo);
@@ -5554,8 +5646,8 @@ bool GenXLowering::lowerF32MathIntrinsic(CallInst *CI,
   IGC_ASSERT(CI);
   auto *ResTy = CI->getType();
   if (!ResTy->getScalarType()->isFloatTy())
-    vc::diagnose(CI->getContext(), "GenXLowering", CI,
-                 "Sorry there is only f32 native instruction");
+    vc::fatal(CI->getContext(), "GenXLowering",
+              "Sorry there is only f32 native instruction", CI);
   auto *Decl = GenXIntrinsic::getGenXDeclaration(CI->getModule(), GenXID,
                                                  {CI->getType()});
   SmallVector<Value *, 2> Args{CI->args()};
@@ -5569,9 +5661,36 @@ bool GenXLowering::lowerF32MathIntrinsic(CallInst *CI,
 bool GenXLowering::lowerF32FastMathIntrinsic(CallInst *CI,
                                              GenXIntrinsic::ID GenXID) {
   if (!CI->getFastMathFlags().isFast())
-    vc::diagnose(CI->getContext(), "GenXLowering", CI,
-                 "Sorry there is only low precision native instruction");
+    vc::fatal(CI->getContext(), "GenXLowering",
+              "Sorry there is only low precision native instruction", CI);
   return lowerF32MathIntrinsic(CI, GenXID);
+}
+
+bool GenXLowering::lowerSlmInit(CallInst *CI) {
+  auto *BB = CI->getParent();
+  auto *F = BB->getParent();
+  if (F->getCallingConv() != CallingConv::SPIR_KERNEL) {
+    vc::fatal(CI->getContext(), "GenXLowering",
+              "SLM init call is supported only in kernels", CI);
+  }
+
+  auto *V = dyn_cast<ConstantInt>(CI->getArgOperand(0));
+  if (!V) {
+    vc::fatal(CI->getContext(), "GenXLowering",
+              "Cannot reserve non-constant amount of SLM", CI);
+  }
+
+  unsigned SLMSize = V->getValue().getZExtValue();
+
+  vc::KernelMetadata MD{F};
+
+  if (SLMSize > MD.getSLMSize()) {
+    MD.updateSLMSizeMD(SLMSize);
+  }
+
+  ToErase.push_back(CI);
+
+  return true;
 }
 
 /***********************************************************************
@@ -5677,7 +5796,7 @@ bool GenXLowering::widenByteOp(Instruction *Inst) {
   // Get the range of operands to process.
   unsigned StartIdx = 0, EndIdx = Inst->getNumOperands();
   if (auto CI = dyn_cast<CallInst>(Inst))
-    EndIdx = CI->getNumArgOperands();
+    EndIdx = IGCLLVM::getNumArgOperands(CI);
   else if (isa<SelectInst>(Inst))
     StartIdx = 1;
   // Extend the operands.

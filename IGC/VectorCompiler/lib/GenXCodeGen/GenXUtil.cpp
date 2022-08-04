@@ -30,7 +30,7 @@ SPDX-License-Identifier: MIT
 #include "llvm/IR/Dominators.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
-#include "llvm/IR/Instructions.h"
+#include "llvmWrapper/IR/Instructions.h"
 #include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/Metadata.h"
@@ -211,9 +211,8 @@ Constant *genx::concatConstants(Constant *C1, Constant *C2)
  *          Otherwise the terminator of the closest common dominating basic
  *          block.
  */
-Instruction *genx::findClosestCommonDominator(DominatorTree *DT,
-    ArrayRef<Instruction *> Insts)
-{
+Instruction *genx::findClosestCommonDominator(const DominatorTree *DT,
+                                              ArrayRef<Instruction *> Insts) {
   IGC_ASSERT(!Insts.empty());
   SmallVector<InstScanner, 8> InstScanners;
   // Find the closest common dominating basic block.
@@ -293,7 +292,7 @@ llvm::Optional<unsigned> genx::getTwoAddressOperandNum(CallInst *CI)
   if (CI->getType()->isVoidTy())
     return None; // no return value
   GenXIntrinsicInfo II(IntrinsicID);
-  unsigned Num = CI->getNumArgOperands();
+  unsigned Num = IGCLLVM::getNumArgOperands(CI);
   if (!Num)
     return None; // no args
   --Num; // Num = last arg number, could be two address operand

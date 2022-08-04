@@ -234,6 +234,7 @@ namespace IGC
             }
             else
                 if (IGC_IS_FLAG_ENABLED(ForceCSLeastSIMD)
+                    || (IGC_IS_FLAG_ENABLED(ForceCSLeastSIMD4RQ) && cgCtx->hasSyncRTCalls())
                     )
                 {
                     if (m_simdEntries[0])
@@ -584,16 +585,6 @@ namespace IGC
         return forceGlobalMemoryAllocation() || (m_instrTypes.hasDynamicGenericLoadStore && platform.canForcePrivateToGlobal());
     }
 
-    bool OpenCLProgramContext::hasNoLocalToGenericCast() const
-    {
-        return m_InternalOptions.HasNoLocalToGeneric || getModuleMetaData()->hasNoLocalToGenericCast;
-    }
-
-    bool OpenCLProgramContext::hasNoPrivateToGenericCast() const
-    {
-        return getModuleMetaData()->hasNoPrivateToGenericCast;
-    }
-
     bool OpenCLProgramContext::enableTakeGlobalAddress() const
     {
         return m_Options.EnableTakeGlobalAddress || getModuleMetaData()->capabilities.globalVariableDecorationsINTEL;
@@ -611,28 +602,48 @@ namespace IGC
         return val;
     }
 
+    uint32_t OpenCLProgramContext::getPrivateMemoryMinimalSizePerThread() const
+    {
+        return m_InternalOptions.IntelPrivateMemoryMinimalSizePerThread;
+    }
+
+    uint32_t OpenCLProgramContext::getIntelScratchSpacePrivateMemoryMinimalSizePerThread() const
+    {
+        return m_InternalOptions.IntelScratchSpacePrivateMemoryMinimalSizePerThread;
+    }
+
     void OpenCLProgramContext::failOnSpills()
     {
         if (!m_InternalOptions.FailOnSpill)
         {
             return;
         }
+        // If there is fail-on-spill option provided
+        // and __attribute__((annotate("igc-do-not-spill"))) is present for a kernel,
+        // we fail compilation
         auto& programList = m_programOutput.m_ShaderProgramList;
         for (auto& kernel : programList)
         {
             for (auto mode : { SIMDMode::SIMD8, SIMDMode::SIMD16, SIMDMode::SIMD32 })
             {
                 COpenCLKernel* shader = static_cast<COpenCLKernel*>(kernel->GetShader(mode));
-                if (shader)
+
+                if (!COpenCLKernel::IsValidShader(shader))
                 {
-                    auto output = shader->ProgramOutput();
-                    if (output->m_scratchSpaceUsedBySpills > 0)
-                    {
-                        std::string msg =
-                            "Spills detected in kernel: "
-                            + shader->m_kernelInfo.m_kernelName;
-                        EmitError(msg.c_str(), nullptr);
-                    }
+                    continue;
+                }
+
+                auto& funcMD = modMD->FuncMD[shader->entry];
+                auto& annotatnions = funcMD.UserAnnotations;
+                auto output = shader->ProgramOutput();
+
+                if (output->m_scratchSpaceUsedBySpills > 0 &&
+                    std::find(annotatnions.begin(), annotatnions.end(), "igc-do-not-spill") != annotatnions.end())
+                {
+                    std::string msg =
+                        "Spills detected in kernel: "
+                        + shader->m_kernelInfo.m_kernelName;
+                    EmitError(msg.c_str(), nullptr);
                 }
             }
         }
@@ -781,11 +792,6 @@ namespace IGC
             else if (suffix.equals("-no-prera-scheduling"))
             {
                 IntelEnablePreRAScheduling = false;
-            }
-            // -cl-intel-no-local-to-generic
-            else if (suffix.equals("-no-local-to-generic"))
-            {
-                HasNoLocalToGeneric = true;
             }
             // -cl-intel-force-global-mem-allocation
             else if (suffix.equals("-force-global-mem-allocation"))
@@ -950,9 +956,67 @@ namespace IGC
             {
                 DisableEUFusion = true;
             }
+            // -cl-intel-functonControl [<n>]
+            // -ze-intel-functionControl [<n>]
+            else if (suffix.equals("-functionControl"))
+            {
+                int val;
+                size_t valStart = opts.find_first_not_of(' ', ePos + 1);
+                size_t valEnd = opts.find_first_of(' ', valStart);
+                llvm::StringRef valStr = opts.substr(valStart, valEnd - valStart);
+                if (valStr.getAsInteger(10, val))
+                {
+                    IGC_ASSERT(0);
+                }
+                if (val >= 0)
+                {
+                    FunctionControl = val;
+                }
+                Pos = valEnd;
+            }
             else if (suffix.equals("-fail-on-spill"))
             {
                 FailOnSpill = true;
+            }
+            // -cl-poison-unsupported-fp64-kernels
+            // -ze-poison-unsupported-fp64-kernels
+            else if (suffix.equals("-poison-unsupported-fp64-kernels"))
+            {
+                // This option forces IGC to poison kernels using fp64
+                // operations on platforms without HW support for fp64.
+                EnableUnsupportedFP64Poisoning = true;
+            }
+            // *-private-memory-minimal-size-per-thread <SIZE>
+            // SIZE >= 0
+            else if (suffix.equals("-private-memory-minimal-size-per-thread"))
+            {
+                size_t valueStart = opts.find_first_not_of(' ', ePos + 1);
+                size_t valueEnd = opts.find_first_of(' ', valueStart);
+                llvm::StringRef valueString = opts.substr(valueStart, valueEnd - valueStart);
+
+                IntelPrivateMemoryMinimalSizePerThread = 0;
+                if (valueString.getAsInteger(10, IntelPrivateMemoryMinimalSizePerThread))
+                {
+                    IGC_ASSERT(0);
+                }
+                Pos = valueEnd;
+                continue;
+            }
+            // *-scratch-space-private-memory-minimal-size-per-thread <SIZE>
+            // SIZE >= 0
+            else if (suffix.equals("-scratch-space-private-memory-minimal-size-per-thread"))
+            {
+                size_t valueStart = opts.find_first_not_of(' ', ePos + 1);
+                size_t valueEnd = opts.find_first_of(' ', valueStart);
+                llvm::StringRef valueString = opts.substr(valueStart, valueEnd - valueStart);
+
+                IntelScratchSpacePrivateMemoryMinimalSizePerThread = 0;
+                if (valueString.getAsInteger(10, IntelScratchSpacePrivateMemoryMinimalSizePerThread))
+                {
+                    IGC_ASSERT(0);
+                }
+                Pos = valueEnd;
+                continue;
             }
 
             // advance to the next flag
@@ -1067,6 +1131,7 @@ namespace IGC
     void CodeGenContext::CheckEnableSubroutine(llvm::Module& M)
     {
         bool EnableSubroutine = false;
+        bool EnableStackFuncs = false;
         for (auto& F : M)
         {
             if (F.isDeclaration() ||
@@ -1081,10 +1146,14 @@ namespace IGC
                 !F.hasFnAttribute(llvm::Attribute::AlwaysInline))
             {
                 EnableSubroutine = true;
-                break;
+                if (F.hasFnAttribute("visaStackCall") && !F.user_empty())
+                {
+                    EnableStackFuncs = true;
+                }
             }
         }
         m_enableSubroutine = EnableSubroutine;
+        m_hasStackCalls = EnableStackFuncs;
     }
 
     void CodeGenContext::InitVarMetaData() {}
@@ -1308,19 +1377,27 @@ namespace IGC
 
     uint32_t CodeGenContext::getNumGRFPerThread() const
     {
+        constexpr uint32_t DEFAULT_TOTAL_GRF_NUM = 128;
+
         if (IGC_GET_FLAG_VALUE(TotalGRFNum) != 0)
         {
             return IGC_GET_FLAG_VALUE(TotalGRFNum);
         }
         if (getModuleMetaData()->csInfo.forceTotalGRFNum != 0)
         {
-            return getModuleMetaData()->csInfo.forceTotalGRFNum;
+            {
+                return getModuleMetaData()->csInfo.forceTotalGRFNum;
+            }
+        }
+        if (hasSyncRTCalls() && IGC_GET_FLAG_VALUE(TotalGRFNum4RQ) != 0)
+        {
+            return IGC_GET_FLAG_VALUE(TotalGRFNum4RQ);
         }
         if (this->type == ShaderType::COMPUTE_SHADER && IGC_GET_FLAG_VALUE(TotalGRFNum4CS) != 0)
         {
             return IGC_GET_FLAG_VALUE(TotalGRFNum4CS);
         }
-        return 128;
+        return DEFAULT_TOTAL_GRF_NUM;
     }
 
     bool CodeGenContext::forceGlobalMemoryAllocation() const
@@ -1333,22 +1410,22 @@ namespace IGC
         return false;
     }
 
-    bool CodeGenContext::hasNoLocalToGenericCast() const
-    {
-        return false;
-    }
-
-    bool CodeGenContext::hasNoPrivateToGenericCast() const
-    {
-        return false;
-    }
-
     bool CodeGenContext::enableTakeGlobalAddress() const
     {
         return false;
     }
 
     int16_t CodeGenContext::getVectorCoalescingControl() const
+    {
+        return 0;
+    }
+
+    uint32_t CodeGenContext::getPrivateMemoryMinimalSizePerThread() const
+    {
+        return 0;
+    }
+
+    uint32_t CodeGenContext::getIntelScratchSpacePrivateMemoryMinimalSizePerThread() const
     {
         return 0;
     }
@@ -1654,6 +1731,24 @@ namespace IGC
         }
 
         return false;
+    }
+
+    bool RayDispatchShaderContext::isDispatchAlongY() const
+    {
+        const bool AlongY =
+            m_DriverInfo.supportsRaytracingDispatchComputeWalkerAlongYFirst();
+        return opts().DispatchAlongY && AlongY;
+    }
+
+    bool RayDispatchShaderContext::doSpillWidening() const
+    {
+        if (IGC_IS_FLAG_DISABLED(EnableSpillWidening))
+            return false;
+
+        // It's easier to just only do this with stateful SWStack so it's easier
+        // to find the spills later on.
+        auto Offset = getModuleMetaData()->rtInfo.SWStackSurfaceStateOffset;
+        return Offset.has_value();
     }
 
     uint64_t RayDispatchShaderContext::getShaderHash(const CShader* Prog) const

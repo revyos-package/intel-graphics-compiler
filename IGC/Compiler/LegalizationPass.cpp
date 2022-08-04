@@ -1,6 +1,6 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (C) 2017-2021 Intel Corporation
+Copyright (C) 2017-2022 Intel Corporation
 
 SPDX-License-Identifier: MIT
 
@@ -631,7 +631,7 @@ LegalizeGVNBitCastPattern(IRBuilder<>* Builder, const DataLayout* DL,
 void Legalization::visitBitCastInst(llvm::BitCastInst& I)
 {
     m_ctx->m_instrTypes.numInsts++;
-    // This is the pass that folds 2x Float into a Double replacing the bitcast intruction
+    // This is the pass that folds 2x Float into a Double replacing the bitcast instruction
     if (ConstantDataVector * vec = dyn_cast<ConstantDataVector>(I.getOperand(0)))
     {
         unsigned int nbElement = vec->getNumElements();
@@ -1660,7 +1660,8 @@ void Legalization::RecursivelyChangePointerType(Instruction* oldPtr, Instruction
         if (GetElementPtrInst * gep = dyn_cast<GetElementPtrInst>(*II))
         {
             SmallVector<Value*, 8> Idx(gep->idx_begin(), gep->idx_end());
-            GetElementPtrInst* newGep = GetElementPtrInst::Create(nullptr, newPtr, Idx, "", gep);
+            Type *BaseTy = cast<PointerType>(newPtr->getType())->getPointerElementType();
+            GetElementPtrInst* newGep = GetElementPtrInst::Create(BaseTy, newPtr, Idx, "", gep);
             newGep->setDebugLoc(gep->getDebugLoc());
             RecursivelyChangePointerType(gep, newGep);
         }

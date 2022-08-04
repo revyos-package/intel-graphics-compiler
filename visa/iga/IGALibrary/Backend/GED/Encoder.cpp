@@ -14,6 +14,7 @@ SPDX-License-Identifier: MIT
 #include "../../IR/SWSBSetter.hpp"
 #include "../../Models/Models.hpp"
 #include "../../Timer/Timer.hpp"
+#include "../../bits.hpp"
 
 #include <cstring>
 
@@ -163,7 +164,7 @@ void Encoder::encodeBlock(Block *blk)
 
         // If -Xforce-no-compact is set, do not compact any insruction
         // Otherwise, if {NoCompact} is set, do not compact the instruction
-        // Otherwise, if {Copmacted} is set on the instructionm, try to compact it and throw error on fail
+        // Otherwise, if {Compacted} is set on the instruction, try to compact it and report error on fail
         // Otherwise, if no compaction setting on the instruction, try to compact the instruction if -Xauto-compact
         // Otherwise, do not compact the instruction
         bool mustCompact = inst->hasInstOpt(InstOpt::COMPACTED);
@@ -172,6 +173,7 @@ void Encoder::encodeBlock(Block *blk)
             mustCompact = false;
             mustNotCompact = true;
         }
+
 
         int32_t iLen = 16;
         if (mustCompact || (!mustNotCompact && m_opts.autoCompact)) {
@@ -256,7 +258,8 @@ void Encoder::encodeFC(const Instruction &i)
         GED_ENCODE(BfnFC, i.getBfnFc().value);
     } else if (os.isDpasFamily()) {
         auto sf = i.getDpasFc();
-        GED_ENCODE(SystolicDepth, GetDpasSystolicDepth(sf));
+        auto sdepth = GetDpasSystolicDepth(sf);
+        GED_ENCODE(SystolicDepth, sdepth);
         GED_ENCODE(RepeatCount, GetDpasRepeatCount(sf));
     } else if (os.isSendOrSendsFamily()) {
         if (platform() >= Platform::XE) {
@@ -709,7 +712,7 @@ void Encoder::encodeBranchingInstruction(const Instruction& inst)
                 GED_ENCODE(Src0Width,      2);
                 GED_ENCODE(Src0HorzStride, 1);
             }
-            // though it's not state in the spec, ICL requires src0 region be set to <2;4,1>
+            // though it's not stated in the spec, ICL requires src0 region be set to <2;4,1>
             else if (callNeedsSrc0Region241(inst)) {
                 GED_ENCODE(Src0VertStride, 2);
                 GED_ENCODE(Src0Width,      4);
@@ -821,7 +824,7 @@ void Encoder::encodeSendInstruction(const Instruction& i)
     if (os.isSendFamily()) {
         encodeSendDestination(i.getDestination());
         encodeSendSource0(i.getSource(0));
-        if (m_model.supportsUnifiedSend()) {
+        if (m_model.supportsXeSend()) {
             encodeSendsSource1(i.getSource(1));
         }
     } else if (os.isSendsFamily()) {
@@ -860,15 +863,15 @@ void Encoder::encodeSendDescs(const Instruction& i)
         encodeSendDescsXe(i);
     } else if (platform() == Platform::XE_HP) {
         encodeSendDescsXeHP(i);
-    } else if (platform() == Platform::XE_HPG ||
-        platform() == Platform::XE_HPC)
+    } else if (platform() == Platform::XE_HPG || platform() == Platform::XE_HPC
+        )
     {
         encodeSendDescsXeHPG(i);
     } else {
         errorT("unsupported platform");
     }
 
-    bool noEOTinExDesc = m_model.supportsUnifiedSend();
+    bool noEOTinExDesc = m_model.supportsXeSend();
     if (noEOTinExDesc &&
         i.getExtMsgDescriptor().isImm() &&
         (i.getExtMsgDescriptor().imm & 1 << 5))
@@ -1399,6 +1402,7 @@ void Encoder::encodeSendDestinationDataType(const Operand& dst)
     GED_ENCODE(DstDataType, lowerDataType(t));
 }
 
+
 void Encoder::encodeSendDestination(const Operand& dst)
 {
     if (m_model.supportsUnarySend()) {
@@ -1420,9 +1424,9 @@ void Encoder::encodeSendDestination(const Operand& dst)
     GED_ENCODE(DstRegFile,
         lowerRegFile(dst.getDirRegName()));
 
-    if (dst.getKind() ==  Operand::Kind::DIRECT) {
+    if (dst.getKind() == Operand::Kind::DIRECT) {
         encodeSendDirectDestination(dst);
-    } else if (dst.getKind() ==  Operand::Kind::INDIRECT) {
+    } else if (dst.getKind() == Operand::Kind::INDIRECT) {
         encodeSendDestinationDataType(dst);
         if (m_opcode != Op::SENDS && m_opcode != Op::SENDSC) {
             GED_ENCODE(DstHorzStride, static_cast<uint32_t>(dst.getRegion().getHz())); // not used for sends
@@ -1447,7 +1451,6 @@ void Encoder::encodeSendSource0(const Operand& src)
             fatalT("src0: unsupported source operand kind/addrMode "
                 "(malformed IR)");
             return;
-            break;
         }
     }
 
@@ -1456,9 +1459,9 @@ void Encoder::encodeSendSource0(const Operand& src)
 
     auto t = src.getType() == Type::INVALID ? Type::UD : src.getType();
 
-    if (src.getKind() ==  Operand::Kind::DIRECT)
+    if (src.getKind() == Operand::Kind::DIRECT)
     {
-        if (m_model.supportsUnifiedSend()){
+        if (m_model.supportsXeSend()){
             GED_ENCODE(Src0RegNum, src.getDirRegRef().regNum);
         } else {
             GED_ENCODE(Src0DataType, lowerDataType(t));
@@ -1466,14 +1469,15 @@ void Encoder::encodeSendSource0(const Operand& src)
             GED_ENCODE(Src0SubRegNum, src.getDirRegRef().subRegNum);
         }
     }
-    else if (src.getKind() ==  Operand::Kind::INDIRECT)
+    else if (src.getKind() == Operand::Kind::INDIRECT)
     {
         {
+            // legacy send indirect src operand
             GED_ENCODE(Src0DataType, lowerDataType(t));
             GED_ENCODE(Src0AddrSubRegNum, src.getIndAddrReg().subRegNum);
-            // For platform >= XeHPC, the ImmAddr is represented in Word Offset in bianry,
-            //     platform <  XeHPC, the ImmAddr is represented in Byte Offset in bianry
-            // And for all platforms, the ImmAddr is represented in Byet Offset in assembly
+            // For platform >= XeHPC, the ImmAddr is represented in Word Offset in binary,
+            //     platform <  XeHPC, the ImmAddr is represented in Byte Offset in binary
+            // And for all platforms, the ImmAddr is represented in Byte Offset in assembly
             if (platform() >= Platform::XE_HPC) {
                 GED_ENCODE(Src0AddrImm, src.getIndImmAddr() / 2);
             } else {
@@ -1506,12 +1510,12 @@ void Encoder::encodeSendsSource0(const Operand& src)
         break;
     }
 
-    if (src.getKind() ==  Operand::Kind::DIRECT)
+    if (src.getKind() == Operand::Kind::DIRECT)
     {
         GED_ENCODE(Src0RegNum,    src.getDirRegRef().regNum);
         GED_ENCODE(Src0SubRegNum, src.getDirRegRef().subRegNum);
     }
-    else if (src.getKind() ==  Operand::Kind::INDIRECT)
+    else if (src.getKind() == Operand::Kind::INDIRECT)
     {
         auto immAddr = src.getIndImmAddr();
         // For platforms >= XeHPC, ImmAddr is encoded as words,
@@ -1531,7 +1535,8 @@ void Encoder::encodeSendsSource1(const Operand& src)
     //GED_ENCODE(Src1AddrMode, GED_ADDR_MODE_Direct);
     GED_REG_FILE gedRegFile = lowerRegFile(src.getDirRegName());
     GED_ENCODE(Src1RegFile, gedRegFile);
-    GED_ENCODE(Src1RegNum, src.getDirRegRef().regNum);
+    if (gedRegFile == GED_REG_FILE_GRF)
+        GED_ENCODE(Src1RegNum, src.getDirRegRef().regNum);
 }
 
 void Encoder::encodeSendsDestination(const Operand& dst)
@@ -1873,6 +1878,7 @@ void Encoder::encodeOptions(const Instruction& inst)
         GED_ENCODE(ThreadCtrl, GED_THREAD_CTRL_Atomic);
     }
 
+
     if (inst.hasInstOpt(InstOpt::SWITCH) && m_model.supportsHwDeps())
     {
         if (inst.getOp() == Op::NOP) {
@@ -2034,9 +2040,8 @@ void Encoder::encodeTernarySrcRegionVert(SourceIndex S, Region::Vert v) {
 
 // fixes stuff where GED just ignores or where it refuses to allow us to
 // set bits.  This should be empty unless GED fixes are in flight.
-void Encoder::applyGedWorkarounds(
-    const Kernel& /* k */, size_t /* bitsLen */)
+void Encoder::applyGedWorkarounds(const Kernel&, size_t)
 {
-    // NOTE: there should be a GED raw bits setter (we can use this for
-    // workarounds...)
+  // Also consider
+  // GED_RETURN_VALUE GED_SetRawBits(ged_ins_t* ins, uint8_t low, uint8_t high, const uint64_t value)
 }

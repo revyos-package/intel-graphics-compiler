@@ -21,6 +21,7 @@ SPDX-License-Identifier: MIT
 #include <llvm/Analysis/LoopInfo.h>
 #include <llvm/IR/DataLayout.h>
 #include "common/LLVMWarningsPop.hpp"
+#include "llvmWrapper/IR/Instructions.h"
 
 namespace llvm
 {
@@ -188,6 +189,7 @@ namespace IGC
         bool MatchBranch(llvm::BranchInst& I);
         bool MatchShuffleBroadCast(llvm::GenIntrinsicInst& I);
         bool MatchWaveShuffleIndex(llvm::GenIntrinsicInst& I);
+        bool MatchWaveInstruction(llvm::GenIntrinsicInst& I);
         bool MatchRegisterRegion(llvm::GenIntrinsicInst& I);
 
         Pattern* Match(llvm::Instruction& inst);
@@ -257,6 +259,8 @@ namespace IGC
         bool NeedInstruction(llvm::Instruction& I);
         bool SIMDConstExpr(llvm::Instruction* v);
         bool IsConstOrSimdConstExpr(llvm::Value* C);
+        bool FlushesDenormsOnOutput(llvm::Instruction& I);
+        bool FlushesDenormsOnInput(llvm::Instruction& I);
 
         // Place a constant Val into the constant pool. This constant should be
         // available in basic block UseBlock.
@@ -336,7 +340,7 @@ namespace IGC
     {
         if (llvm::CallInst * intrin = llvm::dyn_cast<llvm::CallInst>(&v))
         {
-            return intrin->getNumArgOperands();
+            return IGCLLVM::getNumArgOperands(intrin);
         }
         return v.getNumOperands();
     }

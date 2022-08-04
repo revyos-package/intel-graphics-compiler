@@ -21,9 +21,8 @@ SPDX-License-Identifier: MIT
 #include <llvm/IR/Module.h>
 #include <llvm/IR/Function.h>
 #include <llvm/Analysis/TargetLibraryInfo.h>
-#include <llvm/Transforms/InstCombine/InstCombineWorklist.h>
-#include <llvm/Transforms/InstCombine/InstCombine.h>
 
+#include <llvmWrapper/Transforms/InstCombine/InstCombineWorklist.h>
 #include <llvmWrapper/Transforms/Utils.h>
 
 #include "common/LLVMWarningsPop.hpp"
@@ -48,9 +47,9 @@ SPDX-License-Identifier: MIT
 #include "Compiler/Optimizer/Scalarizer.h"
 #include "Compiler/Optimizer/OpenCLPasses/DebuggerSupport/ImplicitGIDPass.hpp"
 #include "Compiler/Optimizer/OpenCLPasses/DebuggerSupport/ImplicitGIDRestoring.hpp"
-#include "Compiler/Optimizer/OpenCLPasses/ExtenstionFuncs/ExtensionArgAnalysis.hpp"
-#include "Compiler/Optimizer/OpenCLPasses/ExtenstionFuncs/ExtensionFuncsAnalysis.hpp"
-#include "Compiler/Optimizer/OpenCLPasses/ExtenstionFuncs/ExtensionFuncResolution.hpp"
+#include "Compiler/Optimizer/OpenCLPasses/ExtensionFuncs/ExtensionArgAnalysis.hpp"
+#include "Compiler/Optimizer/OpenCLPasses/ExtensionFuncs/ExtensionFuncsAnalysis.hpp"
+#include "Compiler/Optimizer/OpenCLPasses/ExtensionFuncs/ExtensionFuncResolution.hpp"
 #include "Compiler/Optimizer/OpenCLPasses/ImageFuncs/ImageFuncsAnalysis.hpp"
 #include "Compiler/Optimizer/OpenCLPasses/ImageFuncs/ImageFuncResolution.hpp"
 #include "Compiler/Optimizer/OpenCLPasses/ImageFuncs/ResolveSampledImageBuiltins.hpp"
@@ -93,11 +92,11 @@ SPDX-License-Identifier: MIT
 #include "Compiler/MetaDataUtilsWrapper.h"
 #include "Compiler/SPIRMetaDataTranslation.h"
 #include "Compiler/Optimizer/OpenCLPasses/ErrorCheckPass.h"
+#include "Compiler/Optimizer/OpenCLPasses/PoisonFP64KernelsPass.h"
 #include "Compiler/Optimizer/OpenCLPasses/DpasFuncs/DpasFuncsResolution.hpp"
 #include "Compiler/Optimizer/OpenCLPasses/LSCFuncs/LSCFuncsResolution.hpp"
 #include "Compiler/Optimizer/OpenCLPasses/NamedBarriers/NamedBarriersResolution.hpp"
 #include "Compiler/Optimizer/OpenCLPasses/JointMatrixFuncsResolutionPass.h"
-#include "Compiler/Optimizer/OpenCLPasses/ResolvePointersComparison.h"
 #include "Compiler/Optimizer/OpenCLPasses/RayTracing/ResolveOCLRaytracingBuiltins.hpp"
 #include "AdaptorCommon/RayTracing/RayTracingPasses.hpp"
 #include "Compiler/MetaDataApi/IGCMetaDataHelper.h"
@@ -182,7 +181,13 @@ static void CommonOCLBasedPasses(
     std::unique_ptr<llvm::Module> BuiltinSizeModule)
 {
 #if defined( _DEBUG )
-    llvm::verifyModule(*pContext->getModule());
+    bool brokenDebugInfo = false;
+    IGC_ASSERT(nullptr != pContext->getModule());
+    IGC_ASSERT(false == llvm::verifyModule(*pContext->getModule(), &dbgs(), &brokenDebugInfo));
+
+    // We ignore incorrect DI for now
+    // We used if (false == pContext->m_hasLegacyDebugInfo), instead of passing &brokenDebugInfo earlier
+    (void)brokenDebugInfo;
 #endif
 
     COMPILER_TIME_START(pContext, TIME_UnificationPasses);
@@ -291,7 +296,6 @@ static void CommonOCLBasedPasses(
     mpmSPIR.add(new PreprocessSPVIR());
 #endif // IGC_SCALAR_USE_KHRONOS_SPIRV_TRANSLATOR
     mpmSPIR.add(new TypesLegalizationPass());
-    mpmSPIR.add(new ResolvePointersComparison());
     mpmSPIR.add(new TargetLibraryInfoWrapperPass());
     mpmSPIR.add(createDeadCodeEliminationPass());
     mpmSPIR.add(new MetaDataUtilsWrapper(pMdUtils, pContext->getModuleMetaData()));
@@ -371,9 +375,6 @@ static void CommonOCLBasedPasses(
         mpm.add(createPromoteMemoryToRegisterPass());
     }
 
-    mpm.add(new CatchAllLineNumber());
-
-
     // OCL has built-ins so it always need to run inlining
     {
         // Estimate maximal function size in the module and disable subroutine if not profitable.
@@ -387,7 +388,7 @@ static void CommonOCLBasedPasses(
         // Report undef references after setting func attribs for import linking
         mpm.add(new UndefinedReferencesPass());
 
-        if (!IGC::ForceAlwaysInline())
+        if (!IGC::ForceAlwaysInline(pContext))
         {
             int Threshold = IGC_GET_FLAG_VALUE(OCLInlineThreshold);
             mpm.add(createFunctionInliningPass(Threshold));
@@ -401,6 +402,9 @@ static void CommonOCLBasedPasses(
 
         // Check after GlobalDCE in case of doubles in dead functions
         mpm.add(new ErrorCheck());
+        if (pContext->m_InternalOptions.EnableUnsupportedFP64Poisoning) {
+            mpm.add(new PoisonFP64Kernels());
+        }
 
         mpm.add(new LowerInvokeSIMD());
 
@@ -429,14 +433,17 @@ static void CommonOCLBasedPasses(
 
     if (IGC_IS_FLAG_ENABLED(EnableGASResolver))
     {
+        // Run InferAddressSpaces pass first - to propagate named addrspaces
+        // through elementary LLVM instructions, then run custom ResolveGAS
+        // pass to handle IGC specific instructions, like builtins etc.
+        mpm.add(createInferAddressSpacesPass(ADDRESS_SPACE_GENERIC));
+
         // Add fix up of illegal `addrspacecast` in respect to OCL 2.0 spec.
         mpm.add(createFixAddrSpaceCastPass());
         mpm.add(createResolveGASPass());
 
         if (IGC_IS_FLAG_ENABLED(EnableLowerGPCallArg))
         {
-            if (IGC_IS_FLAG_ENABLED(DetectCastToGAS))
-                mpm.add(createCastToGASAnalysisPass());
             mpm.add(createLowerGPCallArg());
         }
 
@@ -508,6 +515,9 @@ static void CommonOCLBasedPasses(
 
     // check for unsupported intrinsics
     mpm.add(new ErrorCheck());
+    if (pContext->m_InternalOptions.EnableUnsupportedFP64Poisoning) {
+        mpm.add(new PoisonFP64Kernels());
+    }
 
     mpm.add(new ImageFuncResolution());
     mpm.add(new Image3dToImage2darray());
@@ -571,6 +581,9 @@ static void CommonOCLBasedPasses(
 
     mpm.add(createLowerSwitchPass());
     mpm.add(createTypeLegalizerPass());
+
+    mpm.add(new CatchAllLineNumber());
+
     mpm.run(*pContext->getModule());
 
     // Following functions checks whether -g option is specified.

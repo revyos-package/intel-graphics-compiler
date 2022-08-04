@@ -61,7 +61,7 @@ struct zeInfoPayloadArgument
 {
     bool operator==(const zeInfoPayloadArgument& other) const
     {
-        return arg_type == other.arg_type && offset == other.offset && size == other.size && arg_index == other.arg_index && addrmode == other.addrmode && addrspace == other.addrspace && access_type == other.access_type && sampler_index == other.sampler_index && source_offset == other.source_offset;
+        return arg_type == other.arg_type && offset == other.offset && size == other.size && arg_index == other.arg_index && addrmode == other.addrmode && addrspace == other.addrspace && access_type == other.access_type && sampler_index == other.sampler_index && source_offset == other.source_offset && slm_alignment == other.slm_alignment;
     }
     zeinfo_str_t arg_type;
     zeinfo_int32_t offset = 0;
@@ -72,6 +72,7 @@ struct zeInfoPayloadArgument
     zeinfo_str_t access_type;
     zeinfo_int32_t sampler_index = -1;
     zeinfo_int32_t source_offset = -1;
+    zeinfo_int32_t slm_alignment = 0;
 };
 struct zeInfoPerThreadPayloadArgument
 {
@@ -138,6 +139,10 @@ typedef std::vector<zeInfoBindingTableIndex> BindingTableIndicesTy;
 typedef std::vector<zeInfoPerThreadMemoryBuffer> PerThreadMemoryBuffersTy;
 struct zeInfoKernel
 {
+    bool operator==(const zeInfoKernel& other) const
+    {
+        return name == other.name && execution_env == other.execution_env && payload_arguments == other.payload_arguments && per_thread_payload_arguments == other.per_thread_payload_arguments && binding_table_indices == other.binding_table_indices && per_thread_memory_buffers == other.per_thread_memory_buffers && experimental_properties == other.experimental_properties && debug_env == other.debug_env;
+    }
     zeinfo_str_t name;
     zeInfoExecutionEnv execution_env;
     PayloadArgumentsTy payload_arguments;
@@ -147,16 +152,31 @@ struct zeInfoKernel
     zeInfoExperimentalProperties experimental_properties;
     zeInfoDebugEnv debug_env;
 };
+struct zeInfoFunction
+{
+    bool operator==(const zeInfoFunction& other) const
+    {
+        return name == other.name && execution_env == other.execution_env;
+    }
+    zeinfo_str_t name;
+    zeInfoExecutionEnv execution_env;
+};
 typedef std::vector<zeInfoKernel> KernelsTy;
+typedef std::vector<zeInfoFunction> FunctionsTy;
 typedef std::vector<zeInfoHostAccess> HostAccessesTy;
 struct zeInfoContainer
 {
+    bool operator==(const zeInfoContainer& other) const
+    {
+        return version == other.version && kernels == other.kernels && functions == other.functions && global_host_access_table == other.global_host_access_table;
+    }
     zeinfo_str_t version;
     KernelsTy kernels;
+    FunctionsTy functions;
     HostAccessesTy global_host_access_table;
 };
 struct PreDefinedAttrGetter{
-    static zeinfo_str_t getVersionNumber() { return "1.12"; }
+    static zeinfo_str_t getVersionNumber() { return "1.14"; }
 
     enum class ArgThreadSchedulingMode {
         age_based,

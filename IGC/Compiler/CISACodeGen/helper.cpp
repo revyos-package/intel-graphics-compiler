@@ -173,7 +173,8 @@ namespace IGC
         const BufferType bufType)
     {
         IGC_ASSERT(bufType == CONSTANT_BUFFER ||
-            bufType == BINDLESS_CONSTANT_BUFFER);
+            bufType == BINDLESS_CONSTANT_BUFFER ||
+            bufType == BINDLESS);
 
         if (pContext->m_DriverInfo.ForceUntypedBindlessConstantBuffers() &&
             bufType == BINDLESS_CONSTANT_BUFFER)
@@ -221,6 +222,26 @@ namespace IGC
             type = static_cast<BufferType>(temp.bits.bufType - 1);
         }
         return type;
+    }
+
+    ///
+    /// returns the number of exit blocks iin the given function.
+    ///
+    unsigned getNumberOfExitBlocks(llvm::Function& function)
+    {
+        unsigned numberOfExitBlocks = 0;
+
+        for (llvm::BasicBlock& block : function.getBasicBlockList())
+        {
+            llvm::Instruction* terminator = block.getTerminator();
+
+            if (llvm::isa_and_nonnull<ReturnInst>(terminator))
+            {
+                ++numberOfExitBlocks;
+            }
+        }
+
+        return numberOfExitBlocks;
     }
 
     ///
@@ -676,6 +697,9 @@ namespace IGC
     // Get GRF offset from GenISA_RuntimeValue intrinsic call
     bool GetGRFOffsetFromRTV(Value* pointerSrc, unsigned& GRFOffset)
     {
+        if (!pointerSrc)
+            return false;
+
         if (GenIntrinsicInst * inst = dyn_cast<GenIntrinsicInst>(pointerSrc))
         {
             // For bindless pointers with encoded metadata
@@ -826,7 +850,7 @@ namespace IGC
     }
 
     // Get constant address from load/ldraw instruction
-    bool getConstantAddress(llvm::Instruction& I, ConstantAddress& cl, CodeGenContext* pContext, bool& directBuf, bool& statelessBuf, bool& bindlessBuf)
+    bool getConstantAddress(llvm::Instruction& I, ConstantAddress& cl, CodeGenContext* pContext, bool& directBuf, bool& statelessBuf, bool& bindlessBuf, unsigned int& TableOffset)
     {
         // Check if the load instruction is with constant buffer address
         unsigned as;
@@ -854,7 +878,23 @@ namespace IGC
             as = ldRaw->getResourceValue()->getType()->getPointerAddressSpace();
             ptrVal = ldRaw->getResourceValue();
             offsetVal = ldRaw->getOffsetValue();
-            bindlessBuf = (DecodeBufferType(as) == SSH_BINDLESS_CONSTANT_BUFFER);
+            bindlessBuf = (DecodeBufferType(as) == SSH_BINDLESS_CONSTANT_BUFFER) ||
+                                    (DecodeBufferType(as) == BINDLESS_CONSTANT_BUFFER);
+            if (bindlessBuf)
+            {
+                if (IntToPtrInst* ptrToInt = dyn_cast<IntToPtrInst>(ptrVal))
+                {
+                    if (Instruction* instr = dyn_cast<Instruction>(ptrToInt->getOperand(0)))
+                    {
+                        if (instr->getOpcode() == Instruction::Add &&
+                            isa<ConstantInt>(instr->getOperand(1)))
+                        {
+                            ConstantInt* src1 = cast<ConstantInt>(instr->getOperand(1));
+                            TableOffset = int_cast<unsigned int>(src1->getZExtValue()) >> pContext->platform.getBSOLocInExtDescriptor();
+                        }
+                    }
+                }
+            }
         }
         else
             return false;
@@ -919,7 +959,7 @@ namespace IGC
         llvm::Function* pCalledFunc = pIntr->getCalledFunction();
 
         // Look at the intrinsic and figure out which pointer to change
-        int num_ops = pIntr->getNumArgOperands();
+        int num_ops = IGCLLVM::getNumArgOperands(pIntr);
         llvm::SmallVector<llvm::Value*, 5> args;
 
         for (int i = 0; i < num_ops; ++i)
@@ -1147,6 +1187,8 @@ namespace IGC
             case GenISAIntrinsic::GenISA_fcmpxchgatomicraw:
             case GenISAIntrinsic::GenISA_simdBlockRead:
             case GenISAIntrinsic::GenISA_simdBlockWrite:
+            case GenISAIntrinsic::GenISA_LSCLoad:
+            case GenISAIntrinsic::GenISA_LSCLoadBlock:
                 pBuffer = intr->getOperand(0);
                 break;
             case GenISAIntrinsic::GenISA_intatomicrawA64:
@@ -1411,6 +1453,40 @@ namespace IGC
         }
 
         return false;
+    }
+
+    bool isBarrierIntrinsic(const llvm::Instruction* I)
+    {
+        const GenIntrinsicInst* GII = dyn_cast<GenIntrinsicInst>(I);
+        if (!GII)
+            return false;
+
+        switch (GII->getIntrinsicID())
+        {
+        case GenISAIntrinsic::GenISA_threadgroupbarrier:
+        case GenISAIntrinsic::GenISA_threadgroupbarrier_signal:
+        case GenISAIntrinsic::GenISA_threadgroupbarrier_wait:
+        case GenISAIntrinsic::GenISA_threadgroupnamedbarriers_signal:
+        case GenISAIntrinsic::GenISA_threadgroupnamedbarriers_wait:
+        case GenISAIntrinsic::GenISA_wavebarrier:
+            return true;
+        default:
+            return false;
+        }
+    }
+
+    bool isUserFunctionCall(const llvm::Instruction* I)
+    {
+        const CallInst* callInst = dyn_cast<CallInst>(I);
+
+        // Return true if:
+        // 1. callInst->getCalledFunction() == nullptr, this means indirect function call
+        // OR
+        // 2. Called function is not an Intrinsic.
+        bool isUserFunction = (callInst != nullptr) &&
+            ((callInst->getCalledFunction() == nullptr) || !callInst->getCalledFunction()->isIntrinsic());
+
+        return isUserFunction;
     }
 
     bool isURBWriteIntrinsic(const llvm::Instruction* I)
@@ -1957,6 +2033,24 @@ namespace IGC
     bool isA64Ptr(llvm::PointerType* PT, CodeGenContext* pContext)
     {
         return pContext->getRegisterPointerSizeInBits(PT->getAddressSpace()) == 64;
+    }
+
+    int getFunctionControl(const CodeGenContext* pContext)
+    {
+        // Let Key have a higher priority. Flag is used if the key isn't set.
+        int val = IGC_GET_FLAG_VALUE(FunctionControl);
+        if (val == FLAG_FCALL_DEFAULT)
+        {
+            if (pContext->type == ShaderType::OPENCL_SHADER)
+            {
+                auto CLCtx = static_cast<const OpenCLProgramContext*>(pContext);
+                if (CLCtx->m_InternalOptions.FunctionControl > 0)
+                {
+                    val = CLCtx->m_InternalOptions.FunctionControl;
+                }
+            }
+        }
+        return val;
     }
 
     bool IsBitCastForLifetimeMark(const llvm::Value* V)

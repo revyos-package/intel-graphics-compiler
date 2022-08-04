@@ -7,6 +7,7 @@ SPDX-License-Identifier: MIT
 ============================= end_copyright_notice ===========================*/
 
 #include "AdaptorCommon/ImplicitArgs.hpp"
+#include "AdaptorCommon/RayTracing/RTLoggingManager.h"
 #include "Compiler/Optimizer/OpenCLPasses/OpenCLPrintf/OpenCLPrintfResolution.hpp"
 #include "Compiler/Optimizer/OpenCLPasses/OpenCLPrintf/OpenCLPrintfAnalysis.hpp"
 #include "Compiler/IGCPassSupport.h"
@@ -333,6 +334,12 @@ Value* OpenCLPrintfResolution::processPrintfString(Value* printfArg, Function& F
         {
             IGC_ASSERT_MESSAGE(0, "Unexpected printf argument (expected string literal)");
             return 0;
+        }
+
+        if (m_CGContext->type == ShaderType::RAYTRACING_SHADER)
+        {
+            auto* Ctx = static_cast<RayDispatchShaderContext*>(m_CGContext);
+            m_stringIndex = *Ctx->LogMgr.getIndex(formatStringConst->getAsCString());
         }
 
         // Add new metadata node and put the printf string into it.
@@ -746,7 +753,7 @@ Value* OpenCLPrintfResolution::fixupPrintfArg(CallInst& printfCall, Value* arg, 
 
 void OpenCLPrintfResolution::preprocessPrintfArgs(CallInst& printfCall)
 {
-    for (int i = 0, numArgs = printfCall.getNumArgOperands(); i < numArgs; ++i)
+    for (int i = 0, numArgs = IGCLLVM::getNumArgOperands(&printfCall); i < numArgs; ++i)
     {
         Value* arg = printfCall.getOperand(i);
         Type* argType = arg->getType();
@@ -796,6 +803,10 @@ CallInst* OpenCLPrintfResolution::genAtomicAdd(Value* outputBufferPtr,
 unsigned int OpenCLPrintfResolution::getArgTypeSize(IGC::SHADER_PRINTF_TYPE argType, uint vecSize)
 {
     switch (argType) {
+    case IGC::SHADER_PRINTF_BYTE:
+        return 1;
+    case IGC::SHADER_PRINTF_SHORT:
+        return 2;
     case IGC::SHADER_PRINTF_LONG:
     case IGC::SHADER_PRINTF_DOUBLE:
     case IGC::SHADER_PRINTF_POINTER:    // Runtime expects 64 bit value for pointer regardless of its actual size.

@@ -1,6 +1,6 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (C) 2017-2021 Intel Corporation
+Copyright (C) 2017-2022 Intel Corporation
 
 SPDX-License-Identifier: MIT
 
@@ -50,6 +50,10 @@ G4_Declare* DeclarePool::cloneDeclare(G4_Kernel& kernel, std::map<G4_Declare*, G
     G4_RegVar* regVar = new (mem) G4_RegVar(cloneDcl, G4_RegVar::RegVarType::Default);
     cloneDcl->setRegVar(regVar);
     cloneDcl->setSubRegAlign(dcl->getSubRegAlign());
+    if (dcl->getRegFile() == G4_FLAG)
+    {
+        cloneDcl->setNumberFlagElements((uint8_t )dcl->getNumberFlagElements());
+    }
     if (topDcl)
     {
         assert(dcl != topDcl);
@@ -173,7 +177,7 @@ void IR_Builder::bindInputDecl(G4_Declare* dcl, int offset)
     dcl->setRegFile(G4_INPUT);
     unsigned int reservedGRFNum = m_options->getuInt32Option(vISA_ReservedGRFNum);
     if (regNum + dcl->getNumRows() > kernel.getNumRegTotal() - reservedGRFNum) {
-        MUST_BE_TRUE(false, "INPUT payload execeeds the regsiter number");
+        MUST_BE_TRUE(false, "INPUT payload execeeds the register number");
     }
 }
 
@@ -419,25 +423,23 @@ void IR_Builder::predefinedVarRegAssignment(uint8_t inputSize)
 // -- replace pre-defined V2 (thread_y)
 void IR_Builder::expandPredefinedVars()
 {
-
-    // Use FFTID from msg header
-    // and (1) hw_tid, r0.5, 0x3ff
-    //
-    // 9:0     FFTID. This ID is assigned by TS and is a unique identifier for the thread in
-    // comparison to other concurrent root threads. It is used to free up resources used
-    // by the thread upon thread completion.
-    //
-    // [Pre-DevBDW]: Format = U8. Bits 9:8 are Reserved, MBZ.
-    //
-    // [0:8] For Pre-Gen9
-    // [0:9] For Gen10+
-    //
-
     // first non-label instruction
     auto iter = std::find_if(instList.begin(), instList.end(), [](G4_INST* inst) { return !inst->isLabel(); });
 
     if (preDefVars.isHasPredefined(PreDefinedVarsInternal::HW_TID))
     {
+        // Use FFTID from msg header
+        // and (1) hw_tid, r0.5, 0x3ff
+        //
+        // 9:0     FFTID. This ID is assigned by TS and is a unique identifier for the thread in
+        // comparison to other concurrent root threads. It is used to free up resources used
+        // by the thread upon thread completion.
+        //
+        // [Pre-DevBDW]: Format = U8. Bits 9:8 are Reserved, MBZ.
+        //
+        // [0:8] For Pre-Gen9
+        // [0:9] For Gen10+
+        //
         const unsigned fftid_mask = getPlatform() >= GENX_CNL ? 0x3FF : 0x1FF;
         G4_SrcRegRegion* src = createSrc(realR0->getRegVar(), 0, 5, getRegionScalar(), Type_UD);
         G4_Imm* mask1 = createImm(fftid_mask, Type_UD);
@@ -826,6 +828,7 @@ IR_Builder::IR_Builder(
         memset(metaData, 0, sizeof(FINALIZER_INFO));
     }
 
+    usedBarriers = BitSet(kernel.getMaxNumOfBarriers(), false);
     fcPatchInfo = NULL;
 
     if (!getIsPayload())
@@ -952,6 +955,7 @@ void IR_Builder::initScratchSurfaceOffset()
         {
             G4_DstRegRegion* andDst = createDstRegRegion(scratchSurfaceOffset, 1);
             auto andInst = createBinOp(G4_and, g4::SIMD1, andDst, R0_5, createImm(0xFFFFFC00, Type_UD), InstOpt_WriteEnable, true);
+            andInst->setCISAOff(UNMAPPABLE_VISA_INDEX);
             instList.pop_back();
             auto iter = std::find_if(instList.begin(), instList.end(), [](G4_INST* inst) { return !inst->isLabel(); });
             instList.insert(iter, andInst);
@@ -2076,6 +2080,7 @@ G4_InstSend* IR_Builder::createSplitSendInst(
     {
         src3 = createImm(((G4_SendDescRaw *)msgDesc)->getExtendedDesc(), Type_UD);
     }
+
     G4_InstSend* m = new (mem) G4_InstSend(
         *this, prd, op, execSize, dst, src0, src1, msg, src3, options, msgDesc);
 
@@ -2795,6 +2800,7 @@ G4_SendDescRaw* IR_Builder::createLscMsgDesc(
     return g4desc;
 }
 
+
 G4_SendDescRaw * IR_Builder::createLscDesc(
     SFID sfid,
     uint32_t desc,
@@ -2807,6 +2813,7 @@ G4_SendDescRaw * IR_Builder::createLscDesc(
     return msgDesc;
 }
 
+
 G4_InstSend *IR_Builder::createLscSendInst(
     G4_Predicate *pred,
     G4_DstRegRegion *dst,
@@ -2818,6 +2825,7 @@ G4_InstSend *IR_Builder::createLscSendInst(
     LSC_ADDR_TYPE addrType,
     bool emitA0RegDef)
 {
+
     uint32_t exDesc = msgDesc->getExtendedDesc();
     G4_Operand *surface = msgDesc->getSurface();   // BTI or SS/BSS
     G4_Operand *exDescOpnd = nullptr;
@@ -2902,9 +2910,10 @@ G4_InstSend *IR_Builder::createLscSendInst(
         exDescOpnd = createImm(exDesc, Type_UD);
     }
 
+    uint32_t descVal = (uint32_t)msgDesc->getDesc();
     return createSplitSendInst(
         pred, G4_sends, execSize, dst, src0, src1,
-        createImm(msgDesc->getDesc(), Type_UD),
+        createImm(descVal, Type_UD),
         option, msgDesc, exDescOpnd, true);
 }
 

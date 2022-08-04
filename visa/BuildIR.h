@@ -15,6 +15,7 @@ SPDX-License-Identifier: MIT
 #include <set>
 #include <string>
 
+#include "BitSet.h"
 #include "G4_Kernel.hpp"
 #include "G4_IR.hpp"
 #include "InstSplit.h"
@@ -312,9 +313,13 @@ private:
 
     FINALIZER_INFO*       metaData = nullptr;
     CompilerStats         compilerStats;
+    // Use a BitSet to track the barrier IDs used
+    BitSet                usedBarriers;
 
     int                   subroutineId = -1;   // the kernel itself has id 0, as we always emit a subroutine label for kernel too
     enum VISA_BUILD_TYPE type; // as opposed to what?
+
+    uint32_t             m_next_local_label_id = 0;
 
     // pre-defined declare that binds to R0 (the entire GRF)
     // when pre-emption is enabled, builtinR0 is replaced by a temp,
@@ -664,6 +669,19 @@ public:
     unsigned getGenxSamplerIOSize() const {return kernel.getGenxSamplerIOSize();}
     FINALIZER_INFO* getJitInfo() {return metaData;}
     CompilerStats &getcompilerStats() {return compilerStats;}
+    BitSet& usedBarries() {return usedBarriers;}
+    // Return the max id set + 1 as the number of barriers used. Ideally the
+    // number of bits set can be used to represent the number of barriers.
+    // However, In current programming model the barriers should be allocated
+    // sequentially, so here we return max id + 1 to make sure of that.
+    unsigned numBarriers() const {
+        int maxId = usedBarriers.findLastIn(0, kernel.getMaxNumOfBarriers());
+        // maxId + 1 would also cover the case, which returns -1, that no bits
+        // are set.
+        return maxId + 1;
+    }
+    void updateBarrier();
+    void updateNamedBarrier(G4_Operand* barrierId);
 
     G4_Declare* cloneDeclare(std::map<G4_Declare*, G4_Declare*>& dclMap, G4_Declare* dcl);
 
@@ -1113,12 +1131,50 @@ public:
     // a new null-terminated copy of "lab" is created for the new label, so
     // caller does not have to allocate memory for lab
     //
+    // Note that "lab" should be unique within CISA_IR_BUILDER.
     G4_Label* createLabel(const std::string &lab, VISA_Label_Kind kind)
     {
         auto labStr = lab.c_str();
         size_t len = strlen(labStr) + 1;
         char* new_str = (char*)mem.alloc(len);  // +1 for null that ends the string
         memcpy_s(new_str, len, labStr, len);
+        return new (mem) G4_Label(new_str);
+    }
+
+    uint32_t getAndUpdateNextLabelId() { return m_next_local_label_id++; }
+    //
+    // createLocalBlockLabel() creates a unique label of type LABEL_BLOCK.
+    //
+    // Return a new G4_Label whose name is a null-terminated local label that
+    // always starts with "_". This label is guaranteed to be unique within a
+    // kernel and all its functions (within CISA_IR_BUILDER).
+    // It is in the form:
+    //
+    //       label name:  _[<kernelName>|L]_f<functionId>_<func_local_label_id>_<lab>
+    //
+    //    where optional <lab> is used for annotating the label for readability.
+    // If no kernel name or kernel name is too long, the label will start with "_L".
+    //
+    G4_Label* createLocalBlockLabel(const std::string& lab = "")
+    {
+        const char* cstr_kname = kernel.getName();
+        std::string kname("L");
+        if (cstr_kname)
+        {
+            std::string tName = sanitizeLabelString(cstr_kname);
+            // cstr_kname is just for readability. If it is too long, don't use it.
+            if (tName.size() != 0 && tName.size() <= 30)
+            {
+                kname = tName;
+            }
+        }
+
+        std::stringstream ss;
+        uint32_t lbl_id = getAndUpdateNextLabelId();
+        ss  << "_" << kname << "_f" << kernel.getFunctionId() << "_" << lbl_id << "_" << lab;
+        size_t len = ss.str().size() + 1;
+        char* new_str = (char*)mem.alloc(len);  // +1 for null that ends the string
+        memcpy_s(new_str, len, ss.str().c_str(), len);
         return new (mem) G4_Label(new_str);
     }
 
@@ -1402,6 +1458,7 @@ public:
         SendAccess access,
         G4_Operand* bti);
 
+
     G4_InstSend *createLscSendInst(
         G4_Predicate *pred,
         G4_DstRegRegion *dst, G4_SrcRegRegion *src0, G4_SrcRegRegion *src1,
@@ -1410,6 +1467,8 @@ public:
         G4_InstOpts option,
         LSC_ADDR_TYPE addrType,
         bool emitA0RegDef);
+
+
     G4_SrcRegRegion* getScratchSurfaceStatusIndex();
 
     void RestoreA0();
@@ -1795,10 +1854,29 @@ public:
 
     G4_Declare* getImmDcl(G4_Imm* val, int numElt);
 
+    //
+    // 'copyExecSize' and preparePayload's batchExSize together provide
+    // the execSize of copying instruction.
+    //     'copyExecSize' of PayloadSource is used for header only for now.
+    //     If 'copyExecSize' is present, use it; otherwise, use batchExSize
+    //     of preparePayload for copying.
+    //
+    //  For example,
+    //     send(4|M0)   nullptr  addr:a32 data:ud ...
+    //  will be changed to
+    //     mov(8|M0)    msgPayload(0,0) <1;1,0> header
+    //     mov(4|M0)    msgPayload(1,0) <1;1,0> addr
+    //     mov(4|M0)    msgPayload(2,0) <1;1,0> data
+    //     send(4|M0)   nullptr   msgPayload ...
+    //  where 'copyExecSize' will be 8 and batchExSize = 4.
+    //
     struct PayloadSource {
         G4_SrcRegRegion  *opnd;
-        G4_ExecSize       execSize;
+        uint32_t          numElts;       // 'opnd's size in msg payload
         G4_InstOpts       instOpt;
+        G4_ExecSize       copyExecSize;  // used for copy if given.
+
+        PayloadSource() : copyExecSize(g4::SIMD_UNDEFINED) {}
     };
 
     /// preparePayload - This method prepares payload from the specified header
@@ -1810,7 +1888,10 @@ public:
     ///                         2-element array must be cleared before calling
     ///                         preparePayload().
     /// \param batchExSize      When it's required to copy sources, batchExSize
-    ///                         specifies the SIMD width of copy.
+    ///                         specifies the SIMD width of copy except when
+    ///                         'copyExecSize' of PayloadSource is defined. And
+    ///                         in the case 'copyExecSize is defined, it's used as
+    ///                         execsize for copy.
     /// \param splitSendEnabled Whether feature split-send is available. When
     ///                         feature split-send is available, this function
     ///                         will check whether two consecutive regions
@@ -2347,7 +2428,6 @@ public:
         G4_SrcRegRegion        *src1Data, // store data/extra atomic operands
         G4_SrcRegRegion        *src2Data // only for fcas/icas
     );
-
     int translateLscUntypedBlock2DInst(
         LSC_OP                  op,
         LSC_SFID                lscSfid,
@@ -2389,6 +2469,7 @@ public:
         uint32_t &desc,
         int &status) const;
     void lscEncodeAddrType(LSC_ADDR_TYPE at, uint32_t &desc, int &status) const;
+
 
     G4_SrcRegRegion *lscBuildStridedPayload(
         G4_Predicate        *pred,

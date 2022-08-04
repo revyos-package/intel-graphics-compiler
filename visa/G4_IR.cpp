@@ -1,6 +1,6 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (C) 2017-2021 Intel Corporation
+Copyright (C) 2017-2022 Intel Corporation
 
 SPDX-License-Identifier: MIT
 
@@ -231,6 +231,7 @@ G4_INST::G4_INST(
     srcCISAoff(UndefinedCisaOffset),
     sat(s ? 1 : 0),
     evenlySplitInst(false),
+    canBeAcc(false),
     execSize(size),
     bin(nullptr),
     builder(irb)
@@ -316,7 +317,7 @@ void G4_INST::setOpcode(G4_opcode opcd)
         G4_Inst_Table[opcd].instType == InstTypeVector)
        ) ||
         opcd == G4_label),
-        "setOpcode would change the intruction class, which is illegal.");
+        "setOpcode would change the instruction class, which is illegal.");
 
     bool resetBounds = false;
 
@@ -861,7 +862,7 @@ void G4_INST::removeUseOfInst()
     }
 }
 
-// remove the faked def-instructions in def list, which is resulted from instruction spliting
+// remove the faked def-instructions in def list, which is resulted from instruction splitting
 void G4_INST::trimDefInstList()
 {
     // trim def list
@@ -1573,8 +1574,7 @@ bool G4_INST::hasACCOpnd() const
         (dst && dst->isAccReg()) ||
         (srcs[0] && srcs[0]->isAccReg()) ||
         (srcs[1] && srcs[1]->isAccReg()) ||
-        (srcs[2] && srcs[2]->isAccReg()) ||
-        op == G4_madw);
+        (srcs[2] && srcs[2]->isAccReg()));
 }
 
 G4_Type G4_INST::getOpExecType(int& extypesize)
@@ -1681,7 +1681,7 @@ static G4_INST::MovType getMovType(
     // the source type only.
     if (TypeSize(srcTy) < TypeSize(dstTy)) {
         if (IS_SIGNED_INT(srcTy)) {
-            // Treat ABS as zero-extenstion.
+            // Treat ABS as zero-extension.
             if (srcMod == Mod_Abs)
                 return G4_INST::ZExt;
             // If the sign bit is 0, then zext is the same as sext.
@@ -1700,7 +1700,7 @@ static G4_INST::MovType getMovType(
     }
 
     // Otherwise, treat it as COPY they are the same in bit size.
-    // Treat ABS as zero-extenstion.
+    // Treat ABS as zero-extension.
     if (IS_SIGNED_INT(srcTy) && srcMod == Mod_Abs)
         return G4_INST::ZExt;
     return G4_INST::Copy;
@@ -2885,7 +2885,7 @@ bool G4_INST::canHoistTo(const G4_INST *defInst, bool simdBB) const
         return false;
     }
 
-    // dont hoist stack calls related variables (Arg, Retval, SP, FP)
+    // Don't hoist stack calls related variables (Arg, Retval, SP, FP)
     if (defInst->getDst() && defInst->getDst()->getTopDcl())
     {
         G4_Declare* defDstDcl = defInst->getDst()->getTopDcl()->getRootDeclare();
@@ -4001,14 +4001,10 @@ void G4_InstSend::emit_send(std::ostream& output, bool symbol_dst, bool *symbol_
         srcs[3]->emit(output, false);
         output << ' ';
     }
-    else
+    else if (!isSplitSend() && srcs[2])
     {
-        if (getMsgDescRaw()) {
-            std::ios::fmtflags outFlags(output.flags());
-            output << fmtHex(getMsgDescRaw()->getExtendedDesc());
-            output << ' ';
-            output.flags(outFlags);
-        }
+        srcs[2]->emit(output, false); // for old unary send
+        output << ' ';
     }
 
     // emit msgDesc (2 for sends and 1 for send). Last operand shown in asm.
@@ -4039,14 +4035,27 @@ void G4_InstSend::emit_send_desc(std::ostream& output)
     if (!desc.empty()) {
         output << msgDesc->getDescription();
     }
-    if (const auto *rawDesc = sendInst->getMsgDescRaw()) {
+
+    if (auto immOff = sendInst->getMsgDesc()->getOffset()) {
+        int signedOff = immOff->immOff;
+        if (immOff->is2d) {
+            output << "; ImmOff=(" <<
+                fmtHex(immOff->immOffX) << " elems," <<
+                fmtHex(immOff->immOffY) << " elems)";
+        } else {
+            if (signedOff > 0) {
+                output << "; ImmOff=+" << fmtHex(signedOff);
+            } else if (signedOff < 0) {
+                output << "; ImmOff=-" << fmtHex(-signedOff);
+            }
+        }
     }
 
-    output << ", resLen=" << msgDesc->getDstLenRegs();
-    output << ", msgLen=" << msgDesc->getSrc0LenRegs();
+    output << ", dstLen=" << msgDesc->getDstLenRegs();
+    output << ", src0Len=" << msgDesc->getSrc0LenRegs();
     if (isSplitSend())
     {
-        output << ", extMsgLen=" << msgDesc->getSrc1LenRegs();
+        output << ", src1Len=" << msgDesc->getSrc1LenRegs();
     }
 
     if (msgDesc->isBarrier())
@@ -4953,7 +4962,7 @@ unsigned G4_DstRegRegion::computeRightBound(uint8_t exec_size)
         else
         {
             /*
-                we need to set leftBound for pseudo intruction
+                we need to set leftBound for pseudo instruction
                 so that it creates use/def links correctly in the control flow graph between
                 cmp instruction and pseudo instruction.
                 This matters when we break up SIMD32 instruction in to two SIMD16 with H1/H2 masks.
@@ -5058,6 +5067,11 @@ static G4_CmpRelation compareRegRegionToOperand(G4_Operand* regRegion, G4_Operan
         {
             return Rel_interfere;
         }
+    }
+    if ((builder.getStackCallRet() == myDcl && builder.getStackCallArg() == opndDcl) ||
+        (builder.getStackCallArg() == myDcl && builder.getStackCallRet() == opndDcl))
+    {
+        return Rel_interfere;
     }
 
     if (opndAcc == myAcc && myAcc != Direct)
@@ -5730,7 +5744,7 @@ void G4_Declare::resizeNumRows(unsigned int numrows)
 void G4_Declare::emit(std::ostream &output) const
 {
 
-    output << "//.declare " << name;
+    output << "//.declare " << name << " (" << getDeclId() << ") ";
     output << " rf=";
     if (useGRF())
     {
@@ -5747,6 +5761,7 @@ void G4_Declare::emit(std::ostream &output) const
     else if (regFile == G4_FLAG)
     {
         output << 'f';
+        output << getNumberFlagElements() << " ";
     }
     else
     {
@@ -5847,7 +5862,7 @@ void G4_Predicate::emit_body(std::ostream& output, bool symbolreg)
     if (getBase()->asRegVar()->isPhyRegAssigned())
     {
         getBase()->asRegVar()->getPhyReg()->emit(output);
-        output << "." << getBase()->asRegVar()->getPhyRegOff();
+        output << "." << getBase()->asRegVar()->getPhyRegOff() + subRegOff;
     }
     else
     {
@@ -6044,7 +6059,7 @@ void G4_CondMod::emit(std::ostream& output, bool symbolreg)
         output << "f0.0";
     } else if (getBase()->asRegVar()->isPhyRegAssigned()) {
         getBase()->asRegVar()->getPhyReg()->emit(output);
-        output << "." << getBase()->asRegVar()->getPhyRegOff();
+        output << "." << getBase()->asRegVar()->getPhyRegOff() + subRegOff;
     } else {
         getBase()->emit(output);
         if (subRegOff != UNDEFINED_SHORT)
@@ -6285,7 +6300,7 @@ int64_t G4_Imm::typecastVals(int64_t value, G4_Type type)
     }
     default:
     {
-        // Dont do float conversions
+        // Don't do float conversions
         retVal = value;
     }
     }
@@ -6523,7 +6538,7 @@ unsigned G4_SrcRegRegion::computeRightBound(uint8_t exec_size)
         else
         {
             /*
-                we need to set leftBound for pseudo intruction
+                we need to set leftBound for pseudo instruction
                 so that it creates use/def links correctly in the control flow graph between
                 cmp instruction and pseudo instruction.
                 This matters when we break up SIMD32 instruction in to two SIMD16 with H1/H2 masks.
@@ -6959,6 +6974,29 @@ void G4_Operand::updateFootPrint(BitSet& footprint, bool isSet, const IR_Builder
     unsigned lb = getLeftBound();
     unsigned rb = getRightBound();
     const bool doFastPath = true; // for debugging
+    // Check if the left bound and the right bound are within footprint.
+    auto boundsChecking = [&]() {
+        // FIXME: Currently focus on checking out-of-bounds access for GRF
+        // first, and some special cases are skipped.
+        // 1. Skip ARF now because ARF is special and might not have the
+        //    correct footprint size set in LocalDataflow for example.
+        // 2. Skip FLAG now because IGC might create a predicate var with
+        //    8 elements, i.e., SETP (8), while the access granularity of FLAG
+        //    is a word (16 bits)
+        // 3. Skip predefined var now as vISA user might not emit the correct
+        //    ArgSize attribute in some cases.
+        if (isAreg())
+            return true;
+        if (isFlag())
+            return true;
+        if (getTopDcl() && getTopDcl()->isPreDefinedVar())
+            return true;
+        return lb <= rb && rb < footprint.getSize();
+    };
+    MUST_BE_TRUE(!builder.getOption(vISA_boundsChecking) || boundsChecking(),
+        "Out-of-bounds access found in " << *getInst() << "\n"
+        << "For operand " << *this << ", the footprint size is " << footprint.getSize()
+        << " and the accessing range is [" << lb << ", " << rb << "]\n");
 
     if (doFastPath && lb % N == 0 && (rb + 1) % N == 0)
     {
@@ -7258,6 +7296,12 @@ void G4_Operand::dump() const
 #endif
 }
 
+std::ostream& operator<<(std::ostream& os, G4_Operand& opnd)
+{
+    opnd.emit(os, false);
+    return os;
+}
+
 void G4_INST::setPredicate(G4_Predicate* p)
 {
     if (predicate && predicate->getInst() == this)
@@ -7289,7 +7333,7 @@ void G4_INST::setSrc(G4_Operand* opnd, unsigned i)
             (srcs[3] == srcs[i] && i != 3))
         {
             // opnd is present in some other
-            // index of srcs so dont set its
+            // index of srcs so don't set its
             // inst to NULL
         }
         else
@@ -7361,7 +7405,7 @@ void G4_INST::setImplAccDst(G4_DstRegRegion* opnd)
 
 // get simd lane mask for this instruction. For example,
 //      add  (8|M8) ...
-// will have 0xFF00, which lane 8-15
+// will have 0xFF00, which is for lane 8-15
 unsigned G4_INST::getExecLaneMask() const
 {
     unsigned maskbits = (unsigned)(((uint64_t)1 << getExecSize()) - 1);
@@ -8343,19 +8387,36 @@ bool G4_INST::canSrcBeAccAfterHWConform(Gen4_Operand_Number opndNum) const
     G4_SrcRegRegion* src = getSrc(srcId)->asSrcRegRegion();
 
     // dst must be GRF-aligned
-    if ((getDst()->getLinearizedStart() % getBuilder().numEltPerGRF<Type_UB>()) != 0)
+    if (G4_VarBase* base = dst->getBase())
     {
-        if (!(isMixedMode() && builder.getPlatform() == Xe_XeHPSDV))
-            return false;
+        if (base->isRegVar())
+        {
+            if (base->asRegVar()->isPhyRegAssigned())
+            {
+                if ((dst->getLinearizedStart() % getBuilder().numEltPerGRF<Type_UB>()) != 0)
+                {
+                    if (!(isMixedMode() && builder.getPlatform() == Xe_XeHPSDV))
+                        return false;
+                }
+            }
+            else
+            {
+                //If the destination offset is not GRF aligned, such as has sub register offset, the src cannot be replaced with ACC
+                if (!builder.isOpndAligned(dst, getBuilder().numEltPerGRF<Type_UB>()))
+                {
+                    return false;
+                }
+            }
+        }
     }
 
     // check that src0 and dst have the same type/alignment
-    auto dstEltSize = getDst()->getHorzStride() * getDst()->getTypeSize();
+    auto dstEltSize = dst->getHorzStride() * dst->getTypeSize();
     if (dstEltSize > TypeSize(src->getType()))
     {
         return false;
     }
-    else if (isLowPrecisionFloatTy(getDst()->getType()) && src->getType() == Type_F &&
+    else if (isLowPrecisionFloatTy(dst->getType()) && src->getType() == Type_F &&
         dstEltSize == 2)
     {
         if (builder.relaxedACCRestrictions())
@@ -8380,6 +8441,85 @@ bool G4_INST::canSrcBeAccAfterHWConform(Gen4_Operand_Number opndNum) const
 bool G4_INST::canSrcBeAcc(Gen4_Operand_Number opndNum) const
 {
     return canSrcBeAccBeforeHWConform(opndNum) && canSrcBeAccAfterHWConform(opndNum);
+}
+
+//
+//If the instruction can be replace with ACC register, including the destination operand of the instruction and the use operands in the following instructions through DU chain.
+//Used in the pre RA scheduling for ACC and corresponding ACC substitution.
+//Note that, simplification may be still needed, some restrictions may not be applied to the platform which support pre RA scheduling for ACC.
+//
+bool G4_INST::canInstBeAcc(GlobalOpndHashTable *ght)
+{
+    G4_DstRegRegion* dst = getDst();
+    if (!dst || ght->isOpndGlobal(dst) || !canDstBeAcc())
+    {
+        return false;
+    }
+
+    if (getCondMod() && opcode() != G4_sel)
+    {
+        // since our du-chain is on inst instead of operand, the presence of conditional modifier complicates the checks later.
+        // This is somewhat conservative but shouldn't matter too much as inst with both dst and conditional modifiers are rare.
+        // Exception is for sel as flag register is not updated.
+        return false;
+    }
+
+    // check that every use may be replaced with acc
+    int lastUseId = 0;
+    for (auto I = use_begin(), E = use_end(); I != E; ++I)
+    {
+        auto&& use = *I;
+        G4_INST* useInst = use.first;
+        Gen4_Operand_Number opndNum = use.second;
+        lastUseId = std::max(lastUseId, useInst->getLocalId());
+
+        if (useInst->getNumSrc() == 3)
+        {
+            switch (opndNum)
+            {
+            case Opnd_src2:
+                if (!IS_TYPE_FLOAT_FOR_ACC(useInst->getSrc(2)->getType()) ||
+                   (useInst->getDst() && !IS_TYPE_FLOAT_FOR_ACC(useInst->getDst()->getType())))
+                {
+                    return false;
+                }
+                break;
+            case Opnd_src1:
+            case Opnd_src0:
+                break;  //OK
+            default:
+                return false;
+            }
+        }
+
+        if (useInst->getSingleDef(opndNum) == nullptr)
+        {
+            // def must be the only define for this use
+            return false;
+        }
+
+        int srcId = useInst->getSrcNum(opndNum);
+        G4_Operand* src = useInst->getSrc(srcId);
+
+        if (dst->getType() != src->getType() || ght->isOpndGlobal(src) ||
+            dst->compareOperand(src, getBuilder()) != Rel_eq)
+        {
+            return false;
+        }
+        if (!useInst->canSrcBeAcc(opndNum))
+        {
+            return false;
+        }
+    }
+
+    if (lastUseId == 0)
+    {
+        // no point using acc for a dst without local uses
+        return false;
+    }
+
+    canBeAcc = true;
+    return true;
 }
 
 TARGET_PLATFORM G4_INST::getPlatform() const
@@ -8445,8 +8585,9 @@ G4_INST* G4_InstSend::cloneInst()
         auto src1 = nonConstBuilder->duplicateOperand(getSrc(1))->asSrcRegRegion();
         auto desc = nonConstBuilder->duplicateOperand(getSrc(2));
         auto extDesc = nonConstBuilder->duplicateOperand(getSrc(3));
-        newInst = nonConstBuilder->createInternalSplitSendInst(getExecSize(), dst, src0, src1, desc,
-            getOption(), getMsgDescRaw(), extDesc);
+        newInst = nonConstBuilder->createInternalSplitSendInst(
+            getExecSize(), dst, src0, src1, desc,
+            getOption(), getMsgDesc(), extDesc);
         if (prd)
         {
             newInst->setPredicate(prd);

@@ -25,6 +25,7 @@ SPDX-License-Identifier: MIT
 
 #include "Probe/Assertion.h"
 #include "llvmWrapper/IR/DerivedTypes.h"
+#include "llvmWrapper/Support/Alignment.h"
 
 #include <map>
 #include <string>
@@ -59,9 +60,11 @@ namespace llvm {
       RSI_Stateless = 255 // 255 is stateless, which is T5 in vISA
     };
 
-    constexpr static unsigned ArgRegSizeInGRFs = 32;
-    constexpr static unsigned RetRegSizeInGRFs = 12;
-    constexpr static unsigned BytesPerSVMPtr = 8;
+    // In vISA spec max ARG size is 32 registers and RET is 12. But IGC calling
+    // convention limits them to 12 and 8.
+    constexpr static unsigned ArgRegSizeInGRFs = 12;
+    constexpr static unsigned RetRegSizeInGRFs = 8;
+    constexpr static alignment_t BytesPerSVMPtr = 8;
     constexpr static unsigned BytesPerOword = 16;
     constexpr static unsigned StackPerThreadScratch = 256;
     constexpr static unsigned StackPerThreadSVM = 8192*2;

@@ -1,6 +1,6 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (C) 2017-2021 Intel Corporation
+Copyright (C) 2017-2022 Intel Corporation
 
 SPDX-License-Identifier: MIT
 
@@ -3777,6 +3777,9 @@ namespace IGC
             asmName = "kernel.asm";
         }
         V(vPayloadSection->AddKernelAttribute("OutputAsmPath", asmName.length(), asmName.c_str()));
+        // Set Target to VISA_3D (1) for scalar IGC.
+        const uint8_t visaTarget = VISATarget::VISA_3D;
+        V(vKernel->AddKernelAttribute("Target", sizeof(visaTarget), &visaTarget));
 
         VISA_LabelOpnd* functionLabel = nullptr;
         V(vPayloadSection->CreateVISALabelVar(functionLabel, "payload", LABEL_SUBROUTINE));
@@ -4205,9 +4208,17 @@ namespace IGC
         }
 
         if ((context->type == ShaderType::OPENCL_SHADER || context->type == ShaderType::COMPUTE_SHADER) &&
-            m_program->m_Platform->preemptionSupported() && IGC_IS_FLAG_ENABLED(EnablePreemption))
+            (m_program->m_Platform->preemptionSupported() || IGC_IS_FLAG_ENABLED(ForcePreemptionWA)) &&
+            IGC_IS_FLAG_ENABLED(EnablePreemption))
         {
             SaveOption(vISA_enablePreemption, true);
+        }
+
+        if ((context->type == ShaderType::OPENCL_SHADER || context->type == ShaderType::COMPUTE_SHADER) &&
+            (m_program->m_Platform->isProductChildOf(IGFX_PVC) || IGC_IS_FLAG_ENABLED(ForcePreserveR0)))
+        {
+            // Force VISA to preserve r0 in r0 itself throughout the kernel/stackcall function.
+            SaveOption(vISA_PreserveR0InR0, true);
         }
 
         if (IGC_IS_FLAG_ENABLED(forceGlobalRA))
@@ -4253,6 +4264,11 @@ namespace IGC
             SaveOption(vISA_EnableScalarJmp, false);
         }
 
+        if (IGC_IS_FLAG_ENABLED(EnableVISABoundsChecking))
+        {
+            SaveOption(vISA_boundsChecking, true);
+        }
+
         if (IGC_IS_FLAG_ENABLED(ForceNoMaskWA)) {
             SaveOption(vISA_forceNoMaskWA, true);
             // Turn off jmpi as there is no wa for jmpi
@@ -4280,12 +4296,14 @@ namespace IGC
 
             // temp for testing
             if (IGC_IS_FLAG_ENABLED(EnableNewNoMaskWA)) {
-                SaveOption(vISA_newTmpNoMaskWA, true);
+                SaveOption(vISA_newTmpNoMaskWA, IGC_GET_FLAG_VALUE(EnableNewNoMaskWA));
             }
         }
 
         if (m_program->m_Platform->hasFusedEU()
-            && IGC_IS_FLAG_ENABLED(EnableCallWA)
+            && (IGC_GET_FLAG_VALUE(EnableCallWA) == 2 ||
+                (IGC_GET_FLAG_VALUE(EnableCallWA) == 1
+                 && m_program->m_Platform->getPlatformInfo().eProductFamily != IGFX_XE_HP_SDV))
             && (m_program->HasStackCalls() || m_program->IsIntelSymbolTableVoidProgram()))
         {
             SaveOption(vISA_fusedCallWA, true);
@@ -4367,6 +4385,11 @@ namespace IGC
             SaveOption(vISA_ShaderDumpFilter, regex);
         }
 
+        if (auto *str = IGC_GET_REGKEYSTRING(ForceAssignRhysicalReg))
+        {
+            SaveOption(vISA_ForceAssignRhysicalReg, str);
+        }
+
         // In Vulkan and OGL buffer variable memory reads and writes within
         // a single shader invocation must be processed in order.
         if (m_program->m_DriverInfo->DisableDpSendReordering())
@@ -4420,13 +4443,22 @@ namespace IGC
             SaveOption(vISA_TotalGRFNum, context->getNumGRFPerThread());
         }
 
+        if (m_program->HasStackCalls() || m_program->IsIntelSymbolTableVoidProgram())
+        {
+            bool ZEBinEnabled = IGC_IS_FLAG_ENABLED(EnableZEBinary) || context->getCompilerOption().EnableZEBinary;
+
+            // pass higher ABI version when using ZEBinary
+            if (ZEBinEnabled)
+                SaveOption(vISA_StackCallABIVer, (uint32_t)2);
+        }
+
         //
         // Setting number of GRF and threads per EU is restricted to OCL only
         // Number of threads can be set by:
         //  1. User input through
         //    1.1 internal option for a specific kernel function
-        //    1.2 compiler option for entire module
-        //    1.3 kernel annotation for a specific kernel function
+        //    1.2 kernel annotation for a specific kernel function
+        //    1.3 compiler option for entire module
         //  2. Compiler heuristics
         //
         if (context->type == ShaderType::OPENCL_SHADER)
@@ -4444,15 +4476,15 @@ namespace IGC
                     // Number of threads per EU is set per kernel function (by compiler option)
                     SaveOption(vISA_HWThreadNumberPerEU, unsigned(4));
                 }
-                else if (ClContext->getNumThreadsPerEU() > 0)
-                {
-                    // Number of threads per EU is set per module (by compiler option)
-                    SaveOption(vISA_HWThreadNumberPerEU, ClContext->getNumThreadsPerEU());
-                }
                 else if (m_program->getAnnotatedNumThreads() > 0)
                 {
                     // Number of threads per EU is set per kernel function (by user annotation)
                     SaveOption(vISA_HWThreadNumberPerEU, m_program->getAnnotatedNumThreads());
+                }
+                else if (ClContext->getNumThreadsPerEU() > 0)
+                {
+                    // Number of threads per EU is set per module (by compiler option)
+                    SaveOption(vISA_HWThreadNumberPerEU, ClContext->getNumThreadsPerEU());
                 }
                 else if (m_program->m_Platform->supportsAutoGRFSelection() &&
                     context->m_DriverInfo.supportsAutoGRFSelection() &&
@@ -4543,6 +4575,10 @@ namespace IGC
         if (IGC_IS_FLAG_ENABLED(forceSamplerHeader))
         {
             SaveOption(vISA_forceSamplerHeader, true);
+        }
+        if (IGC_IS_FLAG_ENABLED(samplerHeaderWA))
+        {
+            SaveOption(vISA_samplerHeaderWA, true);
         }
         if (IGC_IS_FLAG_ENABLED(EnableIGAEncoder))
         {
@@ -4731,6 +4767,12 @@ namespace IGC
             {
                 SaveOption(vISA_hasDoubleAcc, true);
             }
+
+            if (IGC_IS_FLAG_ENABLED(EnablePreRAAccSchedAndSub))
+            {
+                SaveOption(vISA_PreSchedForAcc, true);
+            }
+
         }
         else
         {
@@ -4750,6 +4792,11 @@ namespace IGC
         if (IGC_IS_FLAG_ENABLED(ShaderDumpEnable) && IGC_IS_FLAG_ENABLED(InterleaveSourceShader))
         {
             SaveOption(vISA_EmitLocation, true);
+        }
+
+        if (IGC_IS_FLAG_ENABLED(PrintHexFloatInShaderDumpAsm))
+        {
+            SaveOption(vISA_PrintHexFloatInAsm, true);
         }
 
         if (IGC_IS_FLAG_ENABLED(ShaderDumpEnable))
@@ -4811,7 +4858,7 @@ namespace IGC
                 SaveOption(vISA_LVN, false);
                 SaveOption(vISA_QuickTokenAllocation, true);
                 if (context->getModuleMetaData()->compOpt.EnableFastestLinearScan ||
-                    IGC_IS_FLAG_DISABLED(EnableFastestLinearScan))
+                    IGC_IS_FLAG_ENABLED(EnableFastestLinearScan))
                 {
                     SaveOption(vISA_LinearScan, true);
                 }
@@ -4967,7 +5014,7 @@ namespace IGC
         }
     }
 
-    void CEncoder::InitEncoder(bool canAbortOnSpill, bool hasStackCall, bool hasInlineAsmCall, VISAKernel* prevKernel)
+    void CEncoder::InitEncoder(bool canAbortOnSpill, bool hasStackCall, bool hasInlineAsmCall, bool hasAdditionalVisaAsmToLink, VISAKernel* prevKernel)
     {
         m_aliasesMap.clear();
         m_encoderState.m_SubSpanDestination = false;
@@ -5000,8 +5047,8 @@ namespace IGC
 
         COMPILER_TIME_START(m_program->GetContext(), TIME_CG_vISACompile);
         bool enableVISADump = IGC_IS_FLAG_ENABLED(EnableVISASlowpath) || IGC_IS_FLAG_ENABLED(ShaderDumpEnable);
-        auto builderMode = m_hasInlineAsm ? vISA_ASM_WRITER : vISA_DEFAULT;
-        auto builderOpt = (enableVISADump || m_hasInlineAsm) ? VISA_BUILDER_BOTH : VISA_BUILDER_GEN;
+        auto builderMode = m_hasInlineAsm || hasAdditionalVisaAsmToLink ? vISA_ASM_WRITER : vISA_DEFAULT;
+        auto builderOpt = (enableVISADump || m_hasInlineAsm || hasAdditionalVisaAsmToLink) ? VISA_BUILDER_BOTH : VISA_BUILDER_GEN;
         V(CreateVISABuilder(vbuilder, builderMode, builderOpt, VISAPlatform, params.size(), params.data(),
             &m_vISAWaTable));
 
@@ -5066,6 +5113,9 @@ namespace IGC
         V(vbuilder->AddKernel(vKernel, kernelName.c_str()));
         V(vbuilder->SetPrevKernel(prevKernel));
         V(vKernel->AddKernelAttribute("OutputAsmPath", asmName.length(), asmName.c_str()));
+        // Set Target to VISA_3D for scalar IGC.
+        const uint8_t visaTarget = VISATarget::VISA_3D;
+        V(vKernel->AddKernelAttribute("Target", sizeof(visaTarget), &visaTarget));
 
         SetDispatchSimdSize();
         SetSpillMemOffset();
@@ -5574,7 +5624,7 @@ namespace IGC
             globalHostAccessTable.push_back(vISA::ZEHostAccessEntry{ I.device_name, I.host_name });
     }
 
-    void CEncoder::CreateRelocationTable(void*& buffer, unsigned& bufferSize, unsigned& tableEntries)
+    void CEncoder::CreateRelocationTable(VISAKernel* pMainKernel, void*& buffer, unsigned& bufferSize, unsigned& tableEntries)
     {
         // for patch-token-based binary format
         buffer = nullptr;
@@ -5582,19 +5632,19 @@ namespace IGC
         tableEntries = 0;
 
         // vISA will directly return the buffer with GenRelocEntry layout
-        IGC_ASSERT(nullptr != vMainKernel);
-        V(vMainKernel->GetGenRelocEntryBuffer(buffer, bufferSize, tableEntries));
+        IGC_ASSERT(nullptr != pMainKernel);
+        V(pMainKernel->GetGenRelocEntryBuffer(buffer, bufferSize, tableEntries));
         IGC_ASSERT((sizeof(vISA::GenRelocEntry) * tableEntries) == bufferSize);
     }
 
-    void CEncoder::CreateRelocationTable(SProgramOutput::RelocListTy& relocations)
+    void CEncoder::CreateRelocationTable(VISAKernel* pMainKernel, SProgramOutput::RelocListTy& relocations)
     {
         // for ZEBinary format
-        IGC_ASSERT(nullptr != vMainKernel);
-        V(vMainKernel->GetRelocations(relocations));
+        IGC_ASSERT(nullptr != pMainKernel);
+        V(pMainKernel->GetRelocations(relocations));
     }
 
-    void CEncoder::CreateFuncAttributeTable(void*& buffer, unsigned& bufferSize,
+    void CEncoder::CreateFuncAttributeTable(VISAKernel* pMainKernel, void*& buffer, unsigned& bufferSize,
         unsigned& tableEntries, SProgramOutput::FuncAttrListTy& attrs)
     {
         buffer = nullptr;
@@ -5617,7 +5667,8 @@ namespace IGC
             VISAKernel* visaFunc = nullptr;
             if (it.second.isKernel)
             {
-                visaFunc = vMainKernel;
+                IGC_ASSERT(pMainKernel != nullptr);
+                visaFunc = pMainKernel;
             }
             else
             {
@@ -5629,7 +5680,10 @@ namespace IGC
             visaFunc->GetJitInfo(jitInfo);
             entry.f_spillMemPerThread = jitInfo->spillMemUsed;
 
-            attrs.emplace_back(entry.f_isKernel, entry.f_hasBarrier, entry.f_privateMemPerThread,
+            uint8_t isExternal = F->hasFnAttribute("referenced-indirectly") ? 1 : 0;
+            // Set per-function barrier count from vISA information.
+            uint32_t barrierCnt = jitInfo->numBarriers;
+            attrs.emplace_back(entry.f_isKernel, isExternal, barrierCnt, entry.f_privateMemPerThread,
                 entry.f_spillMemPerThread, F->getName().str());
             attribTable.push_back(entry);
         }
@@ -5638,7 +5692,7 @@ namespace IGC
         {
             tableEntries = attribTable.size();
             bufferSize = tableEntries * sizeof(vISA::GenFuncAttribEntry);
-            buffer = malloc(bufferSize);
+            buffer = IGC::aligned_malloc(bufferSize, int_cast<size_t>(llvm::alignTo(alignof(vISA::GenFuncAttribEntry), sizeof(void *))));
             IGC_ASSERT_MESSAGE(nullptr != buffer, "Table cannot be allocated");
             memcpy_s(buffer, bufferSize, attribTable.data(), bufferSize);
         }
@@ -5849,23 +5903,22 @@ namespace IGC
 
                 if (result == 0 && additionalVISAAsmToLink) {
                     std::stringstream ss;
-                    result = vbuilder->Compile(
-                        m_enableVISAdump ? GetDumpFileName("isa").c_str() : "",
-                        &ss, true);
-                    result = (result == 0) ? vAsmTextBuilder->ParseVISAText(vMainKernel->getVISAAsm(), "") : result;
+                    result = vAsmTextBuilder->ParseVISAText(vbuilder->GetAsmTextStream().str(), "");
                     for(auto visaAsm : *additionalVISAAsmToLink) {
                         result = (result == 0) ? vAsmTextBuilder->ParseVISAText(visaAsm, "") : result;
                     }
 
-                    // Mark invoke_simd targets with LTO_InvokeOptTarget attribute.
-                    IGC_ASSERT(m_program && m_program->GetContext() && m_program->GetContext()->getModule());
-                    for (auto& F : m_program->GetContext()->getModule()->getFunctionList())
-                    {
-                        if (F.hasFnAttribute("invoke_simd_target")) {
-                            auto vFunc = vAsmTextBuilder->GetVISAKernel(F.getName().data());
-                            IGC_ASSERT(vFunc);
-                            bool enabled = true;
-                            vFunc->AddKernelAttribute("LTO_InvokeOptTarget", 1, &enabled);
+                    if (result == 0) {
+                        // Mark invoke_simd targets with LTO_InvokeOptTarget attribute.
+                        IGC_ASSERT(m_program && m_program->GetContext() && m_program->GetContext()->getModule());
+                        for (auto& F : m_program->GetContext()->getModule()->getFunctionList())
+                        {
+                            if (F.hasFnAttribute("invoke_simd_target")) {
+                                auto vFunc = vAsmTextBuilder->GetVISAKernel(F.getName().data());
+                                IGC_ASSERT(vFunc);
+                                bool enabled = true;
+                                vFunc->AddKernelAttribute("LTO_InvokeOptTarget", 1, &enabled);
+                            }
                         }
                     }
                 }
@@ -5894,7 +5947,7 @@ namespace IGC
                     vAsmTextBuilder->SetOption(vISA_NoVerifyvISA, true);
                 }
 
-                if (visaAsmOverride || additionalVISAAsmToLink) {
+                if (visaAsmOverride) {
                     // After call to ParseVISAText, we have new VISAKernel, which don't have asm path set.
                     // So we need to set the OutputAsmPath attribute of overridden kernel,
                     // otherwise, we will not get .visaasm dump and .asm file dump
@@ -5936,11 +5989,11 @@ namespace IGC
 
         // Depend on vISA information about barriers presence to make sure that it's
         // always set properly, even if a barrier is used as a part of Inline vISA code only.
-        if (jitInfo->usesBarrier)
+        if (jitInfo->numBarriers != 0)
         {
             if (context->getModuleMetaData()->NBarrierCnt > 0)
             {
-                m_program->SetBarrierNumber(NamedBarriersResolution::AlignNBCnt2BarrierNumber(jitInfo->usesBarrier));
+                m_program->SetBarrierNumber(NamedBarriersResolution::AlignNBCnt2BarrierNumber(jitInfo->numBarriers));
             }
             else
             {
@@ -6009,18 +6062,23 @@ namespace IGC
             SimdSize32++;
         }
 
-        if (m_program->m_dispatchSize == SIMDMode::SIMD16)
+        uint sendStallCycle = 0;
+        uint staticCycle = 0;
+        uint loopNestedStallCycle = 0;
+        uint loopNestedCycle = 0;
+        for (uint i = 0; i < jitInfo->BBNum; i++)
         {
-            uint sendStallCycle = 0;
-            uint staticCycle = 0;
-            for (uint i = 0; i < jitInfo->BBNum; i++)
-            {
-                sendStallCycle += jitInfo->BBInfo[i].sendStallCycle;
-                staticCycle += jitInfo->BBInfo[i].staticCycle;
-            }
-            m_program->m_sendStallCycle = sendStallCycle;
-            m_program->m_staticCycle = staticCycle;
+            sendStallCycle += jitInfo->BBInfo[i].sendStallCycle;
+            staticCycle += jitInfo->BBInfo[i].staticCycle;
+            // expects that a loop runs 16 iterations
+            auto nestingfactor = (jitInfo->BBInfo[i].loopNestLevel * 4);
+            loopNestedStallCycle += (jitInfo->BBInfo[i].sendStallCycle << nestingfactor);
+            loopNestedCycle += (jitInfo->BBInfo[i].staticCycle << nestingfactor);
         }
+        m_program->m_sendStallCycle = sendStallCycle;
+        m_program->m_staticCycle = staticCycle;
+        m_program->m_loopNestedStallCycle = loopNestedStallCycle;
+        m_program->m_loopNestedCycle = loopNestedCycle;
 
         if ((jitInfo->isSpill && (AvoidRetryOnSmallSpill() || jitInfo->avoidRetry)) ||
             (m_program->HasStackCalls() || m_program->IsIntelSymbolTableVoidProgram()))
@@ -6034,16 +6092,22 @@ namespace IGC
         {
             COMPILER_SHADER_STATS_SET(m_program->m_shaderStats, STATS_ISA_INST_COUNT, jitInfo->numAsmCount);
             COMPILER_SHADER_STATS_SET(m_program->m_shaderStats, STATS_ISA_SPILL8, (int)jitInfo->isSpill);
+            COMPILER_SHADER_STATS_SET(m_program->m_shaderStats, STATS_ISA_CYCLE_ESTIMATE8, (int)m_program->m_loopNestedCycle);
+            COMPILER_SHADER_STATS_SET(m_program->m_shaderStats, STATS_ISA_STALL_ESTIMATE8, (int)m_program->m_loopNestedStallCycle);
         }
         else if (m_program->m_dispatchSize == SIMDMode::SIMD16)
         {
             COMPILER_SHADER_STATS_SET(m_program->m_shaderStats, STATS_ISA_INST_COUNT_SIMD16, jitInfo->numAsmCount);
             COMPILER_SHADER_STATS_SET(m_program->m_shaderStats, STATS_ISA_SPILL16, (int)jitInfo->isSpill);
+            COMPILER_SHADER_STATS_SET(m_program->m_shaderStats, STATS_ISA_CYCLE_ESTIMATE16, (int)m_program->m_loopNestedCycle);
+            COMPILER_SHADER_STATS_SET(m_program->m_shaderStats, STATS_ISA_STALL_ESTIMATE16, (int)m_program->m_loopNestedStallCycle);
         }
         else if (m_program->m_dispatchSize == SIMDMode::SIMD32)
         {
             COMPILER_SHADER_STATS_SET(m_program->m_shaderStats, STATS_ISA_INST_COUNT_SIMD32, jitInfo->numAsmCount);
             COMPILER_SHADER_STATS_SET(m_program->m_shaderStats, STATS_ISA_SPILL32, (int)jitInfo->isSpill);
+            COMPILER_SHADER_STATS_SET(m_program->m_shaderStats, STATS_ISA_CYCLE_ESTIMATE32, (int)m_program->m_loopNestedCycle);
+            COMPILER_SHADER_STATS_SET(m_program->m_shaderStats, STATS_ISA_STALL_ESTIMATE32, (int)m_program->m_loopNestedStallCycle);
         }
 #endif
         void* genxbin = nullptr;
@@ -6222,18 +6286,20 @@ namespace IGC
 
         if (ZEBinEnabled)
         {
-            CreateRelocationTable(pOutput->m_relocs);
+            CreateRelocationTable(pMainKernel, pOutput->m_relocs);
         }
         else
         {
-            CreateRelocationTable(pOutput->m_funcRelocationTable,
+            CreateRelocationTable(pMainKernel,
+                pOutput->m_funcRelocationTable,
                 pOutput->m_funcRelocationTableSize,
                 pOutput->m_funcRelocationTableEntries);
         }
 
-        if (IGC_IS_FLAG_ENABLED(EnableRuntimeFuncAttributePatching))
+        if (IGC_IS_FLAG_ENABLED(EnableRuntimeFuncAttributePatching) || ZEBinEnabled)
         {
-            CreateFuncAttributeTable(pOutput->m_funcAttributeTable,
+            CreateFuncAttributeTable(pMainKernel,
+                pOutput->m_funcAttributeTable,
                 pOutput->m_funcAttributeTableSize,
                 pOutput->m_funcAttributeTableEntries,
                 pOutput->m_funcAttrs);
@@ -6851,7 +6917,7 @@ namespace IGC
             else
             {
                 // Unpacking is needed from the original SIMD16 data payload to form
-                // two SIMD8 data payload by spliting the original simd16 data payload.
+                // two SIMD8 data payload by splitting the original simd16 data payload.
                 CVariable* V0, * V1;
                 uint16_t newNumElems = (uint16_t)8 * nd;
                 V0 = m_program->GetNewVariable(
@@ -7282,7 +7348,7 @@ namespace IGC
 
             CVariable* input0 = nullptr;
             CVariable* input1 = nullptr;
-            uint16_t newNumElemsSrc0 = (uint16_t)16;
+            uint16_t newNumElemsSrc0 = (uint16_t)(visaNumLanes(toExecSize) * repeatCount);
             IGC_ASSERT(newNumElemsSrc0 <= input->GetNumberElement());
             input0 = m_program->GetNewVariable(
                 newNumElemsSrc0,
@@ -7298,46 +7364,46 @@ namespace IGC
                 CName::NONE);
             // Starting offset is calculated from AliasOffset only (subVar not used).
             uint32_t srcOfstBytesSrc0 = input->GetAliasOffset();
-            SplitPayloadToLowerSIMD(input, srcOfstBytesSrc0, 1, input0, input1, 32);
+            SplitPayloadToLowerSIMD(input, srcOfstBytesSrc0, repeatCount, input0, input1, visaNumLanes(fromExecSize));
 
             CVariable* dst0 = input0, * dst1 = input1;
             if (dst != input)
             {
-                uint16_t newNumElemsDst = (uint16_t)16;
+                uint16_t newNumElemsDst = (uint16_t)(visaNumLanes(toExecSize) * repeatCount);
                 IGC_ASSERT(newNumElemsDst <= dst->GetNumberElement());
                 dst0 = m_program->GetNewVariable(
                     newNumElemsDst,
                     dst->GetType(),
                     dst->GetAlign(),
                     dst->IsUniform(),
-                    CName(dst->getName(),"_M0"));
+                    CName::NONE);
                 dst1 = m_program->GetNewVariable(
                     newNumElemsDst,
                     dst->GetType(),
                     dst->GetAlign(),
                     dst->IsUniform(),
-                    CName(dst->getName(),"_M16"));
+                    CName::NONE);
             }
 
             CVariable* weight0 = nullptr;
             CVariable* weight1 = nullptr;
-            uint16_t newNumElemsSrc1 = (uint16_t)16 * 8;
+            uint16_t newNumElemsSrc1 = (uint16_t)(visaNumLanes(toExecSize) * systolicDepth);
             IGC_ASSERT(newNumElemsSrc1 <= weight->GetNumberElement());
             weight0 = m_program->GetNewVariable(
                 newNumElemsSrc1,
                 weight->GetType(),
                 weight->GetAlign(),
                 weight->IsUniform(),
-                CName(weight->getName(),"_M0"));
+                CName::NONE);
             weight1 = m_program->GetNewVariable(
                 newNumElemsSrc1,
                 weight->GetType(),
                 weight->GetAlign(),
                 weight->IsUniform(),
-                CName(weight->getName(),"_M16"));
+                CName::NONE);
             // Starting offset is calculated from AliasOffset only (subVar not used).
             uint32_t srcOfstBytesSrc1 = weight->GetAliasOffset();
-            SplitPayloadToLowerSIMD(weight, srcOfstBytesSrc1, 8, weight0, weight1, 32);
+            SplitPayloadToLowerSIMD(weight, srcOfstBytesSrc1, systolicDepth, weight0, weight1, visaNumLanes(fromExecSize));
 
             for (unsigned thePart = 0; thePart < numParts; ++thePart)
             {
@@ -7348,7 +7414,7 @@ namespace IGC
                 V(vKernel->AppendVISADpasInst(
                     IsDpasw ? ISA_DPASW : ISA_DPAS,
                     SplitEMask(fromExecSize, toExecSize, thePart, execMask),
-                    execSize,
+                    toExecSize,
                     dstOpnd,
                     srcOpnd0,
                     srcOpnd1,
@@ -7359,7 +7425,7 @@ namespace IGC
                     repeatCount));
             }
             uint32_t dstOfstBytes = m_encoderState.m_dstOperand.subVar * getGRFSize() + dst->GetAliasOffset();
-            MergePayloadToHigherSIMD(dst0, dst1, 1, dst, dstOfstBytes, 32);
+            MergePayloadToHigherSIMD(dst0, dst1, repeatCount, dst, dstOfstBytes, visaNumLanes(fromExecSize));
         }
         else
         {
@@ -7559,33 +7625,7 @@ namespace IGC
         }
         else if (surfaceType == ESURFACE_SCRATCH)
         {
-            // For scratch surface, we need to shr the surface state offset coming in R0.5 by 4
-            //      This is because the scratch offset is passed in via r0.5[31:10],
-            //      but the BSS/SS descriptor expects the offset in [31:6] bits, thus we must shift it right by 4
-            VISA_GenVar* r0Var = nullptr;
-            V(vKernel->GetPredefinedVar(r0Var, PREDEFINED_R0));
-
-            VISA_VectorOpnd* surfOpnd = nullptr;
-            V(vKernel->CreateVISASrcOperand(surfOpnd, r0Var, MODIFIER_NONE, 0, 1, 0, 0, 5));
-
-            VISA_VectorOpnd* surfOpndShrDst = nullptr;
-            VISA_VectorOpnd* shrOpnd = nullptr;
-            uint16_t imm_data = 4;
-
-            V(vKernel->CreateVISAImmediate(shrOpnd, &imm_data, ISA_TYPE_UW));
-            CVariable* surfOpndShrVar = m_program->GetNewVariable(1, ISA_TYPE_UD, EALIGN_DWORD, true, "SurfaceOpnd");
-            V(vKernel->CreateVISADstOperand(surfOpndShrDst, GetVISAVariable(surfOpndShrVar), 1, 0, 0));
-            V(vKernel->AppendVISAArithmeticInst(
-                ISA_SHR,
-                nullptr,
-                false,
-                vISA_EMASK_M1_NM,
-                EXEC_SIZE_1,
-                surfOpndShrDst,
-                surfOpnd,
-                shrOpnd));
-
-            return GetSourceOperandNoModifier(surfOpndShrVar);
+            return GetSourceOperandNoModifier(bti);
         }
         else
         {

@@ -1,6 +1,6 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (C) 2017-2021 Intel Corporation
+Copyright (C) 2017-2022 Intel Corporation
 
 SPDX-License-Identifier: MIT
 
@@ -26,6 +26,7 @@ SPDX-License-Identifier: MIT
 #include "llvmWrapper/Analysis/CallGraph.h"
 #include "llvmWrapper/IR/DerivedTypes.h"
 #include "llvmWrapper/IR/CallSite.h"
+#include "llvmWrapper/IR/Instructions.h"
 
 #define DEBUG_TYPE "genx-constantfolding"
 
@@ -255,7 +256,7 @@ Constant *llvm::ConstantFoldGenX(Instruction *I, const DataLayout &DL) {
     return nullptr;
 
   SmallVector<Constant *, 4> ConstantArgs;
-  ConstantArgs.reserve(CS.getNumArgOperands());
+  ConstantArgs.reserve(IGCLLVM::getNumArgOperands(&CS));
   auto FoldOperand = [&DL](const Use &A) {
     auto *C = cast<Constant>(A.get());
     Constant *Folded = ConstantFoldConstant(C, DL);
@@ -270,7 +271,7 @@ Constant *llvm::ConstantFoldGenX(Instruction *I, const DataLayout &DL) {
   Constant *Folded = ConstantFoldGenXIntrinsic(
       IID, CS.getFunctionType()->getReturnType(), ConstantArgs, I, DL);
   if (Folded)
-    LLVM_DEBUG(dbgs() << "Successfully constant folded intruction to "
+    LLVM_DEBUG(dbgs() << "Successfully constant folded instruction to "
                       << *Folded << "\n");
   else
     LLVM_DEBUG(dbgs() << "Failed to constant fold instruction\n");

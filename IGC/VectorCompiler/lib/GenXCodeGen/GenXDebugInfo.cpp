@@ -20,6 +20,7 @@ SPDX-License-Identifier: MIT
 
 #include "DebugInfo/DwarfCompileUnit.hpp"
 #include "DebugInfo/StreamEmitter.hpp"
+#include "DebugInfo/VISADebugInfo.hpp"
 #include "DebugInfo/VISAIDebugEmitter.hpp"
 #include "DebugInfo/VISAModule.hpp"
 
@@ -636,7 +637,7 @@ namespace {
 
 class GenObjectWrapper {
   FINALIZER_INFO *JitInfo = nullptr;
-  std::unique_ptr<IGC::DbgDecoder> DecodedDebugInfo;
+  std::unique_ptr<IGC::VISADebugInfo> VISADebugInfo;
   // TODO: remove this once DbgDecoder is refactored
   unsigned GenDbgInfoDataSize = 0;
   void *GenDbgInfoDataPtr = nullptr;
@@ -670,9 +671,9 @@ public:
                           GenBinaryDataSize);
   }
 
-  const IGC::DbgDecoder &getDecodedGenDbg() const {
-    IGC_ASSERT(DecodedDebugInfo);
-    return *DecodedDebugInfo;
+  const IGC::VISADebugInfo &getVISADebugInfo() const {
+    IGC_ASSERT(VISADebugInfo);
+    return *VISADebugInfo;
   }
 
   const FINALIZER_INFO &getJitInfo() const {
@@ -700,7 +701,7 @@ public:
   void printDecodedGenXDebug(raw_ostream &OS) const {
     IGC_ASSERT(!hasErrors());
     LLVM_DEBUG(dbgs() << "GenXDebugInfo size: " << GenDbgInfoDataSize << "\n");
-    getDecodedGenDbg().print(OS);
+    getVISADebugInfo().print(OS);
   }
 };
 
@@ -727,7 +728,7 @@ GenObjectWrapper::GenObjectWrapper(VISAKernel &VK, const Function &F)
     setError("gen debug information reported by finalizer is inconsistent");
     return;
   }
-  DecodedDebugInfo = std::make_unique<IGC::DbgDecoder>(GenDbgInfoDataPtr);
+  VISADebugInfo = std::make_unique<IGC::VISADebugInfo>(GenDbgInfoDataPtr);
 };
 
 class CompiledVisaWrapper {
@@ -735,7 +736,7 @@ class CompiledVisaWrapper {
   using FinalizedDI = IGC::DbgDecoder::DbgInfoFormat;
 
   const GenObjectWrapper &GOW;
-  // underlying data is owned by DecodedDebugInfo, owned by GOW
+  // underlying data is owned by VISADebugInfo, owned by GOW
   const FinalizedDI *VisaKernelDI = nullptr;
 
   std::string ErrMsg;
@@ -755,7 +756,9 @@ public:
     return *VisaKernelDI;
   }
 
-  const IGC::DbgDecoder &getDIDecoder() const { return GOW.getDecodedGenDbg(); }
+  const IGC::VISADebugInfo &getVISADebugInfo() const {
+    return GOW.getVISADebugInfo();
+  }
 
   ArrayRef<char> getGenDebug() const { return GOW.getGenDebug(); }
   ArrayRef<char> getGenBinary() const { return GOW.getGenBinary(); }
@@ -777,7 +780,7 @@ public:
                       << "> as a CompiledObject moniker\n");
     IGC_ASSERT(!GOW.hasErrors());
 
-    const auto &CO = GOW.getDecodedGenDbg().compiledObjs;
+    const auto &CO = GOW.getVISADebugInfo().getRawDecodedData().compiledObjs;
     auto FoundCoIt = std::find_if(
         CO.begin(), CO.end(), [&CompiledObjectName](const auto &DI) {
           return CompiledObjectName == StringRef(DI.kernelName);
@@ -855,31 +858,28 @@ public:
     LLVM_DEBUG(dbgs() << "~GenXFunction() called for " << F.getName() << "\n");
   }
 
+  llvm::StringRef GetVISAFuncName() const override {
+    // TODO: this is not quite correct since VISA names is defined by VISA label
+    return F.getName();
+  }
+
   bool isSubroutine() const { return GetType() == ObjectType::SUBROUTINE; }
 
   bool isStackCall() const { return GetType() == ObjectType::STACKCALL_FUNC; }
 
   bool isKernel() const { return GetType() == ObjectType::KERNEL; }
 
-  const IGC::DbgDecoder::DbgInfoFormat*
-      getCompileUnit(const IGC::DbgDecoder& VD) const override {
-
+  const IGC::VISAObjectDebugInfo &
+  getVisaObjectDI(const IGC::VISADebugInfo &VDI) const override {
     StringRef CompiledObjectName =
         isSubroutine() ? MVTI.getSubroutineOwner(&F)->getName() : F.getName();
-
-    auto FoundIt = std::find_if(VD.compiledObjs.begin(), VD.compiledObjs.end(),
-                                [&CompiledObjectName](const auto &CO) {
-                                  return (CO.kernelName == CompiledObjectName);
-                                });
-    if (FoundIt == VD.compiledObjs.end())
-      return nullptr;
-
-    return &*FoundIt;
+    return VDI.getVisaObjectByCompliledObjectName(CompiledObjectName);
   }
 
   unsigned int getUnpaddedProgramSize() const override {
     return CompiledVisa.getGenBinary().size();
   }
+
   bool isLineTableOnly() const override {
     IGC_ASSERT_MESSAGE(0, "isLineTableOnly()");
     return false;
@@ -906,9 +906,11 @@ public:
   ArrayRef<char> getGenBinary() const override {
     return CompiledVisa.getGenBinary();
   }
-  const IGC::DbgDecoder &getDIDecoder() const {
-    return CompiledVisa.getDIDecoder();
+
+  const IGC::VISADebugInfo &getVISADebugInfo() const {
+    return CompiledVisa.getVISADebugInfo();
   }
+
   const IGC::DbgDecoder::DbgInfoFormat &getFinalizerDI() const {
     return CompiledVisa.getFinalizerDI();
   }
@@ -1100,7 +1102,7 @@ public:
       PrintSkippedAndClearCount();
 
       OS << Prefix;
-      OS << "  [" << VisaIndexCurr << ";" << VisaIndexNext << "): ";
+      OS << " [" << VisaIndexCurr << ";" << VisaIndexNext << "): ";
 
       auto *Reg = getRegisterForValue(Inst);
       OS << "<";
@@ -1109,6 +1111,13 @@ public:
       OS << "> ";
 
       Inst->print(OS);
+
+      if (auto DbgLoc = Inst->getDebugLoc()) {
+        StringRef Filename = DbgLoc->getFilename();
+        auto Line = DbgLoc->getLine();
+        auto Col = DbgLoc->getColumn();
+        OS << " [" << Filename << ":" << Line << "," << Col << "]";
+      }
       OS << "\n";
     }
 
@@ -1264,10 +1273,15 @@ GenXFunctionPtrList initializeDebugEmitter(
   }
   // Currently Debug Info Emitter expects that GenXFunctions are
   // processed in the same order as they appear in the visa object
-  // (in terms of genisa instructions order)
+  // Ideally, the order should not matter - but we are not there yet
+  // due to DwarfEmitter limitations
   std::sort(GFPointers.begin(), GFPointers.end(), [](auto *LGF, auto *RGF) {
     const auto &LDI = LGF->getFinalizerDI();
     const auto &RDI = RGF->getFinalizerDI();
+    if (LDI.relocOffset == RDI.relocOffset)
+      return visaMapComparer(LGF->getFunction(), RGF->getFunction(),
+                             LGF->getVisaMapping().V2I,
+                             RGF->getVisaMapping().V2I);
     return LDI.relocOffset < RDI.relocOffset;
   });
   return GFPointers;
@@ -1454,7 +1468,7 @@ void GenXDebugInfo::processKernel(const IGC::DebugEmitterOpts &DebugOpts,
   auto &ElfBin = ElfOutputs[&KF];
 
   for (auto *GF : GFPointers) {
-    LLVM_DEBUG(dbgs() << "--- Processing GenXFunction:  "
+    LLVM_DEBUG(dbgs() << "\n--- Processing GenXFunction:  "
                       << GF->getFunction()->getName().str() << " ---\n");
     LLVM_DEBUG(GF->printVisaMapping(dbgs()));
     IGC_ASSERT(validateVisaMapping(GF->getVisaMapping().V2I));
@@ -1462,7 +1476,7 @@ void GenXDebugInfo::processKernel(const IGC::DebugEmitterOpts &DebugOpts,
     bool ExpectMore = GF != GFPointers.back();
     LLVM_DEBUG(dbgs() << "--- Starting Debug Info Finalization (final:  "
                       << !ExpectMore << ") ---\n");
-    auto Out = Emitter->Finalize(!ExpectMore, &GF->getDIDecoder());
+    auto Out = Emitter->Finalize(!ExpectMore, GF->getVISADebugInfo());
     if (!ExpectMore) {
       ElfBin = std::move(Out);
     } else {

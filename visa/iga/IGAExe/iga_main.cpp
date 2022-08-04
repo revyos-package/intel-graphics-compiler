@@ -1,6 +1,6 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (C) 2017-2021 Intel Corporation
+Copyright (C) 2017-2022 Intel Corporation
 
 SPDX-License-Identifier: MIT
 
@@ -470,6 +470,21 @@ extern "C" int iga_main(int argc, const char **argv)
         "An instruction PC will be added as a comment",
         opts::OptAttrs::ALLOW_UNSET,
         baseOpts.printInstructionPc);
+    xGrp.defineOpt(
+        "set-pc-base",
+        nullptr,
+        "INT",
+        "print pc offset by specified",
+        "An instruction PC offset by a user specified base will be added as a comment -- use with Xprint-pc flag",
+        opts::OptAttrs::ALLOW_UNSET,
+        [] (const char* cinp, const opts::ErrorHandler& eh, Opts& baseOpts) {
+            if (cinp == nullptr) {
+                baseOpts.pcOffset = 0;
+            }
+            else {
+                baseOpts.pcOffset = eh.parseInt(cinp);
+            }
+        });
     xGrp.defineFlag(
         "print-bits",
         nullptr,
@@ -502,7 +517,7 @@ extern "C" int iga_main(int argc, const char **argv)
     xGrp.defineFlag(
         "print-ldst",
         nullptr,
-        "enables load/store pseudo intructions where possible",
+        "enables load/store pseudo instructions where possible",
         "Send instructions are emitted as load/store instructions",
         opts::OptAttrs::ALLOW_UNSET,
         baseOpts.printLdSt);

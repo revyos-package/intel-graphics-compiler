@@ -12,6 +12,7 @@ SPDX-License-Identifier: MIT
 #include "Compiler/CISACodeGen/helper.h"
 #include "Compiler/CodeGenPublic.h"
 #include "common/LLVMWarningsPush.hpp"
+#include "llvmWrapper/IR/Attributes.h"
 #include "llvmWrapper/IR/DerivedTypes.h"
 #include <llvmWrapper/IR/Instructions.h>
 #include <llvm/IR/Module.h>
@@ -90,14 +91,6 @@ bool LegalizeFunctionSignatures::runOnModule(Module& M)
     return true;
 }
 
-// If the return type size is greater than the allowed size, we convert the return value to pass-by-pointer
-inline bool isLegalReturnType(const Type* ty)
-{
-    // check return type size
-    //return ty->getPrimitiveSizeInBits() <= MAX_RETVAL_SIZE_IN_BITS;
-    return true; // allow all return sizes
-}
-
 // Check if an int or int-vector argument type is a power of two
 inline bool isLegalIntVectorType(const Module& M, Type* ty)
 {
@@ -137,34 +130,56 @@ inline Type* LegalizedIntVectorType(const Module& M, Type* ty)
         IGCLLVM::FixedVectorType::get(IntegerType::get(M.getContext(), newSize), (unsigned)cast<IGCLLVM::FixedVectorType>(ty)->getNumElements());
 }
 
-// Returns true for small structures that only contain primitive types
+// Returns true for structs smaller than 'structSize' and only contains primitive types
+inline bool isLegalStructType(const Module& M, Type* ty, unsigned structSize)
+{
+    IGC_ASSERT(ty->isStructTy());
+    const DataLayout& DL = M.getDataLayout();
+    StructType* sTy = dyn_cast<StructType>(ty);
+    if (sTy && DL.getStructLayout(sTy)->getSizeInBits() <= structSize)
+    {
+        for (const auto* EltTy : sTy->elements())
+        {
+            // Check if all elements are primitive types
+            if (!EltTy->isSingleValueType() || EltTy->isVectorTy())
+                return false;
+            // Avoid int64 and fp64 because of unimplemented InstExpander::visitInsertValue
+            // and InstExpander::visitExtractValue in the Emu64Ops pass.
+            if (EltTy->isIntegerTy(64) || EltTy->isDoubleTy())
+                return false;
+        }
+        return true;
+    }
+    return false;
+}
+
+inline bool isLegalSignatureType(const Module& M, Type* ty, bool isStackCall)
+{
+    if (isStackCall)
+    {
+        if (ty->isStructTy())
+        {
+            return isLegalStructType(M, ty, MAX_STRUCT_SIZE_IN_BITS);
+        }
+        else if (ty->isArrayTy())
+        {
+            return false;
+        }
+    }
+    // Are all subroutine types legal?
+    return true;
+}
+
+// Check if a struct pointer argument is promotable to pass-by-value
 inline bool isPromotableStructType(const Module& M, const Type* ty, bool isStackCall, bool isReturnValue = false)
 {
     if (IGC_IS_FLAG_DISABLED(EnableByValStructArgPromotion))
         return false;
 
-    const unsigned int maxSize = isStackCall ? MAX_STRUCT_SIZE_IN_BITS
-        : MAX_SUBROUTINE_STRUCT_SIZE_IN_BITS;
-
-    const DataLayout& DL = M.getDataLayout();
-
-    if (ty->isPointerTy())
+    const unsigned int maxSize = isStackCall ? MAX_STRUCT_SIZE_IN_BITS : MAX_SUBROUTINE_STRUCT_SIZE_IN_BITS;
+    if (ty->isPointerTy() && ty->getPointerElementType()->isStructTy())
     {
-        StructType* sTy = dyn_cast<StructType>(ty->getPointerElementType());
-        if (sTy && DL.getStructLayout(sTy)->getSizeInBits() <= maxSize)
-        {
-            for (const auto* EltTy : sTy->elements())
-            {
-                // Check if all elements are primitive types
-                if (!EltTy->isSingleValueType() || EltTy->isVectorTy())
-                    return false;
-                // Avoid int64 and fp64 because of unimplemented InstExpander::visitInsertValue
-                // and InstExpander::visitExtractValue in the Emu64Ops pass.
-                if (EltTy->isIntegerTy(64) || EltTy->isDoubleTy())
-                    return false;
-            }
-            return true;
-        }
+        return isLegalStructType(M, ty->getPointerElementType(), maxSize);
     }
     return false;
 }
@@ -237,6 +252,17 @@ void LegalizeFunctionSignatures::FixFunctionSignatures(Module& M)
         if (isEntryFunc(pMdUtils, pFunc))
             continue;
 
+        // An internally-linked function that eventually gets inlined doesn't need this transformation
+        if (pFunc->hasFnAttribute(llvm::Attribute::AlwaysInline) && pFunc->hasInternalLinkage())
+            continue;
+
+        if (pFunc->getName().empty())
+        {
+            // Empty function names can cause funny behavior later on
+            // Always give it a name. If duplicates, LLVM will insert a unique tag
+            pFunc->setName("__function__");
+        }
+
         // For binary linking, calling a function outside the module is possible, so declaration
         // signatures has to be fixed as well
         if (pFunc->isDeclaration() &&
@@ -257,15 +283,15 @@ void LegalizeFunctionSignatures::FixFunctionSignatures(Module& M)
         auto ei = pFunc->arg_end();
 
         // Create the new function signature by replacing the illegal types
-        if (isStackCall && !isLegalReturnType(pFunc->getReturnType()))
-        {
-            legalizeReturnType = true;
-            argTypes.push_back(PointerType::get(pFunc->getReturnType(), 0));
-        }
-        else if (FunctionHasPromotableSRetArg(M, pFunc))
+        if (FunctionHasPromotableSRetArg(M, pFunc))
         {
             promoteSRetType = true;
             ai++; // Skip adding the first arg
+        }
+        else if (!isLegalSignatureType(M, pFunc->getReturnType(), isStackCall))
+        {
+            legalizeReturnType = true;
+            argTypes.push_back(PointerType::get(pFunc->getReturnType(), 0));
         }
 
         for (; ai != ei; ai++)
@@ -280,6 +306,11 @@ void LegalizeFunctionSignatures::FixFunctionSignatures(Module& M)
             {
                 fixArgType = true;
                 argTypes.push_back(PromotedStructValueType(M, ai->getType()));
+            }
+            else if (!isLegalSignatureType(M, ai->getType(), isStackCall))
+            {
+                fixArgType = true;
+                argTypes.push_back(PointerType::get(ai->getType(), 0));
             }
             else
             {
@@ -335,13 +366,14 @@ void LegalizeFunctionSignatures::FixFunctionBody(Module& M)
             bool promoteSRetType = false;
             bool isStackCall = pFunc->hasFnAttribute("visaStackCall");
             Value* tempAllocaForSRetPointer = nullptr;
+            llvm::SmallVector<llvm::Argument*, 8> ArgByVal;
 
-            if (isStackCall && !isLegalReturnType(pFunc->getReturnType())) {
+            if (FunctionHasPromotableSRetArg(M, pFunc)) {
+                promoteSRetType = true;
+            }
+            else if (!isLegalSignatureType(M, pFunc->getReturnType(), isStackCall)) {
                 legalizeReturnType = true;
                 ++NewArgIt; // Skip first argument that we added.
-            }
-            else if (FunctionHasPromotableSRetArg(M, pFunc)) {
-                promoteSRetType = true;
             }
 
             // Fix the usages of arguments that have changed
@@ -374,6 +406,13 @@ void LegalizeFunctionSignatures::FixFunctionBody(Module& M)
                     StoreToStruct(builder, &*NewArgIt, newArgPtr);
                     VMap[&*OldArgIt] = newArgPtr;
                 }
+                else if (!isLegalSignatureType(M, OldArgIt->getType(), isStackCall))
+                {
+                    // Load from pointer arg
+                    Value* load = builder.CreateLoad(&*NewArgIt);
+                    VMap[&*OldArgIt] = load;
+                    ArgByVal.push_back(&*NewArgIt);
+                }
                 else
                 {
                     // No change, map old arg to new arg
@@ -390,13 +429,20 @@ void LegalizeFunctionSignatures::FixFunctionBody(Module& M)
             builder.CreateBr(ClonedEntryBB);
             MergeBlockIntoPredecessor(ClonedEntryBB);
 
+            // Loop through new args and add 'byval' attributes
+            for (auto arg : ArgByVal)
+            {
+                arg->addAttr(llvm::Attribute::ByVal);
+            }
+
             // Now fix the return values
             if (legalizeReturnType)
             {
-                // Add "noalias" and "sret" to the return argument
+                // Add the 'noalias' and 'sret' attribute to arg0
                 auto retArg = pNewFunc->arg_begin();
                 retArg->addAttr(llvm::Attribute::NoAlias);
                 retArg->addAttr(llvm::Attribute::StructRet);
+
                 // Loop through all return instructions and store the old return value into the arg0 pointer
                 const auto ptrSize = DL.getPointerSize();
                 for (auto RetInst : Returns)
@@ -499,7 +545,15 @@ void LegalizeFunctionSignatures::FixCallInstruction(Module& M, CallInst* callIns
 
     // Check return type
     Value* returnPtr = nullptr;
-    if (isStackCall && !isLegalReturnType(callInst->getType()))
+    if (callInst->getType()->isVoidTy() &&
+        IGCLLVM::getNumArgOperands(callInst) > 0 &&
+        callInst->paramHasAttr(0, llvm::Attribute::StructRet) &&
+        isPromotableStructType(M, callInst->getArgOperand(0)->getType(), isStackCall, true /* retval */))
+    {
+        opNum++; // Skip the first call operand
+        promoteSRetType = true;
+    }
+    else if (!isLegalSignatureType(M, callInst->getType(), isStackCall))
     {
         // Create an alloca for the return type
         IGCLLVM::IRBuilder<> builder(callInst);
@@ -512,17 +566,9 @@ void LegalizeFunctionSignatures::FixCallInstruction(Module& M, CallInst* callIns
         ArgAttrVec.push_back(retAttrib);
         legalizeReturnType = true;
     }
-    else if (callInst->getType()->isVoidTy() &&
-        callInst->getNumArgOperands() > 0 &&
-        callInst->paramHasAttr(0, llvm::Attribute::StructRet) &&
-        isPromotableStructType(M, callInst->getArgOperand(0)->getType(), isStackCall, true /* retval */))
-    {
-        opNum++; // Skip the first call operand
-        promoteSRetType = true;
-    }
 
     // Check call operands if it needs to be replaced
-    for (; opNum < callInst->getNumArgOperands(); opNum++)
+    for (; opNum < IGCLLVM::getNumArgOperands(callInst); opNum++)
     {
         Value* arg = callInst->getArgOperand(opNum);
         if (!isLegalIntVectorType(M, arg->getType()))
@@ -544,11 +590,23 @@ void LegalizeFunctionSignatures::FixCallInstruction(Module& M, CallInst* callIns
             ArgAttrVec.push_back(AttributeSet());
             fixArgType = true;
         }
+        else if (!isLegalSignatureType(M, arg->getType(), isStackCall))
+        {
+            // Create and store operand as an alloca, then pass as argument
+            IGCLLVM::IRBuilder<> builder(callInst);
+            Value* allocaV = builder.CreateAlloca(arg->getType());
+            builder.CreateStore(arg, allocaV);
+            callArgs.push_back(allocaV);
+            AttributeSet argAttrib;
+            argAttrib = argAttrib.addAttribute(M.getContext(), llvm::Attribute::ByVal);
+            ArgAttrVec.push_back(argAttrib);
+            fixArgType = true;
+        }
         else
         {
             // legal argument
             callArgs.push_back(arg);
-            ArgAttrVec.push_back(PAL.getParamAttributes(opNum));
+            ArgAttrVec.push_back(IGCLLVM::getParamAttrs(PAL, opNum));
         }
     }
 
@@ -581,7 +639,7 @@ void LegalizeFunctionSignatures::FixCallInstruction(Module& M, CallInst* callIns
         // Create the new call instruction
         CallInst* newCallInst = builder.CreateCall(newCalledValue, callArgs);
         newCallInst->setCallingConv(callInst->getCallingConv());
-        newCallInst->setAttributes(AttributeList::get(M.getContext(), PAL.getFnAttributes(), PAL.getRetAttributes(), ArgAttrVec));
+        newCallInst->setAttributes(AttributeList::get(M.getContext(), IGCLLVM::getFnAttrs(PAL), IGCLLVM::getRetAttrs(PAL), ArgAttrVec));
         newCallInst->setDebugLoc(callInst->getDebugLoc());
 
         if (legalizeReturnType)

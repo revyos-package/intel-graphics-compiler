@@ -220,7 +220,7 @@ SPDX-License-Identifier: MIT
 #include "llvm/IR/DiagnosticInfo.h"
 #include "llvm/IR/DiagnosticPrinter.h"
 #include "llvm/IR/Function.h"
-#include "llvm/IR/Instructions.h"
+#include "llvmWrapper/IR/Instructions.h"
 #include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/Module.h"
@@ -385,12 +385,14 @@ private:
     TwiceWidth = nullptr;
   }
   unsigned adjustTwiceWidthOrFixed4(const Bale &B);
-  bool checkIfLongLongSupportNeeded(Instruction *Inst) const;
+  bool checkIfLongLongSupportNeeded(const Instruction *Inst) const;
   void verifyLSCFence(const Instruction *Inst);
   void verifyLSCAtomic(const Instruction *Inst);
   void verifyLSC2D(const Instruction *Inst);
   void verifyLSCTransposed(const Instruction *Inst);
   void verifyLSCNonTransposed(const Instruction *Inst);
+  void verifyType(const Type *Ty, const Instruction *Inst) const;
+  bool checkInst(const Instruction *Inst) const;
   bool processInst(Instruction *Inst);
   bool processBale(Instruction *InsertBefore);
   bool noSplitProcessing();
@@ -450,46 +452,6 @@ private:
 };
 
 static const unsigned MaxPredSize = 32;
-
-class DiagnosticInfoLegalization : public DiagnosticInfoWithLocationBase {
-private:
-  const Instruction *Inst;
-  std::string Description;
-
-  static const int KindID;
-
-  static int getKindID() { return KindID; }
-
-public:
-  DiagnosticInfoLegalization(const Instruction *Inst, const Twine &Desc,
-                             DiagnosticSeverity Severity = DS_Error);
-
-  void print(DiagnosticPrinter &DP) const override;
-  std::string getDescription() const;
-};
-
-const int DiagnosticInfoLegalization::KindID =
-    llvm::getNextAvailablePluginDiagnosticKind();
-
-DiagnosticInfoLegalization::DiagnosticInfoLegalization(const Instruction *I,
-                                                       const Twine &Desc,
-                                                       DiagnosticSeverity Severity):
-    DiagnosticInfoWithLocationBase(static_cast<DiagnosticKind>(getKindID()),
-                                   Severity,
-                                   *I->getFunction(), I->getDebugLoc()),
-    Inst(I),
-    Description(Desc.str()) {}
-
-std::string DiagnosticInfoLegalization::getDescription() const {
-  std::string str;
-  vc::printToString(str, *Inst);
-  return (Twine("GenXLegalization failed for instruction \"") +
-          StringRef(str).ltrim() + "\": " + Description).str();
-}
-
-void DiagnosticInfoLegalization::print(DiagnosticPrinter &DP) const {
-  DP << getLocationStr() << ": " << getDescription();
-}
 
 bool isLSCWithReturn(Instruction *Inst) {
   return GenXIntrinsic::isLSC(Inst) && !Inst->getType()->isVoidTy();
@@ -618,7 +580,8 @@ unsigned GenXLegalization::adjustTwiceWidthOrFixed4(const Bale &B) {
  * Some operations like bitcasts or ptrtoint do not really need any HW support
  * to generate a compliant VISA
  */
-bool GenXLegalization::checkIfLongLongSupportNeeded(Instruction *Inst) const {
+bool GenXLegalization::checkIfLongLongSupportNeeded(
+    const Instruction *Inst) const {
   // for now, we expect that the inspected instruction results in a value
   // 64-bit type (scalar or vector)
   IGC_ASSERT(Inst);
@@ -665,26 +628,26 @@ void GenXLegalization::verifyLSCAtomic(const Instruction *Inst) {
   IGC_ASSERT(GenXIntrinsic::isLSCAtomic(Inst));
   unsigned Width = GenXIntrinsic::getLSCWidth(Inst);
   if (!isPowerOf2_32(Width)) {
-    DiagnosticInfoLegalization Err(Inst,
-        "LSC atomic instruction execution width must be a power of 2");
-    Inst->getContext().diagnose(Err);
+    vc::diagnose(Inst->getContext(), "GenXLegalization",
+                 "LSC atomic instruction execution width must be a power of 2",
+                 Inst);
   }
   if (Width > ST->getLSCMaxWidth()) {
-    DiagnosticInfoLegalization Err(Inst,
+    vc::diagnose(
+        Inst->getContext(), "GenXLegalization",
         "LSC atomic instruction execution width must be no more than " +
-        Twine(ST->getLSCMaxWidth()));
-    Inst->getContext().diagnose(Err);
+            Twine(ST->getLSCMaxWidth()),
+        Inst);
   }
   unsigned NumVectorElems = GenXIntrinsic::getLSCNumVectorElements(Inst);
   if (NumVectorElems > 1) {
-    DiagnosticInfoLegalization Err(Inst,
-        "LSC atomic instruction vector size must be 1");
-    Inst->getContext().diagnose(Err);
+    vc::diagnose(Inst->getContext(), "GenXLegalization",
+                 "LSC atomic instruction vector size must be 1", Inst);
   }
   if (GenXIntrinsic::isLSCTransposed(Inst)) {
-    DiagnosticInfoLegalization Err(Inst,
-        "LSC atomic instructions do not support transposed data order");
-    Inst->getContext().diagnose(Err);
+    vc::diagnose(Inst->getContext(), "GenXLegalization",
+                 "LSC atomic instructions do not support transposed data order",
+                 Inst);
   }
 }
 
@@ -705,14 +668,12 @@ void GenXLegalization::verifyLSCTransposed(const Instruction *Inst) {
                          ST->getLSCMaxDataRegisters() *
                          genx::ByteBits;
   if (DataBits > MaxDataBits) {
-    DiagnosticInfoLegalization Err(Inst,
-        "Transposed LSC instruction vector size is too large");
-    Inst->getContext().diagnose(Err);
+    vc::diagnose(Inst->getContext(), "GenXLegalization",
+                 "Transposed LSC instruction vector size is too large", Inst);
   }
   if (GenXIntrinsic::getLSCWidth(Inst) > 1) {
-    DiagnosticInfoLegalization Err(Inst,
-        "Transposed LSC instruction execution width must be 1");
-    Inst->getContext().diagnose(Err);
+    vc::diagnose(Inst->getContext(), "GenXLegalization",
+                 "Transposed LSC instruction execution width must be 1", Inst);
   }
 }
 
@@ -722,10 +683,65 @@ void GenXLegalization::verifyLSCTransposed(const Instruction *Inst) {
  */
 void GenXLegalization::verifyLSCNonTransposed(const Instruction *Inst) {
   if (getLSCMaxWidthWithVectorSize(Inst) < ST->getLSCMinWidth()) {
-    DiagnosticInfoLegalization Err(Inst,
-        "Non-transposed LSC instruction vector size is too large");
-    Inst->getContext().diagnose(Err);
+    vc::fatal(Inst->getContext(), *this,
+              "Non-transposed LSC instruction vector size is too large", Inst);
   }
+}
+
+/***********************************************************************
+ * verifyType : check if type is ok according to subtarget
+ *
+ * Fails with fatal error if we have non-supported type
+ */
+void GenXLegalization::verifyType(const Type *Ty,
+                                  const Instruction *Inst) const {
+  if (Ty->isIntegerTy(64) && !ST->hasLongLong() && !ST->emulateLongLong() &&
+      checkIfLongLongSupportNeeded(Inst)) {
+    auto Target = getAnalysis<TargetPassConfig>()
+                      .getTM<GenXTargetMachine>()
+                      .getTargetCPU();
+    vc::fatal(Ty->getContext(), *this,
+              "'i64' data type is not supported by this target <" + Target +
+                  ">",
+              Inst);
+  }
+
+  if (Ty->isDoubleTy() && !ST->hasFP64()) {
+    auto Target = getAnalysis<TargetPassConfig>()
+                      .getTM<GenXTargetMachine>()
+                      .getTargetCPU();
+    vc::fatal(Ty->getContext(), *this,
+              "'double' data type is not supported by this target <" + Target +
+                  ">",
+              Inst);
+  }
+}
+
+/***********************************************************************
+ * checkInst : check instruction before GRF width legalization
+ *
+ * Return: true if everything is ok, false if no legalization required
+ */
+bool GenXLegalization::checkInst(const Instruction *Inst) const {
+  LLVM_DEBUG(dbgs() << "checkInst: " << *Inst << "\n");
+  if (Inst->isTerminator())
+    return false; // ignore terminator
+  if (isa<PHINode>(Inst))
+    return false; // ignore phi node
+  if (GenXIntrinsic::isReadWritePredefReg(Inst))
+    return false; // ignore predef regs
+
+  // Sanity check for illegal operand type
+  const auto *ScalarType = Inst->getType()->getScalarType();
+  verifyType(ScalarType, Inst);
+
+  // Sanity check for illegal operands
+  for (auto &&Op : Inst->operands()) {
+    const auto *ScalarOpType = Op->getType()->getScalarType();
+    verifyType(ScalarOpType, Inst);
+  }
+
+  return true;
 }
 
 /***********************************************************************
@@ -736,38 +752,9 @@ void GenXLegalization::verifyLSCNonTransposed(const Instruction *Inst) {
  *          something from it)
  */
 bool GenXLegalization::processInst(Instruction *Inst) {
-  LLVM_DEBUG(dbgs() << "processInst: " << *Inst << "\n");
-  if (Inst->isTerminator())
-    return false; // ignore terminator
-  // Prepare to insert split code after current instruction.
-  auto InsertBefore = Inst->getNextNode();
-  if (isa<PHINode>(Inst))
-    return false; // ignore phi node
-  if (GenXIntrinsic::isReadWritePredefReg(Inst))
+  if (!checkInst(Inst))
     return false;
-  // Sanity check for illegal operand type
-  const auto *ScalarType = Inst->getType()->getScalarType();
-
-  if (ScalarType->isIntegerTy(64) && !ST->hasLongLong()) {
-    if (!ST->emulateLongLong() && checkIfLongLongSupportNeeded(Inst)) {
-      auto Target = getAnalysis<TargetPassConfig>()
-                        .getTM<GenXTargetMachine>()
-                        .getTargetCPU();
-      vc::diagnose(Inst->getContext(), "GenXLegalization", Inst,
-                   "'i64' data type is not supported by this target <" +
-                       Target + ">");
-    }
-  }
-
-  if (ScalarType->isDoubleTy() && !ST->hasFP64()) {
-    auto Target = getAnalysis<TargetPassConfig>()
-                      .getTM<GenXTargetMachine>()
-                      .getTargetCPU();
-    vc::diagnose(Inst->getContext(), "GenXLegalization", Inst,
-                 "'double' data type is not supported by this target <" +
-                     Target + ">");
-  }
-
+  LLVM_DEBUG(dbgs() << "processInst: " << *Inst << "\n");
   if (!ST->hasSad2Support()) {
     switch (GenXIntrinsic::getGenXIntrinsicID(Inst)) {
     case GenXIntrinsic::genx_ssad2:
@@ -796,9 +783,8 @@ bool GenXLegalization::processInst(Instruction *Inst) {
       return false;
     }
     if (GenXIntrinsic::isLSCLegacyAtomic(Inst)) {
-      DiagnosticInfoLegalization Err(Inst,
-          "Legacy LSC atomics are not supported");
-      Inst->getContext().diagnose(Err);
+      vc::diagnose(Inst->getContext(), "GenXLegalization",
+                   "Legacy LSC atomics are not supported", Inst);
     }
     if (GenXIntrinsic::isLSC2D(Inst)) {
       verifyLSC2D(Inst);
@@ -813,6 +799,9 @@ bool GenXLegalization::processInst(Instruction *Inst) {
       verifyLSCNonTransposed(Inst);
     }
   }
+
+  // Prepare to insert split code after current instruction.
+  auto InsertBefore = Inst->getNextNode();
 
   if (!isa<VectorType>(Inst->getType()) && !GenXIntrinsic::isLSC(Inst)) {
     if (Inst->getOpcode() == Instruction::BitCast &&
@@ -831,15 +820,7 @@ bool GenXLegalization::processInst(Instruction *Inst) {
     if (!isa<StoreInst>(Inst))
       return false; // no splitting needed for other scalar op.
   }
-  auto ID = GenXIntrinsic::getGenXIntrinsicID(Inst);
-  if ((ID == GenXIntrinsic::genx_dpas) ||
-      (ID == GenXIntrinsic::genx_dpas2) ||
-      (ID == GenXIntrinsic::genx_dpasw) ||
-      (ID == GenXIntrinsic::genx_dpas_nosrc0) ||
-      (ID == GenXIntrinsic::genx_dpasw_nosrc0)) {
-    return false;
-  }
-  if (ID == GenXIntrinsic::genx_umadw || ID == GenXIntrinsic::genx_smadw)
+  if (!Baling->canSplitBale(Inst))
     return false;
   if (isa<ExtractValueInst>(Inst))
     return false;
@@ -1759,7 +1740,7 @@ unsigned GenXLegalization::determineNonRegionWidth(Instruction *Inst,
   if (!isa<SelectInst>(Inst)) {
     unsigned NumOperands = Inst->getNumOperands();
     if (CallInst *CI = dyn_cast<CallInst>(Inst))
-      NumOperands = CI->getNumArgOperands();
+      NumOperands = IGCLLVM::getNumArgOperands(CI);
     if (NumOperands) {
       IGC_ASSERT_MESSAGE(isa<VectorType>(Inst->getOperand(0)->getType()),
         "instruction not supported");
@@ -2341,7 +2322,7 @@ Value *GenXLegalization::splitInst(Value *PrevSliceRes, BaleInst BInst,
         cast<VectorType>(BInst.Inst->getType())->getElementType(),
         Width * WidthAdjust)); // RetTy
   }
-  for (unsigned i = 0, e = CI->getNumArgOperands(); i != e; ++i) {
+  for (unsigned i = 0, e = IGCLLVM::getNumArgOperands(CI); i != e; ++i) {
     Use *U = &CI->getOperandUse(i);
     if (U == Fixed4) {
       Args.push_back(CI->getArgOperand(i));

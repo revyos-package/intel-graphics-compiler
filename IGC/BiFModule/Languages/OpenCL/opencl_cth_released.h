@@ -1,6 +1,6 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (C) 2017-2021 Intel Corporation
+Copyright (C) 2017-2022 Intel Corporation
 
 SPDX-License-Identifier: MIT
 
@@ -3233,7 +3233,7 @@ void __attribute__((overloadable)) write_imageui(write_only image3d_t image, int
   uint4 __attribute__((overloadable)) read_imageui(read_only image3d_t image, sampler_t sampler, float4 coord, float lod);
 
 
-  // Write Image Funtions
+  // Write Image Functions
 
   // 1D writes with mipmap support
   /**
@@ -6939,10 +6939,10 @@ void __attribute__((overloadable)) intel_work_group_vme_mb_multi_bidir_check_8x8
 #endif // #ifndef _OPENCL_CTH_
 
 #ifdef cl_intel_split_work_group_barrier
-void work_group_barrier_arrive(cl_mem_fence_flags flags);
-void work_group_barrier_wait(cl_mem_fence_flags flags);
+void __attribute__((overloadable)) intel_work_group_barrier_arrive(cl_mem_fence_flags flags);
+void __attribute__((overloadable)) intel_work_group_barrier_wait(cl_mem_fence_flags flags);
 #if (__OPENCL_C_VERSION__ >= CL_VERSION_2_0)
-void work_group_barrier_arrive(cl_mem_fence_flags flags, memory_scope scope);
-void work_group_barrier_wait(cl_mem_fence_flags flags, memory_scope scope);
+void __attribute__((overloadable)) intel_work_group_barrier_arrive(cl_mem_fence_flags flags, memory_scope scope);
+void __attribute__((overloadable)) intel_work_group_barrier_wait(cl_mem_fence_flags flags, memory_scope scope);
 #endif // __OPENCL_C_VERSION__ >= CL_VERSION_2_0
 #endif // cl_intel_split_work_group_barrier

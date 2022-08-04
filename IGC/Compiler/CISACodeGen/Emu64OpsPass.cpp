@@ -18,7 +18,7 @@ SPDX-License-Identifier: MIT
 #include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Instruction.h"
-#include "llvm/IR/Instructions.h"
+#include "llvmWrapper/IR/Instructions.h"
 #include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Type.h"
@@ -1750,6 +1750,14 @@ bool InstExpander::visitBitCast(BitCastInst& BC) {
         return false;
 
     if (Emu->isInt64(&BC)) {
+        if (Emu->isInt64(Src)) {
+            // Somehow there are still 'bitcast's from i64 to i64. Directly
+            // re-use the already expanded values.
+            Value *Lo = nullptr, *Hi = nullptr;
+            std::tie(Lo, Hi) = Emu->getExpandedValues(Src);
+            Emu->setExpandedValues(&BC, Lo, Hi);
+            return true;
+        }
         Src = IRB->CreateBitCast(Src, Emu->getV2Int32Ty());
         Value* Lo = IRB->CreateExtractElement(Src, IRB->getInt32(0));
         Value* Hi = IRB->CreateExtractElement(Src, IRB->getInt32(1));
@@ -1942,7 +1950,7 @@ bool InstExpander::visitCall(CallInst& Call) {
     IGC_ASSERT(nullptr != CallCopy);
     CallCopy->insertBefore(&Call);
     IRB->SetInsertPoint(CallCopy);
-    for (int argNo=0, sz = (int)Call.getNumArgOperands(); argNo < sz; ++argNo)
+    for (int argNo=0, sz = (int)IGCLLVM::getNumArgOperands(&Call); argNo < sz; ++argNo)
     {
         Value* OldVal = Call.getArgOperand(argNo);
         if (Emu->isInt64(OldVal))

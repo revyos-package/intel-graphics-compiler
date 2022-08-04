@@ -34,6 +34,11 @@ SPDX-License-Identifier: MIT
             (getPlatform() < GENX_ICLLP && m_options->getOption(vISA_enablePreemption));
     }
 
+    bool samplerHeaderPreemptionWA() const
+    {
+        return m_options->getOption(vISA_enablePreemption) && m_options->getOption(vISA_samplerHeaderWA);
+    }
+
     bool needsNoPreemptR2ForSend() const
     {
         return getPlatformGeneration() == PlatformGen::GEN11;
@@ -420,6 +425,7 @@ SPDX-License-Identifier: MIT
         return getPlatform() == Xe_PVCXT && hasRSForSpecificPlatform();
     }
 
+
     bool alignBindlessSampler() const
     {
         return getPlatformGeneration() == PlatformGen::GEN9;
@@ -761,6 +767,11 @@ SPDX-License-Identifier: MIT
         return false;
     }
 
+    bool enablePreSchedACC() const
+    {
+        return false;
+    }
+
     bool hasDoubleAcc() const
     {
         return getOption(vISA_hasDoubleAcc);
@@ -890,7 +901,7 @@ SPDX-License-Identifier: MIT
     bool useNewNoMaskWA() const
     {
         return (getOption(vISA_newNoMaskWA) && m_options->getTarget() == VISA_CM)  // VC
-             || getOption(vISA_newTmpNoMaskWA);                                    // scalar igc
+             || getuint32Option(vISA_newTmpNoMaskWA) > 0;                          // scalar igc
     }
 
     bool hasSLMWARIssue() const
@@ -913,12 +924,13 @@ SPDX-License-Identifier: MIT
        return false;
     }
 
-    bool hasSrc2ReadSupression() const
+    bool hasDpasSrc2ReadSupression() const
     {
         return getPlatform() >= Xe_PVCXT;
     }
 
-    bool hasSrc2ReadSupressionSameRegSameType() const
+
+    bool hasDpasSrc2ReadSupressionSameRegSameType() const
     {
         return getPlatform() == Xe_PVC && !getOption(vISA_HasPartialInt64);
     }
@@ -1055,4 +1067,5 @@ SPDX-License-Identifier: MIT
         }
         return 0;
    }
+
    // end HW capabilities

@@ -1,6 +1,6 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (C) 2017-2021 Intel Corporation
+Copyright (C) 2017-2022 Intel Corporation
 
 SPDX-License-Identifier: MIT
 
@@ -397,6 +397,19 @@ void ConstantCoalescing::ProcessBlock(
     std::vector<BufChunk*> & indcb_owloads,
     std::vector<BufChunk*> & indcb_gathers)
 {
+    // checking for stores for future load merging check
+    bool bbHasStores = false;
+    for (BasicBlock::iterator BBI_st = blk->begin(), BBE_st = blk->end();
+        BBI_st != BBE_st; ++BBI_st)
+    {
+        if (isa<StoreInst>(BBI_st) ||
+            isa<StoreRawIntrinsic>(BBI_st))
+        {
+            bbHasStores = true;
+            break;
+        }
+    }
+    bool skipLdrawOpt = (m_ctx->type == ShaderType::PIXEL_SHADER) || bbHasStores;
     // get work-item analysis, need to update uniformness information
     for (BasicBlock::iterator BBI = blk->begin(), BBE = blk->end();
          BBI != BBE; ++BBI)
@@ -416,6 +429,7 @@ void ConstantCoalescing::ProcessBlock(
             if ((bufType != BINDLESS_CONSTANT_BUFFER)
                 && (bufType != BINDLESS_TEXTURE)
                 && (bufType != SSH_BINDLESS_CONSTANT_BUFFER)
+                && (bufType != BINDLESS)
                 )
             {
                 continue;
@@ -442,21 +456,25 @@ void ConstantCoalescing::ProcessBlock(
                 uint addrSpace = ldRaw->getResourceValue()->getType()->getPointerAddressSpace();
                 if (wiAns->isUniform(ldRaw))
                 {
-                    MergeUniformLoad(
-                        ldRaw,
-                        ldRaw->getResourceValue(),
-                        addrSpace,
-                        baseOffsetInBytes,
-                        offsetInBytes,
-                        maxEltPlus,
-                        Extension,
-                        baseOffsetInBytes ? indcb_owloads : dircb_owloads);
+                    if (!skipLdrawOpt || (bufType != BINDLESS))
+                    {
+                        MergeUniformLoad(
+                            ldRaw,
+                            ldRaw->getResourceValue(),
+                            addrSpace,
+                            baseOffsetInBytes,
+                            offsetInBytes,
+                            maxEltPlus,
+                            Extension,
+                            baseOffsetInBytes ? indcb_owloads : dircb_owloads);
+                    }
                 }
                 else if (bufType == BINDLESS_CONSTANT_BUFFER
                          || bufType == SSH_BINDLESS_CONSTANT_BUFFER
+                        || bufType == BINDLESS
                          )
                 {
-                    if (UsesTypedConstantBuffer(m_ctx, bufType))
+                    if (UsesTypedConstantBuffer(m_ctx, bufType) && (bufType != BINDLESS))
                     {
                         ScatterToSampler(
                             ldRaw,
@@ -468,15 +486,18 @@ void ConstantCoalescing::ProcessBlock(
                     }
                     else if (IGC_IS_FLAG_DISABLED(DisableConstantCoalescingOfStatefulNonUniformLoads))
                     {
-                        MergeScatterLoad(
-                            ldRaw,
-                            ldRaw->getResourceValue(),
-                            addrSpace,
-                            baseOffsetInBytes,
-                            offsetInBytes,
-                            maxEltPlus,
-                            Extension,
-                            indcb_gathers);
+                        if (bufType != BINDLESS)
+                        {
+                            MergeScatterLoad(
+                                ldRaw,
+                                ldRaw->getResourceValue(),
+                                addrSpace,
+                                baseOffsetInBytes,
+                                offsetInBytes,
+                                maxEltPlus,
+                                Extension,
+                                indcb_gathers);
+                        }
                     }
                 }
                 else if (bufType == BINDLESS_TEXTURE && IGC_IS_FLAG_ENABLED(EnableTextureLoadCoalescing))
@@ -1252,19 +1273,24 @@ void ConstantCoalescing::MergeUniformLoad(Instruction* load,
             chunk_vec.push_back(cov_chunk);
         }
     }
-    else if (load->getType()->isVectorTy())
+    else
     {
-        bool isStatelessLoad = false;
-        if (auto * LI = dyn_cast<LoadInst>(load))
-            isStatelessLoad = (LI->getPointerAddressSpace() == ADDRESS_SPACE_CONSTANT);
-
-        // just to modify all the extract, and connect it to the chunk-load
+        // Determine load boundaries
         uint lb = std::min(eltid, cov_chunk->chunkStart);
         uint ub = std::max(eltid + maxEltPlus, cov_chunk->chunkStart + cov_chunk->chunkSize);
+
+        // Calculate load start and size adjustments
         uint start_adj = cov_chunk->chunkStart - lb;
         // Gen only has 1, 2, 4 or 8 oword loads round up
         uint size_adj = iSTD::RoundPower2((DWORD)(ub - lb)) - cov_chunk->chunkSize;
-        if (IGC_IS_FLAG_DISABLED(DisableConstantCoalescingOutOfBoundsCheck) && isStatelessLoad)
+
+        // Out of bounds check
+        bool isStatelessLoad = false;
+        if (auto* LI = dyn_cast<LoadInst>(load))
+        {
+            isStatelessLoad = (LI->getPointerAddressSpace() == ADDRESS_SPACE_CONSTANT);
+        }
+        if (isStatelessLoad && IGC_IS_FLAG_DISABLED(DisableConstantCoalescingOutOfBoundsCheck))
         {
             uint furthest_access = size_adj + lb + cov_chunk->chunkSize;
             if (furthest_access > ub)
@@ -1277,7 +1303,7 @@ void ConstantCoalescing::MergeUniformLoad(Instruction* load,
                     //Looks like we are not able to adjust the starting point lets do a deeper check to
                     //see if the furthest access is really okay by looking at other starting points
                     uint furthest_cb_access = 0;
-                    for (BufChunk *cur_chunk: chunk_vec)
+                    for (BufChunk* cur_chunk : chunk_vec)
                     {
                         if (CompareBufferBase(cur_chunk->bufIdxV, cur_chunk->addrSpace, bufIdxV, addrSpace))
                             furthest_cb_access = std::max(furthest_cb_access, cur_chunk->chunkStart + cur_chunk->chunkSize);
@@ -1289,48 +1315,39 @@ void ConstantCoalescing::MergeUniformLoad(Instruction* load,
                     start_adj = new_start_adj;
             }
         }
-        if (start_adj == 0)
+
+        // Apply adjustments
+        if (load->getType()->isVectorTy())
         {
-            if (size_adj)
-                EnlargeChunk(cov_chunk, size_adj);
+            if (start_adj == 0)
+            {
+                if (size_adj)
+                    EnlargeChunk(cov_chunk, size_adj);
+            }
+            else
+            {
+                AdjustChunk(cov_chunk, start_adj, size_adj, Extension);
+            }
+            MoveExtracts(cov_chunk, load, eltid - cov_chunk->chunkStart);
         }
         else
         {
-            AdjustChunk(cov_chunk, start_adj, size_adj, Extension);
+            Instruction* splitter = nullptr;
+            if (start_adj == 0 && size_adj == 0)
+            {
+                splitter = FindOrAddChunkExtract(cov_chunk, eltid);
+            }
+            else if (start_adj > 0)
+            {
+                splitter = AdjustChunkAddExtract(cov_chunk, start_adj, size_adj, eltid, Extension);
+            }
+            else if (size_adj > 0)
+            {
+                splitter = EnlargeChunkAddExtract(cov_chunk, size_adj, eltid);
+            }
+            load->replaceAllUsesWith(splitter);
+            wiAns->incUpdateDepend(splitter, wiAns->whichDepend(load));
         }
-        MoveExtracts(cov_chunk, load, eltid - cov_chunk->chunkStart);
-    }
-    else
-    {
-        Instruction* splitter = nullptr;
-        uint start_adj = 0;
-        uint size_adj = 0;
-        if (eltid < cov_chunk->chunkStart)
-        {
-            start_adj = cov_chunk->chunkStart - eltid;
-            size_adj = start_adj;
-        }
-        else if (eltid >= cov_chunk->chunkStart + cov_chunk->chunkSize)
-        {
-            size_adj = iSTD::RoundPower2((DWORD)(eltid + 1 - cov_chunk->chunkStart)) - cov_chunk->chunkSize;
-        }
-        // Gen only has 1, 2, 4 or 8 oword loads round up
-        size_adj = iSTD::RoundPower2((DWORD)(size_adj + cov_chunk->chunkSize)) - cov_chunk->chunkSize;
-
-        if (start_adj == 0 && size_adj == 0)
-        {
-            splitter = FindOrAddChunkExtract(cov_chunk, eltid);
-        }
-        else if (start_adj > 0)
-        {
-            splitter = AdjustChunkAddExtract(cov_chunk, start_adj, size_adj, eltid, Extension);
-        }
-        else if (size_adj > 0)
-        {
-            splitter = EnlargeChunkAddExtract(cov_chunk, size_adj, eltid);
-        }
-        load->replaceAllUsesWith(splitter);
-        wiAns->incUpdateDepend(splitter, wiAns->whichDepend(load));
     }
 }
 

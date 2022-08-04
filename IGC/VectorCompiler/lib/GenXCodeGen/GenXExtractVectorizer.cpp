@@ -24,15 +24,16 @@ SPDX-License-Identifier: MIT
 #include "GenX.h"
 #include "GenXUtil.h"
 
-#include "llvm/Analysis/CFG.h"
-#include "llvm/IR/BasicBlock.h"
-#include "llvm/IR/Constants.h"
-#include "llvm/IR/Dominators.h"
-#include "llvm/IR/Function.h"
-#include "llvm/IR/Instructions.h"
-#include "llvm/IR/Intrinsics.h"
-#include "llvm/InitializePasses.h"
-#include "llvm/Support/Debug.h"
+#include <llvm/Analysis/CFG.h>
+#include <llvm/Analysis/PostDominators.h>
+#include <llvm/IR/BasicBlock.h>
+#include <llvm/IR/Constants.h>
+#include <llvm/IR/Dominators.h>
+#include <llvm/IR/Function.h>
+#include <llvm/IR/Instructions.h>
+#include <llvm/IR/Intrinsics.h>
+#include <llvm/InitializePasses.h>
+#include <llvm/Support/Debug.h>
 
 #include "llvmWrapper/IR/DerivedTypes.h"
 
@@ -45,8 +46,11 @@ namespace {
 class GenXExtractVectorizer : public FunctionPass {
   bool Modified = false;
   DominatorTree *DT = nullptr;
+  PostDominatorTree *PDT = nullptr;
   SmallVector<Value *, 8> Extracted;
   std::set<Value *> ExtractedSet;
+
+public:
   struct Extract {
     Instruction *Inst; // the binary operator applied to the extracted element
     int Offset; // constant offset from the rdregion
@@ -69,19 +73,25 @@ class GenXExtractVectorizer : public FunctionPass {
       return Indirect < Other.Indirect;
     }
   };
-public:
+  using Bucket = SmallVector<Extract, 4>;
+  struct BucketInfo {
+    Bucket B;
+    Region R;
+    Instruction *InsertPt;
+  };
   static char ID;
   explicit GenXExtractVectorizer() : FunctionPass(ID) { }
   StringRef getPassName() const override { return "GenX Extract Vectorizer"; }
   void getAnalysisUsage(AnalysisUsage &AU) const override {
     AU.addRequired<DominatorTreeWrapperPass>();
+    AU.addRequired<PostDominatorTreeWrapperPass>();
     AU.setPreservesCFG();
   }
   bool runOnFunction(Function &F) override;
 
 private:
   void processExtracted(Value *V);
-  void processBucket(const BucketIndex *BIdx, SmallVectorImpl<Extract> *B);
+  void processBucket(BucketInfo &BI);
 };
 
 }// end namespace llvm
@@ -92,6 +102,7 @@ namespace llvm { void initializeGenXExtractVectorizerPass(PassRegistry &); }
 INITIALIZE_PASS_BEGIN(GenXExtractVectorizer, "GenXExtractVectorizer",
                       "GenXExtractVectorizer", false, false)
 INITIALIZE_PASS_DEPENDENCY(DominatorTreeWrapperPass)
+INITIALIZE_PASS_DEPENDENCY(PostDominatorTreeWrapperPass)
 INITIALIZE_PASS_END(GenXExtractVectorizer, "GenXExtractVectorizer",
                     "GenXExtractVectorizer", false, false)
 
@@ -108,6 +119,7 @@ FunctionPass *llvm::createGenXExtractVectorizerPass()
 bool GenXExtractVectorizer::runOnFunction(Function &F)
 {
   DT = &getAnalysis<DominatorTreeWrapperPass>().getDomTree();
+  PDT = &getAnalysis<PostDominatorTreeWrapperPass>().getPostDomTree();
   // Scan the code looking for vector values that have an extract (a rdregion
   // of one element) applied.
   for (auto fi = F.begin(), fe = F.end(); fi != fe; ++fi) {
@@ -136,6 +148,92 @@ bool GenXExtractVectorizer::runOnFunction(Function &F)
   return Modified;
 }
 
+// Check whether stride is uniform for the collected offsets.
+static bool hasCommonStride(const GenXExtractVectorizer::Bucket &B) {
+  auto Begin = B.begin();
+  auto End = B.end();
+  // If there is zero or one element, return true.
+  if (std::distance(Begin, End) < 2)
+    return true;
+  // See if we have a sequence of offsets such that we can construct a
+  // 1D region.
+  int CurOffset = Begin->Offset;
+  auto Next = std::next(Begin);
+  int Stride = Next->Offset - CurOffset;
+  while (++Begin != End) {
+    if (Begin->Offset - CurOffset != Stride)
+      return false;
+    CurOffset = Begin->Offset;
+  }
+  return true;
+}
+
+static Instruction *findInsertionPoint(const GenXExtractVectorizer::Bucket &B,
+                                       const DominatorTree &DT,
+                                       const PostDominatorTree &PDT) {
+  SmallVector<Instruction *, 8> Insts;
+  std::transform(B.begin(), B.end(), std::back_inserter(Insts),
+                 [](auto &Extract) { return Extract.Inst; });
+  Instruction *InsertPt = findClosestCommonDominator(&DT, Insts);
+  const BasicBlock *CommonDom = InsertPt->getParent();
+
+  std::unordered_set<const BasicBlock *> BBs;
+  std::transform(Insts.begin(), Insts.end(), std::inserter(BBs, BBs.end()),
+                 [](auto *Inst) { return Inst->getParent(); });
+  const BasicBlock *CommonPostDom = B.front().Inst->getParent();
+  for (const auto *BB : BBs)
+    CommonPostDom = PDT.findNearestCommonDominator(CommonPostDom, BB);
+
+  if (CommonDom == CommonPostDom)
+    return InsertPt;
+
+  for (auto I = df_begin(CommonDom), E = df_end(CommonDom); I != E;) {
+    // CommonPostDom is reached. There is a path from CommonDom to
+    // CommonPostDom such that no instruction from Insts will be met. It means
+    // that vectorization of the accesses for the bucket will generate redundant
+    // computations for this execution path. For such cases benefit of the
+    // vectorization is under the question. We follow conservative behavior and
+    // do not transform not clear cases.
+    // Common insertion points may exist for some bucket partitions. However,
+    // experiments have shown that such a pattern is extremely rare and we may
+    // lose more at compile time looking for suitable partitions.
+    if (*I == CommonPostDom)
+      return nullptr;
+    // At least one instruction from Insts will be met. There is no need to
+    // traverse children.
+    if (BBs.count(*I))
+      I.skipChildren();
+    else
+      ++I;
+  }
+
+  return InsertPt;
+}
+
+// Create region for vectorized accesses.
+static Region createRegion(const GenXExtractVectorizer::Bucket &B,
+                           const GenXExtractVectorizer::BucketIndex &BI) {
+  IGC_ASSERT_MESSAGE(
+      B.size() >= 2,
+      "Bucket should contain at least two accesses to vectorize");
+  IGC_ASSERT_MESSAGE(hasCommonStride(B),
+                     "We should not be here if stride does not exist");
+  int Stride = B[1].Offset - B[0].Offset;
+  // Create the new rdregion.
+  auto &Extract0 = B.front();
+  Region R(Extract0.Inst->getOperand(0));
+  R.NumElements = B.size();
+  R.Width = B.size();
+  R.Stride = Stride / R.ElementBytes;
+  R.Indirect = BI.Indirect;
+  R.Offset = Extract0.Offset;
+  return R;
+}
+
+static bool isProfitable(const GenXExtractVectorizer::Bucket &B) {
+  return B.size() >= 4;
+}
+
 /***********************************************************************
  * GenXExtractVectorizer::processExtracted : process an instruction or arg that
  * has at least one scalar extracted from it (using rdregion), in the hope that
@@ -145,7 +243,7 @@ void GenXExtractVectorizer::processExtracted(Value *V)
 {
   // Gather the scalar extracting rdregion uses of V into buckets, one for
   // each binaryoperator with constant rhs that the extracted value is used in.
-  std::map<BucketIndex, SmallVector<Extract, 4>> Buckets;
+  std::map<BucketIndex, Bucket> Buckets;
   for (auto ui = V->use_begin(), ue = V->use_end(); ui != ue; ++ui) {
     auto user = cast<Instruction>(ui->getUser());
     if (!GenXIntrinsic::isRdRegion(user))
@@ -181,14 +279,31 @@ void GenXExtractVectorizer::processExtracted(Value *V)
     Buckets[BucketIndex(User2->getOpcode(), CastTo, R.Indirect, User2->getType())]
         .push_back(Extract(User2, R.Offset));
   }
-  // Now look at each bucket. Only bother with a bucket that has at least four
-  // scalar extracts in it.
-  for (auto i = Buckets.begin(), e = Buckets.end(); i != e; ++i) {
-    auto Bucket = &i->second;
-    if (Bucket->size() < 4)
+
+  std::vector<BucketInfo> BucketsToProcess;
+  for (auto &&[BI, B] : Buckets) {
+    // Now look at each bucket. Only bother with a bucket that has at least four
+    // scalar extracts in it.
+    if (!isProfitable(B))
       continue;
-    processBucket(&i->first, Bucket);
+
+    // Sort the extracts into offset order.
+    std::sort(B.begin(), B.end());
+    // See if we have a sequence of offsets such that we can construct a
+    // 1D region.
+    if (!hasCommonStride(B))
+      continue;
+    // Find the latest point that we can insert the vectorized instruction.
+    Instruction *InsertPt = findInsertionPoint(B, *DT, *PDT);
+    if (!InsertPt)
+      continue;
+
+    Region R = createRegion(B, BI);
+    BucketsToProcess.push_back({std::move(B), std::move(R), InsertPt});
   }
+
+  for (auto &BI : BucketsToProcess)
+    processBucket(BI);
 }
 
 /***********************************************************************
@@ -200,77 +315,61 @@ void GenXExtractVectorizer::processExtracted(Value *V)
  * vector. Either each index is constant, or each index is an add with constant
  * rhs and with the same lhs.
  */
-void GenXExtractVectorizer::processBucket(const BucketIndex *BIdx,
-    SmallVectorImpl<Extract> *B)
-{
-  // Sort the extracts into offset order.
-  std::sort(B->begin(), B->end());
-  // See if we have a sequence of offsets such that we can construct a
-  // 1D region.
-  int Diff = (*B)[1].Offset - (*B)[0].Offset;
-  for (unsigned j = 1, je = B->size() - 1; j != je; ++j)
-    if ((*B)[j + 1].Offset - (*B)[j].Offset != Diff)
-      return;
-  // Find the latest point that we can insert the vectorized instruction.
-  SmallVector<Instruction *, 8> Insts;
-  for (auto j = B->begin(), je = B->end(); j != je; ++j)
-    Insts.push_back(j->Inst);
-  auto InsertBefore = findClosestCommonDominator(DT, Insts);
-  // Create the new rdregion.
-  Extract *Extract0 = &(*B)[0];
-  Region R(Extract0->Inst->getOperand(0));
-  R.NumElements = R.Width = B->size();
-  R.Stride = Diff / R.ElementBytes;
-  R.Indirect = BIdx->Indirect;
-  R.Offset = Extract0->Offset;
-  Value *OrigVector = cast<Instruction>(Extract0->Inst->getOperand(0))
-      ->getOperand(0);
+void GenXExtractVectorizer::processBucket(BucketInfo &BI) {
+  auto &B = BI.B;
+  Instruction *FirstExtractUser = B.front().Inst;
+  Value *OrigVector =
+      cast<Instruction>(FirstExtractUser->getOperand(0))->getOperand(0);
   Value *NewRdRegion = OrigVector;
-  // Need to splat if Diff is 0, otherwise elements extracted are wrong.
-  if (Diff == 0 || R.Indirect || R.Offset ||
+  // Need to splat if Stride is 0, otherwise elements extracted are wrong.
+  auto &R = BI.R;
+  if (R.Stride == 0 || R.Indirect || R.Offset ||
       R.NumElements != cast<IGCLLVM::FixedVectorType>(OrigVector->getType())
                            ->getNumElements()) {
     // Not identity region.
-    NewRdRegion = R.createRdRegion(OrigVector,
-        Extract0->Inst->getName() + ".histogrammed", InsertBefore,
-        Extract0->Inst->getDebugLoc(), /*AllowScalar=*/false);
+    NewRdRegion = R.createRdRegion(
+        OrigVector, FirstExtractUser->getName() + ".histogrammed", BI.InsertPt,
+        FirstExtractUser->getDebugLoc(), /*AllowScalar=*/false);
   }
   // Create the vectorized binary operator or trunc/zext/sext.
   Instruction *NewInst = nullptr;
-  if (isa<BinaryOperator>(Extract0->Inst)) {
+  if (isa<BinaryOperator>(FirstExtractUser)) {
     // Create a vector of the constants used in the right side of the binary
     // operators.
     SmallVector<Constant *, 8> RhsConsts;
-    for (auto j = B->begin(), je = B->end(); j != je; ++j)
-      RhsConsts.push_back(cast<Constant>(j->Inst->getOperand(1)));
+    std::transform(
+        B.begin(), B.end(), std::back_inserter(RhsConsts),
+        [](Extract &E) { return cast<Constant>(E.Inst->getOperand(1)); });
     auto CV = ConstantVector::get(RhsConsts);
     NewInst = BinaryOperator::Create(
-        (Instruction::BinaryOps)Extract0->Inst->getOpcode(), NewRdRegion, CV,
-        Extract0->Inst->getName() + ".histogrammed", InsertBefore);
+        (Instruction::BinaryOps)FirstExtractUser->getOpcode(), NewRdRegion, CV,
+        FirstExtractUser->getName() + ".histogrammed", BI.InsertPt);
   } else {
     // Create the vectorized trunc/zext/sext.
     auto VT =
-        IGCLLVM::FixedVectorType::get(Extract0->Inst->getType(), B->size());
-    NewInst = CastInst::Create((Instruction::CastOps)Extract0->Inst->getOpcode(),
-        NewRdRegion, VT,
-        Extract0->Inst->getName() + ".histogrammed", InsertBefore);
+        IGCLLVM::FixedVectorType::get(FirstExtractUser->getType(), B.size());
+    NewInst = CastInst::Create(
+        (Instruction::CastOps)FirstExtractUser->getOpcode(), NewRdRegion, VT,
+        FirstExtractUser->getName() + ".histogrammed", BI.InsertPt);
   }
-  NewInst->setDebugLoc(Extract0->Inst->getDebugLoc());
+  NewInst->setDebugLoc(FirstExtractUser->getDebugLoc());
   // For each original scalar binary operator or cast, create a rdregion to
   // extract the equivalent scalar from the result of the vectorized binary
   // operator, and use it to replace uses of the original binary operator.
-  for (auto j = B->begin(), je = B->end(); j != je; ++j) {
+  for (auto &IndexedExtract : llvm::enumerate(B)) {
     Region R2(NewInst);
     R2.NumElements = R2.Width = 1;
-    R2.Offset = (j - B->begin()) * R2.ElementBytes;
-    auto NewRdRegion2 = R2.createRdRegion(NewInst, "",
-        InsertBefore, j->Inst->getDebugLoc(), /*AllowScalar=*/true);
-    NewRdRegion2->takeName(j->Inst);
-    j->Inst->replaceAllUsesWith(NewRdRegion2);
+    R2.Offset = IndexedExtract.index() * R2.ElementBytes;
+    auto *ExtractUser = IndexedExtract.value().Inst;
+    auto NewRdRegion2 =
+        R2.createRdRegion(NewInst, "", BI.InsertPt, ExtractUser->getDebugLoc(),
+                          /*AllowScalar=*/true);
+    NewRdRegion2->takeName(ExtractUser);
+    ExtractUser->replaceAllUsesWith(NewRdRegion2);
   }
-  for (auto j = B->begin(), je = B->end(); j != je; ++j) {
-    auto OldRdRegion = cast<Instruction>(j->Inst->getOperand(0));
-    j->Inst->eraseFromParent();
+  for (auto &SingleExtract : B) {
+    auto OldRdRegion = cast<Instruction>(SingleExtract.Inst->getOperand(0));
+    SingleExtract.Inst->eraseFromParent();
     OldRdRegion->eraseFromParent();
   }
   // Add the new vectorized binary operator or cast back into

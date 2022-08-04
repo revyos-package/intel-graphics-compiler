@@ -1,6 +1,6 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (C) 2017-2021 Intel Corporation
+Copyright (C) 2017-2022 Intel Corporation
 
 SPDX-License-Identifier: MIT
 
@@ -53,7 +53,8 @@ static const unsigned IN_LOOP_REFERENCE_COUNT_FACTOR = 4;
 Interference::Interference(const LivenessAnalysis* l, LiveRange** const & lr, unsigned n, unsigned ns, unsigned nm,
     GlobalRA& g) : gra(g), kernel(g.kernel), lrs(lr),
     builder(*g.kernel.fg.builder), maxId(n), splitStartId(ns), splitNum(nm),
-    liveAnalysis(l), rowSize(maxId / BITS_DWORD + 1)
+    liveAnalysis(l), rowSize(maxId / BITS_DWORD + 1),
+    aug(g.kernel, *this, *l, lr, g)
 {
 }
 
@@ -321,7 +322,7 @@ void BankConflictPass::setupBankConflictsOneGRFOld(G4_INST* inst, int &bank1RegN
         }
     }
 
-    //In case src1 and src2 share same declare, i.e. use same regsiter
+    //In case src1 and src2 share same declare, i.e. use same register
     if (bank_num == 0 &&
         dcls[1] == dcls[2])
     {
@@ -686,7 +687,7 @@ void BankConflictPass::setupBankConflictsforTwoGRFs(G4_INST* inst)
         }
     }
 
-    //In case (src0) src1 and src2 use same declare, i.e. use same regsiter
+    //In case (src0) src1 and src2 use same declare, i.e. use same register
     if ((dcls[0] == dcls[1]) && (dcls[1] == dcls[2]))
     {
         return;
@@ -837,7 +838,7 @@ void BankConflictPass::setupBankConflictsforDPAS(G4_INST* inst)
     }
 #endif
 
-    //In case (src0) src1 and src2 use same declare, i.e. use same regsiter
+    //In case (src0) src1 and src2 use same declare, i.e. use same register
     if (dcls[0] == dcls[2] ||
         !dcls[0] || !dcls[2])
     {
@@ -2714,7 +2715,6 @@ void Interference::computeInterference()
     }
 
     // Augment interference graph to accomodate non-default masks
-    Augmentation aug(kernel, *this, *liveAnalysis, lrs, gra);
     aug.augmentIntfGraph();
 
     generateSparseIntfGraph();
@@ -2933,7 +2933,7 @@ void GlobalRA::getBankAlignment(LiveRange* lr, BankAlign &align)
     }
 }
 
-Augmentation::Augmentation(G4_Kernel& k, Interference& i, const LivenessAnalysis& l, LiveRange* const ranges[], GlobalRA& g) :
+Augmentation::Augmentation(G4_Kernel& k, Interference& i, const LivenessAnalysis& l, LiveRange** const& ranges, GlobalRA& g) :
     kernel(k), intf(i), gra(g), liveAnalysis(l), lrs(ranges), fcallRetMap(g.fcallRetMap), m(kernel.fg.mem)
 {
 }
@@ -2944,8 +2944,6 @@ bool Augmentation::updateDstMaskForGather(G4_INST* inst, std::vector<unsigned ch
 {
     if (const G4_SendDescRaw *d = inst->getMsgDescRaw()) {
         return updateDstMaskForGatherRaw(inst, mask, d);
-    } else if (const G4_SendDescLdSt *d = inst->getMsgDescLdSt()) {
-        return updateDstMaskForGatherLdSt(inst, mask, d);
     } else {
         ASSERT_USER(false, "unexpected descriptor");
         return false;
@@ -2999,8 +2997,8 @@ bool Augmentation::updateDstMaskForGatherRaw(
         {
         case DC1_A64_SCATTERED_READ:   //a64 scattered read: svm_gather
         {
-            unsigned blockNum = msgDesc->getBlockNum();
-            unsigned blockSize = msgDesc->getBlockSize();
+            unsigned blockNum = msgDesc->getElemsPerAddr();
+            unsigned blockSize = msgDesc->getElemSize();
 
             for (unsigned i = 0; i < execSize; i++)
             {
@@ -3182,11 +3180,12 @@ bool Augmentation::updateDstMaskForGatherRaw(
     return false;
 }
 
+#if 0 // TODO: replace with newer approach
 bool Augmentation::updateDstMaskForGatherLdSt(
     G4_INST* inst, std::vector<unsigned char>& mask, const G4_SendDescLdSt *msgDesc)
 {
     // as in the raw case only support SIMT
-    if (msgDesc->op != LdStOp::LOAD || msgDesc->order == LdStOrder::SCALAR) {
+    if (msgDesc->op != MsgOp::LOAD || msgDesc->order == LdStOrder::SCALAR) {
         return false;
     }
     unsigned char curEMBit = (unsigned char)inst->getMaskOffset();
@@ -3196,6 +3195,7 @@ bool Augmentation::updateDstMaskForGatherLdSt(
 
     return true;
 }
+#endif
 
 // Value stored at each byte in mask determines which bits
 // of EM enable that byte for writing. When checkCmodOnly
@@ -3572,7 +3572,7 @@ void Augmentation::markNonDefaultDstRgn(G4_INST* inst, G4_Operand* opnd)
     }
     else
     {
-        MUST_BE_TRUE(false, "Dont know how to handle this type of operand");
+        MUST_BE_TRUE(false, "Don't know how to handle this type of operand");
     }
 
     // Handle condMod
@@ -4234,6 +4234,19 @@ void Augmentation::buildLiveIntervals()
 
                 updateEndInterval(defdcl, inst);
             }
+            else if (liveAnalysis.livenessClass(G4_GRF) &&
+                dst &&
+                dst->isIndirect())
+            {
+                const REGVAR_VECTOR& pointsToSet = liveAnalysis.getPointsToAnalysis().getAllInPointsToOrIndrUse(dst, curBB);
+                for (auto pointsToVar : pointsToSet)
+                {
+                    if (pointsToVar.var->isRegAllocPartaker())
+                    {
+                        updateStartInterval(pointsToVar.var->getDeclare()->getRootDeclare(), inst);
+                    }
+                }
+            }
 
             if (liveAnalysis.livenessClass(G4_FLAG))
             {
@@ -4454,10 +4467,10 @@ void Augmentation::buildLiveIntervals()
 #endif
 }
 
-void Augmentation::clearIntervalInfo()
+Augmentation::~Augmentation()
 {
     // Clear out calculated information so that subsequent RA
-    // iterations dont have stale information
+    // iterations don't have stale information
     for (DECLARE_LIST_ITER dcl_it = kernel.Declares.begin(), end = kernel.Declares.end();
         dcl_it != end;
         dcl_it++)
@@ -4582,7 +4595,7 @@ void Augmentation::handleSIMDIntf(G4_Declare* firstDcl, G4_Declare* secondDcl, b
         //
         // V33 will interfere with VCA_SAVE pseudo node.
         // It also needs to interfere with retval to
-        // ensure V33 and retval dont get same allocation.
+        // ensure V33 and retval don't get same allocation.
         // Note that if V33 is actually live after fcall
         // then graph coloring will do this for us. In this
         // case however we need to rely on augmentation.
@@ -5400,10 +5413,6 @@ void Augmentation::augmentIntfGraph()
             }
             gra.updateSubRegAlignment(kernel.getGRFAlign());
         }
-
-        // Clear information calculated in this iteration of RA so
-        // a later RA iteration does not use stale information
-        clearIntervalInfo();
     }
 }
 
@@ -6601,7 +6610,7 @@ bool GraphColor::assignColors(ColorHeuristic colorHeuristicGRF, bool doBankConfl
     // try re-allocation of a child/parent dcl when split is enabled.
     // ignoreChildrenIntf is set to true when all children are assigned to consecutive ranges
     // and we want to get fully coalesceable assignment for parent. In such circumstance, we
-    // dont want to account for interference between parent/child since doing so cannot result
+    // don't want to account for interference between parent/child since doing so cannot result
     // in a coalesceable assignment.
     auto assignColor = [&](LiveRange* lr, bool ignoreChildrenIntf = false, bool spillAllowed = true, bool returnFalseOnFail = false)
     {
@@ -6794,7 +6803,7 @@ bool GraphColor::assignColors(ColorHeuristic colorHeuristicGRF, bool doBankConfl
                     // for first-fit register assignment track spilled live ranges
                     if (spillAllowed)
                     {
-                        // When retrying a coalesceable assignment, dont spill
+                        // When retrying a coalesceable assignment, don't spill
                         // if there is no GRF available.
                         spilledLRs.push_back(lr);
                         lr->setSpilled(true);
@@ -6828,7 +6837,7 @@ bool GraphColor::assignColors(ColorHeuristic colorHeuristicGRF, bool doBankConfl
     {
         auto lr = (*iter);
 
-        // in case child/parent was already spilled earlier, dont recolor
+        // in case child/parent was already spilled earlier, don't recolor
         if (lr->isSpilled())
             continue;
 
@@ -7303,7 +7312,6 @@ bool GraphColor::regAlloc(
     bool reserveSpillReg, unsigned& spillRegSize, unsigned& indrSpillRegSize,
     const RPE* rpe)
 {
-
     bool useSplitLLRHeuristic = false;
 
     if (builder.getOption(vISA_RATrace))
@@ -8879,8 +8887,8 @@ void GlobalRA::reportUndefinedUses(
 
     if (referencedDcl->getAddressed() == true)
     {
-        // Dont run analysis for addressed opnds.
-        // Specifically, we dont analyze following,
+        // Don't run analysis for addressed opnds.
+        // Specifically, we don't analyze following,
         //
         // A0 = &V1
         // r[A0] = 0 <-- V1 indirectly defined
@@ -9257,8 +9265,8 @@ void VarSplit::rangeListSpliting(VAR_RANGE_LIST *rangeList, G4_Operand *opnd, st
         if ((*it)->leftBound > range->rightBound)
         {
             //The range item in the list is on the right of current range, insert it before the postion.
-            //Since the whole range is inserted first, all the ranges should be continous.
-            ASSERT_USER((*it)->leftBound - range->rightBound == 1, "none continous spliting happened\n");
+            //Since the whole range is inserted first, all the ranges should be continuous.
+            ASSERT_USER((*it)->leftBound - range->rightBound == 1, "none continuous spliting happened\n");
             rangeList->insert(it, range);
             return;
         }
@@ -10310,10 +10318,13 @@ int GlobalRA::coloringRegAlloc()
             addStoreRestoreToReturn();
         }
 
-        // bind builtinR0 to the reserved stack call ABI GRF so that caller and
-        // callee can agree on which GRF to use for r0
-        builder.getBuiltinR0()->getRegVar()->setPhyReg(
-            builder.phyregpool.getGreg(kernel.getThreadHeaderGRF()), 0);
+        if (!kernel.getOption(vISA_PreserveR0InR0))
+        {
+            // bind builtinR0 to the reserved stack call ABI GRF so that caller and
+            // callee can agree on which GRF to use for r0
+            builder.getBuiltinR0()->getRegVar()->setPhyReg(
+                builder.phyregpool.getGreg(kernel.getThreadHeaderGRF()), 0);
+        }
     }
 
     if (kernel.getOption(vISA_SpillAnalysis))
@@ -10551,6 +10562,10 @@ int GlobalRA::coloringRegAlloc()
         //
         if (liveAnalysis.getNumSelectedVar() > 0)
         {
+            if (builder.getOption(vISA_DumpUndefUsesFromLiveness) && iterationNo == 0 && !rematDone)
+            {
+                liveAnalysis.reportUndefinedUses();
+            }
             // force spill should be done only for the 1st iteration
             bool forceSpill = iterationNo > 0 ? false : builder.getOption(vISA_ForceSpills);
             RPE rpe(*this, &liveAnalysis);
@@ -10574,7 +10589,7 @@ int GlobalRA::coloringRegAlloc()
             {
                 if (isReRAPass())
                 {
-                    // Dont modify program if reRA pass spills
+                    // Don't modify program if reRA pass spills
                     return VISA_SPILL;
                 }
 
@@ -10944,9 +10959,10 @@ int GlobalRA::coloringRegAlloc()
             // with large number of threads.
             unsigned int scratchAllocForStackInKB = kernel.getOptions()->getuInt32Option(vISA_ScratchAllocForStackInKB);
 
-            if (builder.getPlatform() == Xe_PVCXT)
+            if (!kernel.getOptions()->isOptionSetByUser(vISA_ScratchAllocForStackInKB) &&
+                builder.getPlatform() == Xe_PVCXT)
             {
-                scratchAllocForStackInKB = std::min<unsigned int>(scratchAllocForStackInKB, 64);
+                scratchAllocForStackInKB = 64;
             }
 
             unsigned int scratchAllocation = 1024 * scratchAllocForStackInKB;
@@ -10963,7 +10979,7 @@ int GlobalRA::coloringRegAlloc()
             if (!kernel.fg.getIsStackCallFunc())
             {
                 jitInfo->spillMemUsed = spillMemUsed;
-                kernel.getGTPinData()->setScratchNextFree(spillMemUsed);
+                kernel.getGTPinData()->setScratchNextFree(spillMemUsed+globalScratchOffset);
             }
         }
         jitInfo->numGRFSpillFill = GRFSpillFillCount;
@@ -12316,18 +12332,15 @@ void GlobalRA::fixAlignment()
     // Rest of RA shouldnt have to read/modify alignment of G4_RegVar
     copyAlignment();
 
-    if (kernel.getSimdSize() == g4::SIMD32)
+    for (auto dcl : kernel.Declares)
     {
-        // we have to force all flags to be 32-bit aligned even if they are < 32-bit,
-        // due to potential emask usage.
-        // ToDo: may be better to simply allocate them as 32-bit?
-        for (auto dcl : kernel.Declares)
-        {
-            if (dcl->getRegFile() & G4_FLAG)
-            {
-                setSubRegAlign(dcl, G4_SubReg_Align::Even_Word);
-            }
-        }
+      if (dcl->getRegFile() & G4_FLAG)
+      {
+        if (dcl->getByteSize() > 2 ||
+          (kernel.getSimdSize() == g4::SIMD32 &&
+            kernel.getInt32KernelAttr(Attributes::ATTR_Target) != VISA_CM))
+          setSubRegAlign(dcl, G4_SubReg_Align::Even_Word);
+      }
     }
 
     if (builder.getPlatform() == GENX_BDW)

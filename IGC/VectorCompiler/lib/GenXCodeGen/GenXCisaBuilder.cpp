@@ -58,8 +58,6 @@ SPDX-License-Identifier: MIT
 #include "llvm/Analysis/LoopInfo.h"
 #include "llvm/CodeGen/TargetPassConfig.h"
 #include "llvm/IR/DebugInfo.h"
-#include "llvm/IR/DiagnosticInfo.h"
-#include "llvm/IR/DiagnosticPrinter.h"
 #include "llvm/InitializePasses.h"
 #include "llvm/Support/Error.h"
 #include "llvm/Support/Path.h"
@@ -69,9 +67,10 @@ SPDX-License-Identifier: MIT
 
 #include "Probe/Assertion.h"
 #include "llvmWrapper/IR/CallSite.h"
+#include "llvmWrapper/IR/Constants.h"
+#include "llvmWrapper/IR/DerivedTypes.h"
 #include "llvmWrapper/IR/InstrTypes.h"
 #include "llvmWrapper/IR/Instructions.h"
-#include "llvmWrapper/IR/DerivedTypes.h"
 
 #include <algorithm>
 #include <map>
@@ -146,43 +145,6 @@ struct DstOpndDesc {
 };
 
 namespace {
-
-// Diagnostic information for errors/warnings in the GEN IR building passes.
-class DiagnosticInfoCisaBuild : public DiagnosticInfo {
-private:
-  std::string Description;
-
-  static const int KindID;
-
-  static int getKindID() { return KindID; }
-
-public:
-  DiagnosticInfoCisaBuild(const Twine &Desc, DiagnosticSeverity Severity)
-      : DiagnosticInfo(getKindID(), Severity) {
-    Description = (Twine("GENX IR generation error: ") + Desc).str();
-  }
-
-  DiagnosticInfoCisaBuild(const Instruction *Inst, const Twine &Desc,
-                          DiagnosticSeverity Severity)
-      : DiagnosticInfo(getKindID(), Severity) {
-    std::string Str;
-    vc::printToString(Str, *Inst);
-    Description =
-        (Twine("CISA builder failed for instruction <") + Str + ">: " + Desc)
-            .str();
-  }
-
-  void print(DiagnosticPrinter &DP) const override { DP << Description; }
-
-  static bool classof(const DiagnosticInfo *DI) {
-    return DI->getKind() == getKindID();
-  }
-};
-
-const int DiagnosticInfoCisaBuild::KindID =
-    llvm::getNextAvailablePluginDiagnosticKind();
-
-using IRChecker = vc::IRChecker<DiagnosticInfoCisaBuild>;
 
 static VISA_Exec_Size getExecSizeFromValue(unsigned int Size) {
   int Res = genx::log2(Size);
@@ -262,9 +224,7 @@ static std::string cutString(const Twine &Str) {
 }
 
 void handleCisaCallError(const Twine &Call, LLVMContext &Ctx) {
-  DiagnosticInfoCisaBuild Err(
-      "VISA builder API call failed: " + Call, DS_Error);
-  Ctx.diagnose(Err);
+  vc::fatal(Ctx, "VISA builder API call failed", Call);
 }
 
 void handleInlineAsmParseError(const GenXBackendConfig &BC, StringRef VisaErr,
@@ -281,8 +241,8 @@ void handleInlineAsmParseError(const GenXBackendConfig &BC, StringRef VisaErr,
   } else {
     SS << "Enable dumps to see failed visa module\n";
   }
-  DiagnosticInfoCisaBuild Err(SS.str(), DS_Error);
-  Ctx.diagnose(Err);
+
+  vc::fatal(Ctx, "GenXCisaBuilder", SS.str().c_str());
 }
 
 /***********************************************************************
@@ -1906,7 +1866,7 @@ VISA_VectorOpnd *GenXKernelBuilder::createImmediateOperand(Constant *V,
   Type *T = V->getType();
   if (auto *VT = dyn_cast<IGCLLVM::FixedVectorType>(T)) {
     // Vector constant.
-    auto Splat = V->getSplatValue();
+    auto Splat = IGCLLVM::Constant::getSplatValue(V, /* AllowUndefs */ true);
     if (!Splat) {
       // Non-splatted vector constant. Must be a packed vector.
       unsigned NumElements = VT->getNumElements();
@@ -2072,9 +2032,8 @@ void GenXKernelBuilder::buildConvert(CallInst *CI, BaleInfo BI, unsigned Mod,
   // Destination is address register.
   int ExecSize = 1;
   if (VectorType *VT = dyn_cast<VectorType>(CI->getType())) {
-    DiagnosticInfoCisaBuild Err{CI, "vector of addresses not implemented",
-                                DS_Error};
-    getContext().diagnose(Err);
+    vc::fatal(getContext(), "GenXCisaBuilder",
+              "vector of addresses not implemented", CI);
   }
 
   auto ISAExecSize = static_cast<VISA_Exec_Size>(genx::log2(ExecSize));
@@ -2243,8 +2202,8 @@ static void diagnoseInlineAsm(llvm::LLVMContext &Context,
   auto *CI = cast<CallInst>(Inst);
   const InlineAsm *IA = cast<InlineAsm>(IGCLLVM::getCalledValue(CI));
   const std::string Message = '"' + IA->getAsmString() + '"' + Suffix;
-  llvm::DiagnosticInfoInlineAsm Diagnostic{*Inst, Message, DS_type};
-  Context.diagnose(Diagnostic);
+  vc::diagnose(Context, "GenXCisaBuilder", Message.c_str(), DS_type,
+               vc::WarningName::Generic, Inst);
 }
 
 std::string GenXKernelBuilder::createInlineAsmOperand(
@@ -2894,8 +2853,8 @@ bool GenXKernelBuilder::buildMainInst(Instruction *Inst, BaleInfo BI,
   } else if (isa<UnreachableInst>(Inst))
     ; // no code generated
   else {
-    DiagnosticInfoCisaBuild Err{Inst, "main inst not implemented", DS_Error};
-    getContext().diagnose(Err);
+    vc::diagnose(getContext(), "GenXCisaBuilder", "main inst not implemented",
+                 Inst);
   }
 
   return false;
@@ -3405,9 +3364,8 @@ void GenXKernelBuilder::buildIntrinsic(CallInst *CI, unsigned IntrinID,
     ConstantInt *Const =
         dyn_cast<ConstantInt>(CI->getArgOperand(AI.getArgIdx()));
     if (!Const) {
-      DiagnosticInfoCisaBuild Err{CI, "Incorrect args to intrinsic call",
-                                  DS_Error};
-      getContext().diagnose(Err);
+      vc::diagnose(getContext(), "GenXCisaBuilder",
+                   "Incorrect args to intrinsic call", CI);
     }
     unsigned val = Const->getSExtValue();
     LLVM_DEBUG(dbgs() << "GetUnsignedValue from op #" << AI.getArgIdx()
@@ -3466,7 +3424,7 @@ void GenXKernelBuilder::buildIntrinsic(CallInst *CI, unsigned IntrinID,
     unsigned RoundedWidth = roundedVal(Width, 4u);
     Type *DataType = CI->getType();
     if (DataType->isVoidTy())
-      DataType = CI->getOperand(CI->getNumArgOperands() - 1)->getType();
+      DataType = CI->getOperand(IGCLLVM::getNumArgOperands(CI) - 1)->getType();
     unsigned DataSize;
     if (VectorType *VT = dyn_cast<VectorType>(DataType))
       DataSize = DL.getTypeSizeInBits(VT) / genx::ByteBits;
@@ -3520,13 +3478,6 @@ void GenXKernelBuilder::buildIntrinsic(CallInst *CI, unsigned IntrinID,
         // execution size.
         MaxWidth =
             cast<IGCLLVM::FixedVectorType>(CI->getType())->getNumElements();
-      }
-      if ((IntrinID == GenXIntrinsic::genx_dpas) ||
-          (IntrinID == GenXIntrinsic::genx_dpas2) ||
-          (IntrinID == GenXIntrinsic::genx_dpasw) ||
-          (IntrinID == GenXIntrinsic::genx_dpas_nosrc0) ||
-          (IntrinID == GenXIntrinsic::genx_dpasw_nosrc0)) {
-        MaxWidth = Subtarget->dpasWidth();
       }
       ResultOperand = createSourceOperand(CI, Signed, AI.getArgIdx(), BI, 0,
                                           nullptr, MaxWidth);
@@ -3658,18 +3609,16 @@ void GenXKernelBuilder::buildIntrinsic(CallInst *CI, unsigned IntrinID,
     ConstantInt *Const =
       dyn_cast<ConstantInt>(CI->getArgOperand(AI.getArgIdx()));
     if (!Const) {
-      DiagnosticInfoCisaBuild Err{CI, "Incorrect args to intrinsic call",
-                                  DS_Error};
-      getContext().diagnose(Err);
+      vc::diagnose(getContext(), "GenXCisaBuilder",
+                   "Incorrect args to intrinsic call", CI);
     }
     unsigned Byte = Const->getSExtValue() & 0xFF;
     *Mask = (VISA_EMask_Ctrl)(Byte >> 4);
     unsigned Res = Byte & 0xF;
     if (Res > 5) {
-      DiagnosticInfoCisaBuild Err{
-          CI, "illegal common ISA execsize (should be 1, 2, 4, 8, 16, 32)",
-          DS_Error};
-      getContext().diagnose(Err);
+      vc::diagnose(getContext(), "GenXCisaBuilder",
+                   "illegal common ISA execsize (should be 1, 2, 4, 8, 16, 32)",
+                   CI);
     }
     return (VISA_Exec_Size)Res;
   };
@@ -3742,7 +3691,7 @@ void GenXKernelBuilder::buildIntrinsic(CallInst *CI, unsigned IntrinID,
     auto BaseArg = AI.getArgIdx();
     MaxRawOperands = BaseArg;
 
-    for (unsigned Idx = BaseArg; Idx < CI->getNumArgOperands(); ++Idx) {
+    for (unsigned Idx = BaseArg; Idx < IGCLLVM::getNumArgOperands(CI); ++Idx) {
       if (auto CA = dyn_cast<Constant>(CI->getArgOperand(Idx))) {
         if (CA->isNullValue())
           continue;
@@ -3764,8 +3713,8 @@ void GenXKernelBuilder::buildIntrinsic(CallInst *CI, unsigned IntrinID,
       Arg = CI->getOperand(AI.getArgIdx());
     auto *VT = dyn_cast<IGCLLVM::FixedVectorType>(Arg->getType());
     if (!VT) {
-      DiagnosticInfoCisaBuild Err{CI, "Invalid number of GRFs", DS_Error};
-      getContext().diagnose(Err);
+      vc::diagnose(getContext(), "GenXCisaBuilder", "Invalid number of GRFs",
+                   CI);
     }
     int DataSize = VT->getNumElements() *
                    VT->getElementType()->getPrimitiveSizeInBits() / 8;
@@ -3777,9 +3726,8 @@ void GenXKernelBuilder::buildIntrinsic(CallInst *CI, unsigned IntrinID,
     ConstantInt *Const =
         dyn_cast<ConstantInt>(CI->getArgOperand(AI.getArgIdx()));
     if (!Const) {
-      DiagnosticInfoCisaBuild Err{CI, "Incorrect args to intrinsic call",
-                                  DS_Error};
-      getContext().diagnose(Err);
+      vc::diagnose(getContext(), "GenXCisaBuilder",
+                   "Incorrect args to intrinsic call", CI);
     }
     unsigned Byte = Const->getSExtValue() & 15;
     // Find the U_offset arg. It is the first vector arg after this one.
@@ -3791,9 +3739,8 @@ void GenXKernelBuilder::buildIntrinsic(CallInst *CI, unsigned IntrinID,
       ;
     unsigned Width = VT->getNumElements();
     if (Width != 8 && Width != 16) {
-      DiagnosticInfoCisaBuild Err{CI, "Invalid execution size for load/sample",
-                                  DS_Error};
-      getContext().diagnose(Err);
+      vc::diagnose(getContext(), "GenXCisaBuilder",
+                   "Invalid execution size for load/sample", CI);
     }
     Byte |= Width & 16;
     return Byte;
@@ -3809,7 +3756,7 @@ void GenXKernelBuilder::buildIntrinsic(CallInst *CI, unsigned IntrinID,
     auto *EltType = V->getType()->getScalarType();
     if (auto *MDType = CI->getMetadata(vc::InstMD::SVMBlockType))
       EltType = cast<ValueAsMetadata>(MDType->getOperand(0).get())->getType();
-    IRChecker::argOperandIsConstantInt(*CI, Num.getArgIdx(), "log2 num blocks");
+    vc::checkArgOperandIsConstantInt(*CI, Num.getArgIdx(), "log2 num blocks");
     ConstantInt *LogOp = cast<ConstantInt>(CI->getArgOperand(Num.getArgIdx()));
     unsigned LogNum = LogOp->getZExtValue();
     unsigned ElBytes = getResultedTypeSize(EltType, DL);
@@ -3835,9 +3782,8 @@ void GenXKernelBuilder::buildIntrinsic(CallInst *CI, unsigned IntrinID,
       ElBytes = 2;
       break;
     default:
-      DiagnosticInfoCisaBuild Err{CI, "Bad element type for SVM scatter/gather",
-                                  DS_Error};
-      getContext().diagnose(Err);
+      vc::diagnose(getContext(), "GenXCisaBuilder",
+                   "Bad element type for SVM scatter/gather", CI);
     }
     return std::make_pair(ElBytes, LogNum);
   };
@@ -4248,8 +4194,8 @@ GenXKernelBuilder::getRegForValueOrNullAndSaveAlias(Args &&... args) {
  */
 template <typename... Args>
 GenXKernelBuilder::Register *
-GenXKernelBuilder::getRegForValueAndSaveAlias(Args &&... args) {
-  Register *R = RegAlloc->getRegForValue(std::forward<Args>(args)...);
+GenXKernelBuilder::getRegForValueAndSaveAlias(Args &&...args) {
+  Register *R = RegAlloc->getOrCreateRegForValue(std::forward<Args>(args)...);
   SimpleValue SV = std::get<0>(std::make_tuple(args...));
   IGC_ASSERT_MESSAGE(R, "getRegForValue must return non-nullptr register");
   LastUsedAliasMap[SV.getValue()] = R;
@@ -4489,8 +4435,8 @@ GenXKernelBuilder::getPredefinedSurfaceVar(GlobalVariable &GV) {
   PreDefined_Surface VisaSurfName =
       StringSwitch<PreDefined_Surface>(SurfName)
           .Case(vc::PredefVar::BSSName, PREDEFINED_SURFACE_T252)
-          .Default(PREDEFINED_SURFACE_LAST);
-  IGC_ASSERT_MESSAGE(VisaSurfName != PREDEFINED_SURFACE_LAST,
+          .Default(PREDEFINED_SURFACE_INVALID);
+  IGC_ASSERT_MESSAGE(VisaSurfName != PREDEFINED_SURFACE_INVALID,
                      "Unexpected predefined surface");
   VISA_SurfaceVar *SurfVar = nullptr;
   CISA_CALL(Kernel->GetPredefinedSurface(SurfVar, VisaSurfName));
@@ -4506,8 +4452,8 @@ VISA_GenVar *GenXKernelBuilder::getPredefinedGeneralVar(GlobalVariable &GV) {
           .Case(vc::PredefVar::ImplicitArgsBufferName,
                 PREDEFINED_IMPL_ARG_BUF_PTR)
           .Case(vc::PredefVar::LocalIDBufferName, PREDEFINED_LOCAL_ID_BUF_PTR)
-          .Default(PREDEFINED_VAR_LAST);
-  IGC_ASSERT_MESSAGE(VariableID != PREDEFINED_VAR_LAST,
+          .Default(PREDEFINED_VAR_INVALID);
+  IGC_ASSERT_MESSAGE(VariableID != PREDEFINED_VAR_INVALID,
                      "Unexpected predefined general variable");
   CISA_CALL(Kernel->GetPredefinedVar(Variable, VariableID));
   return Variable;
@@ -4636,9 +4582,8 @@ void GenXKernelBuilder::buildCastInst(CastInst *CI, BaleInfo BI, unsigned Mod,
   case Instruction::Trunc:
     break;
   default:
-    DiagnosticInfoCisaBuild Err{CI, "buildCastInst: unimplemented cast",
-                                DS_Error};
-    getContext().diagnose(Err);
+    vc::diagnose(getContext(), "GenXCisaBuilder",
+                 "buildCastInst: unimplemented cast", CI);
   }
 
   VISA_Exec_Size ExecSize = EXEC_SIZE_1;
@@ -4737,8 +4682,7 @@ void GenXKernelBuilder::buildCmp(CmpInst *Cmp, BaleInfo BI,
     Signed = SIGNED;
     break;
   default:
-    DiagnosticInfoCisaBuild Err{Cmp, "unknown predicate", DS_Error};
-    getContext().diagnose(Err);
+    vc::diagnose(getContext(), "GenXCisaBuilder", "unknown predicate", Cmp);
   }
 
   // Check if this is to write to a predicate desination or a GRF desination.
@@ -4834,12 +4778,10 @@ void GenXKernelBuilder::buildConvertAddr(CallInst *CI, genx::BaleInfo BI,
       break;
     }
     default:
-      DiagnosticInfoCisaBuild Err{
-          CI,
-          "Invalid state operand class: only surface, vme, and "
-          "sampler are supported.",
-          DS_Error};
-      getContext().diagnose(Err);
+      vc::diagnose(getContext(), "GenXCisaBuilder",
+                   "Invalid state operand class: only surface, vme, and "
+                   "sampler are supported.",
+                   CI);
     }
   } else {
     uint8_t rowOffset = Offset >> genx::log2(GrfByteSize);
@@ -5135,7 +5077,7 @@ bool GenXKernelBuilder::isInLoop(BasicBlock *BB) {
     auto CI = dyn_cast<CallInst>(ui->getUser());
     if (!checkFunctionCall(CI, BBFunc))
       continue;
-    IGC_ASSERT(ui->getOperandNo() == CI->getNumArgOperands());
+    IGC_ASSERT(ui->getOperandNo() == IGCLLVM::getNumArgOperands(CI));
     if (CI->getFunction() == BBFunc)
       continue;
     if (isInLoop(CI->getParent())) {
@@ -5489,10 +5431,6 @@ void GenXKernelBuilder::buildInlineAsm(CallInst *CI) {
 void GenXKernelBuilder::buildCall(CallInst *CI, const DstOpndDesc &DstDesc) {
   LLVM_DEBUG(dbgs() << CI << "\n");
   Function *Callee = CI->getCalledFunction();
-  IGC_ASSERT_MESSAGE(
-      !Callee || !Callee->isDeclaration(),
-      "Currently VC backend does not support modules with external functions");
-
   if (!Callee || vc::requiresStackCall(Callee)) {
     if (UseNewStackBuilder)
       buildStackCallLight(CI, DstDesc);
@@ -6436,7 +6374,7 @@ void GenXKernelBuilder::buildStackCall(CallInst *CI,
 
   // Check whether the called function has a predicate arg that is EM.
   int EMOperandNum = -1, EMIdx = -1;
-  for (auto &Arg : CI->arg_operands()) {
+  for (auto &Arg : IGCLLVM::args(CI)) {
     ++EMIdx;
     if (!Arg->getType()->getScalarType()->isIntegerTy(1))
       continue;
@@ -6447,7 +6385,7 @@ void GenXKernelBuilder::buildStackCall(CallInst *CI,
   }
 
   int TotalArgSize = 0;
-  for (auto &CallArg : CI->arg_operands())
+  for (auto &CallArg : IGCLLVM::args(CI))
     TotalArgSize += getValueSize(CallArg->getType());
 
   VISA_GenVar *Sp = nullptr, *Arg = nullptr, *Ret = nullptr;
@@ -6461,7 +6399,7 @@ void GenXKernelBuilder::buildStackCall(CallInst *CI,
   uint64_t StackOff = 0;
   bool StackStarted = false;
   // pack arguments
-  for (auto &CallArg : CI->arg_operands()) {
+  for (auto &CallArg : IGCLLVM::args(CI)) {
     auto *CallArgLR = Liveness->getLiveRangeOrNull(CallArg.get());
     if (CallArgLR && CallArgLR->getCategory() == vc::RegCategory::EM)
       continue;
@@ -6779,8 +6717,7 @@ static VISABuilder *createVISABuilder(const GenXSubtarget &ST,
       Os << Arg << " ";
     Os << "Visa only: " << (EmitVisa ? "yes" : "no") << "\n";
     Os << "Platform: " << ST.getVisaPlatform() << "\n";
-    DiagnosticInfoCisaBuild Err(Os.str(), DS_Error);
-    Ctx.diagnose(Err);
+    vc::diagnose(Ctx, "GenXCisaBuilder", Os.str().c_str());
   }
   return VB;
 }

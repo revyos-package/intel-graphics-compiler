@@ -1,6 +1,6 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (C) 2017-2021 Intel Corporation
+Copyright (C) 2017-2022 Intel Corporation
 
 SPDX-License-Identifier: MIT
 
@@ -9,7 +9,9 @@ SPDX-License-Identifier: MIT
 #ifndef VC_UTILS_GENX_KERNELINFO_H
 #define VC_UTILS_GENX_KERNELINFO_H
 
+#include "vc/InternalIntrinsics/InternalIntrinsics.h"
 #include "vc/Utils/GenX/InternalMetadata.h"
+#include "vc/Utils/GenX/Intrinsics.h"
 #include "vc/Utils/GenX/RegCategory.h"
 
 #include "Probe/Assertion.h"
@@ -23,6 +25,7 @@ SPDX-License-Identifier: MIT
 #include "llvm/GenXIntrinsics/GenXIntrinsics.h"
 #include "llvm/GenXIntrinsics/GenXMetadata.h"
 
+#include <cstdint>
 #include <type_traits>
 #include <unordered_map>
 
@@ -61,6 +64,11 @@ inline bool isKernel(const llvm::Function *F) {
 
 inline bool isKernel(const llvm::Function &F) { return isKernel(&F); }
 
+// Check if it is a fast composite.
+inline bool isCMCallable(const llvm::Function &F) {
+  return F.hasFnAttribute(llvm::genx::FunctionMD::CMCallable);
+}
+
 // Utility function to tell if a Function needs to be called using
 // vISA stack call ABI.
 inline bool requiresStackCall(const llvm::Function *F) {
@@ -82,13 +90,18 @@ inline bool isIndirect(const llvm::Function *F) {
 // structure types is fixed for intrinsics.
   if (llvm::GenXIntrinsic::isAnyNonTrivialIntrinsic(F))
     return false;
-  // FIXME: The condition of which function is considered to be indirectly
-  // called will be changed soon.
-  bool IsIndirect = F->hasAddressTaken();
+  if (vc::InternalIntrinsic::isInternalNonTrivialIntrinsic(F))
+    return false;
+  if (vc::isKernel(F))
+    return false;
+  if (vc::isEmulationFunction(*F))
+    return false;
+  if (!F->hasAddressTaken() && F->hasLocalLinkage())
+    return false;
   IGC_ASSERT_MESSAGE(
-      !IsIndirect || requiresStackCall(F),
+      requiresStackCall(F),
       "The indirectly-called function is expected to be a stack call");
-  return IsIndirect;
+  return true;
 }
 
 inline bool isIndirect(const llvm::Function &F) { return isIndirect(&F); }
@@ -183,6 +196,7 @@ public:
   void updateOffsetInArgsMD(llvm::SmallVectorImpl<unsigned> &&Offsets);
   void updateLinearizationMD(ArgToImplicitLinearization &&Lin);
   void updateBTIndicesMD(std::vector<int> &&BTIs);
+  void updateSLMSizeMD(unsigned Size);
 
   bool hasArgLinearization(llvm::Argument *Arg) const {
     return Linearization.count(Arg);
@@ -254,6 +268,9 @@ public:
     return BTIs[Index];
   }
 
+  // The number of low bits in argument kind used to store argument category.
+  static constexpr int AKBitsForCategory = 3;
+
   // All the Kinds defined
   // These correspond to the values used in vISA
   // Bits 0-2 represent category (see enum)
@@ -262,22 +279,22 @@ public:
   //
   enum ImpValue : uint32_t {
     IMP_NONE = 0x0,
-    IMP_LOCAL_SIZE = 0x1 << 3,
-    IMP_GROUP_COUNT = 0x2 << 3,
-    IMP_LOCAL_ID = 0x3 << 3,
-    IMP_SB_DELTAS = 0x4 << 3,
-    IMP_SB_BTI = 0x5 << 3,
-    IMP_SB_DEPCNT = 0x6 << 3,
-    IMP_OCL_PRINTF_BUFFER = 0xB << 3,
-    IMP_OCL_PRIVATE_BASE = 0xC << 3,
-    IMP_OCL_LINEARIZATION = 0xD << 3,
-    IMP_OCL_BYVALSVM = 0xE << 3,
+    IMP_LOCAL_SIZE = 0x1 << AKBitsForCategory,
+    IMP_GROUP_COUNT = 0x2 << AKBitsForCategory,
+    IMP_LOCAL_ID = 0x3 << AKBitsForCategory,
+    IMP_SB_DELTAS = 0x4 << AKBitsForCategory,
+    IMP_SB_BTI = 0x5 << AKBitsForCategory,
+    IMP_SB_DEPCNT = 0x6 << AKBitsForCategory,
+    IMP_OCL_PRINTF_BUFFER = 0xB << AKBitsForCategory,
+    IMP_OCL_PRIVATE_BASE = 0xC << AKBitsForCategory,
+    IMP_OCL_LINEARIZATION = 0xD << AKBitsForCategory,
+    IMP_OCL_BYVALSVM = 0xE << AKBitsForCategory,
     // Implicit argument with implicit args buffer.
     // It is not supported by CMRT. It is not supported for platforms with
     // payload in memory (for those platforms r0.0 is used to obtain the
     // pointer).
-    IMP_IMPL_ARGS_BUFFER = 0xF << 3,
-    IMP_PSEUDO_INPUT = 0x10 << 3
+    IMP_IMPL_ARGS_BUFFER = 0xF << AKBitsForCategory,
+    IMP_PSEUDO_INPUT = 0x10 << AKBitsForCategory
   };
 
   enum { SKIP_OFFSET_VAL = -1 };
@@ -309,41 +326,57 @@ public:
   }
 };
 
-struct KernelArgInfo {
-  uint32_t Kind;
-  explicit KernelArgInfo(uint32_t Kind) : Kind(Kind) {}
-  bool isNormalCategory() const {
-    return (Kind & 0x7) == KernelMetadata::AK_NORMAL;
-  }
-  bool isLocalIDs() const {
-    uint32_t Val = Kind & 0xFFF8;
-    return Val == KernelMetadata::IMP_LOCAL_ID;
-  }
-  bool isLocalSize() const {
-    uint32_t Val = Kind & 0xFFF8;
-    return Val == KernelMetadata::IMP_LOCAL_SIZE;
-  }
-  bool isGroupCount() const {
-    uint32_t Val = Kind & 0xFFF8;
-    return Val == KernelMetadata::IMP_GROUP_COUNT;
-  }
-  bool isPrintBuffer() const {
-    uint32_t Val = Kind & 0xFFF8;
-    return Val == KernelMetadata::IMP_OCL_PRINTF_BUFFER;
-  }
-  bool isPrivateBase() const {
-    uint32_t Val = Kind & 0xFFF8;
-    return Val == KernelMetadata::IMP_OCL_PRIVATE_BASE;
-  }
-  bool isByValSVM() const {
-    uint32_t Val = Kind & 0xFFF8;
-    return Val == KernelMetadata::IMP_OCL_BYVALSVM;
-  }
-  bool isImplicitArgsBuffer() const {
-    uint32_t Val = Kind & 0xFFF8;
-    return Val == KernelMetadata::IMP_IMPL_ARGS_BUFFER;
-  }
-};
+inline bool isImplicitArgKind(uint32_t ArgKind,
+                              KernelMetadata::ImpValue RefImplArgID) {
+  uint32_t ImplArgID = ArgKind & llvm::maskTrailingZeros<uint32_t>(
+                                     KernelMetadata::AKBitsForCategory);
+  return ImplArgID == RefImplArgID;
+}
+
+inline bool isNormalCategoryArgKind(uint32_t ArgKind) {
+  return (ArgKind & llvm::maskTrailingOnes<uint32_t>(
+                        KernelMetadata::AKBitsForCategory)) ==
+         KernelMetadata::AK_NORMAL;
+}
+
+inline bool isLocalIDKind(uint32_t ArgKind) {
+  return isImplicitArgKind(ArgKind, KernelMetadata::IMP_LOCAL_ID);
+}
+
+inline bool isLocalSizeKind(uint32_t ArgKind) {
+  return isImplicitArgKind(ArgKind, KernelMetadata::IMP_LOCAL_SIZE);
+}
+
+inline bool isGroupCountKind(uint32_t ArgKind) {
+  return isImplicitArgKind(ArgKind, KernelMetadata::IMP_GROUP_COUNT);
+}
+
+inline bool isPrintBufferKind(uint32_t ArgKind) {
+  return isImplicitArgKind(ArgKind, KernelMetadata::IMP_OCL_PRINTF_BUFFER);
+}
+
+inline bool isPrivateBaseKind(uint32_t ArgKind) {
+  return isImplicitArgKind(ArgKind, KernelMetadata::IMP_OCL_PRIVATE_BASE);
+}
+
+inline bool isByValSVMKind(uint32_t ArgKind) {
+  return isImplicitArgKind(ArgKind, KernelMetadata::IMP_OCL_BYVALSVM);
+}
+
+inline bool isImplicitArgsBufferKind(uint32_t ArgKind) {
+  return isImplicitArgKind(ArgKind, KernelMetadata::IMP_IMPL_ARGS_BUFFER);
+}
+
+// Get implicit argument of the kernel \p Kernel defined by ID \p ImplArgID.
+// If kernel has no such argument behavior is undefined.
+const llvm::Argument &getImplicitArg(const llvm::Function &Kernel,
+                                     KernelMetadata::ImpValue ImplArgID);
+
+inline llvm::Argument &getImplicitArg(llvm::Function &Kernel,
+                                      KernelMetadata::ImpValue ImplArgID) {
+  return const_cast<llvm::Argument &>(
+      getImplicitArg(static_cast<const llvm::Function &>(Kernel), ImplArgID));
+}
 
 void replaceFunctionRefMD(const llvm::Function &From, llvm::Function &To);
 

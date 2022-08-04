@@ -1,6 +1,6 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (C) 2021 Intel Corporation
+Copyright (C) 2021-2022 Intel Corporation
 
 SPDX-License-Identifier: MIT
 
@@ -23,7 +23,6 @@ using namespace std;
 
 namespace IGC
 {
-    class DbgDecoder;
     class CVariable;
     class VISAModule;
     class CShader;
@@ -42,7 +41,7 @@ namespace IGC
 
         // Detect instructions with an address class pattern. Then remove all opcodes of this pattern from
         // this instruction's last operand (metadata of DIExpression).
-        static void extractAddressClass(llvm::Function& F, CShader* pShader, IDebugEmitter* pDebugEmitter);
+        static void extractAddressClass(llvm::Function& F);
 
         static void markOutputPrivateBase(CShader* pShader, IDebugEmitter* pDebugEmitter);
         static void markOutputVar(CShader* pShader, IDebugEmitter* pDebugEmitter, llvm::Instruction* pInst, const char* pMetaDataName);
@@ -68,7 +67,7 @@ namespace IGC
             auto it = CVarToVISADclId.find(CVar);
             if (it == CVarToVISADclId.end())
             {
-                IGC_ASSERT_MESSAGE(false, "Didnt find VISA dcl id");
+                IGC_ASSERT_MESSAGE(false, "Didn't find VISA dcl id");
                 return 0;
             }
             if (index == 0)

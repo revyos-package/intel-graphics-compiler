@@ -19,6 +19,7 @@ struct AccInterval
     bool mustBeAcc0 = false;
     bool isAllFloat = false;
     bool isPreAssigned = false;
+    bool isRemoved = false;
     int assignedAcc = -1;
     int spilledAcc = -1;
     int bundleConflictTimes = 0;
@@ -45,6 +46,17 @@ struct AccInterval
 
         //Bundle conflict has higher priority than bank conflict. Because bundle conflict means bank conflict at the same time.
         return (std::pow((double)(bundleConflictTimes + 1), 3) + std::pow((double)(bankConflictTimes + 1), 2) + std::pow((double)inst->use_size(), 3) / dist) / (suppressionTimes + 1);
+    }
+
+    double getNewSpillCost() const {
+        if (isPreAssigned)
+        {
+            // don't spill pre-assigned
+            return (double)1000000;
+        }
+        int dist = lastUse - inst->getLocalId();
+
+        return (std::pow(((double)inst->use_size() ), 1) / dist);
     }
 
     // see if this interval needs both halves of the acc
@@ -99,6 +111,54 @@ static void setSuppression(int i, unsigned short& BC)
 {
     unsigned short bc = 0x4 << (i * 3);
     BC |= bc;
+}
+
+static bool isCommutativeOnSrc12(G4_INST *inst) {
+    switch (inst->opcode()) {
+    case G4_mad:
+    case G4_add3:
+        return true;
+    default:
+        break;
+    }
+    return false;
+}
+
+static bool isSrcSwapLegal(G4_INST *inst, IR_Builder &builder) {
+    MUST_BE_TRUE(inst->opcode() == G4_mad || inst->opcode() == G4_add3,
+                 "Unexpected operation for src swap");
+
+    auto prospectiveSrc2 = inst->getSrc(1);
+    if (!prospectiveSrc2->isSrcRegRegion())
+        return false;
+
+    auto prospectiveSrc2Type = prospectiveSrc2->getType();
+    if (IS_DTYPE(prospectiveSrc2Type) || IS_BTYPE(prospectiveSrc2Type))
+        return false;
+
+    if (prospectiveSrc2->asSrcRegRegion()->isIndirect())
+        return false;
+
+    uint16_t stride = 0;
+    if (!prospectiveSrc2->asSrcRegRegion()->isScalar()) {
+        if (!prospectiveSrc2->asSrcRegRegion()->checkGRFAlign(builder))
+            return false;
+
+        if (!prospectiveSrc2->asSrcRegRegion()->getRegion()->isSingleStride(
+                inst->getExecSize(), stride))
+          return false;
+    }
+    unsigned short dstExecSize = inst->getDst()->getExecTypeSize();
+    unsigned short srcExecSize =
+        stride * prospectiveSrc2->asSrcRegRegion()->getElemSize();
+    if (dstExecSize != srcExecSize)
+        return false;
+
+    // Check dst alignment, which needs to match src2.
+    if (!inst->getDst()->checkGRFAlign(builder))
+        return false;
+
+    return true;
 }
 
 /*
@@ -420,10 +480,46 @@ static unsigned getBankConflicts(int srcOpndIdx, unsigned int BC)
     return conflicts;
 }
 
+void AccSubPass::getInstACCAttributes(G4_INST *inst, int& lastUse, bool& isAllFloat)
+{
+    isAllFloat =  true;
+    int lastUseId = 0;
+    G4_DstRegRegion* dst = inst->getDst();
+
+    if (!IS_TYPE_FLOAT_FOR_ACC(dst->getType()))
+    {
+        isAllFloat = false;
+    }
+
+    for (auto I = inst->use_begin(), E = inst->use_end(); I != E; ++I)
+    {
+        auto&& use = *I;
+        G4_INST* useInst = use.first;
+        Gen4_Operand_Number opndNum = use.second;
+        lastUseId = std::max(lastUseId, useInst->getLocalId());
+
+        int srcId = useInst->getSrcNum(opndNum);
+        G4_Operand* src = useInst->getSrc(srcId);
+
+        if (!IS_TYPE_FLOAT_FOR_ACC(src->getType()))
+        {
+            isAllFloat = false;
+        }
+
+    }
+
+    lastUse = lastUseId;
+
+    return;
+}
+
 // returns true if the inst is a candidate for acc substitution
 // lastUse is also update to point to the last use id of the inst
-bool AccSubPass::isAccCandidate(G4_INST* inst, int& lastUse, bool& mustBeAcc0, bool& isAllFloat, int& readSuppressionSrcs, int& bundleBC, int& bankBC, std::map<G4_INST*, unsigned int>* BCInfo)
-{
+bool AccSubPass::isAccCandidate(G4_INST *inst, int &lastUse, bool &mustBeAcc0,
+                                bool &isAllFloat, int &readSuppressionSrcs,
+                                int &bundleBC, int &bankBC,
+                                std::map<G4_INST *, unsigned int> *BCInfo,
+                                std::vector<USE_DEF_NODE> *SwappableUses) {
     mustBeAcc0 = false;
     isAllFloat =  true;
     G4_DstRegRegion* dst = inst->getDst();
@@ -479,8 +575,46 @@ bool AccSubPass::isAccCandidate(G4_INST* inst, int& lastUse, bool& mustBeAcc0, b
             case Opnd_src2:
                 if (!kernel.fg.builder->relaxedACCRestrictions3())
                 {
-                    return false;
+                    // If swapAccSub is disabled, skip further checking on src2.
+                    if (!SwappableUses)
+                        return false;
+                    if (!isCommutativeOnSrc12(useInst))
+                        return false;
+                    // As src2 cannot use acc, acc substitution is only
+                    // feasible if src1 and src2 are different.
+                    auto *def1 = useInst->getSingleDef(Opnd_src1);
+                    // If the single-def on src1 is the same as this use-inst,
+                    // the acc substitution following a swap is infeasible.
+                    if (def1 && def1 == inst)
+                        return false;
+                    // FIXME: If there's any further hardware restrictions on
+                    // src2, please check here.
+                    // CHECK: source alignment on src1. If src1 could be
+                    // swapped onto src2, src1 must be GRF aligned or it's a
+                    // scalar.
+                    if (!isSrcSwapLegal(useInst, builder))
+                        return false;
+                    // CHECK: source modifier on itself & src1 on TGLLP.
+                    if (builder.getPlatform() == GENX_TGLLP) {
+                        switch (
+                            useInst->getSrc(2)->asSrcRegRegion()->getModifier()) {
+                        default:
+                            return false;
+                        case Mod_src_undef:
+                            break;
+                        case Mod_Minus:
+                            // Need further check whether src1 has no source
+                            // modifier.
+                            if (useInst->getSrc(1)->isSrcRegRegion() &&
+                                useInst->getSrc(1)
+                                        ->asSrcRegRegion()
+                                        ->getModifier() != Mod_src_undef)
+                              return false;
+                            break;
+                        }
+                    }
                 }
+                // Q: What's the purpose of this check?
                 if (!IS_TYPE_FLOAT_FOR_ACC(useInst->getSrc(2)->getType()) ||
                    (useInst->getDst() && !IS_TYPE_FLOAT_FOR_ACC(useInst->getDst()->getType())))
                 {
@@ -488,6 +622,36 @@ bool AccSubPass::isAccCandidate(G4_INST* inst, int& lastUse, bool& mustBeAcc0, b
                 }
                 break;
             case Opnd_src1:
+                // Record swappable use if there is restriction on acc usage on
+                // src2 and swapAccSub is enabled and that use is a commutative
+                // one.
+                if (!kernel.fg.builder->relaxedACCRestrictions3() &&
+                    SwappableUses && isCommutativeOnSrc12(useInst)) {
+                    // As src2 cannot use acc, acc substitution is only
+                    // feasible if src1 and src2 are different.
+                    auto *def2 = useInst->getSingleDef(Opnd_src2);
+                    // If the single-def on src2 is the same as this use-inst,
+                    // the acc substitution is infeasible.
+                    if (def2 && def2 == inst)
+                        return false;
+                    // CHECK: source modifier on itself & src2 on TGLLP.
+                    if (builder.getPlatform() == GENX_TGLLP) {
+                        switch (
+                            useInst->getSrc(1)->asSrcRegRegion()->getModifier()) {
+                        default:
+                            return false;
+                        case Mod_src_undef:
+                            // Need further check whether src2 has negative source
+                            // modifier or no source modifier.
+                            if (useInst->getSrc(2)->isSrcRegRegion()) {
+                                auto SMod = useInst->getSrc(2)->asSrcRegRegion()->getModifier();
+                                if (SMod != Mod_src_undef && SMod != Mod_Minus)
+                                    return false;
+                            }
+                            break;
+                        }
+                    }
+                }
                 if (BC)
                 {
                     bundleBC += getBundleConflicts(1, BC);
@@ -560,6 +724,7 @@ bool AccSubPass::isAccCandidate(G4_INST* inst, int& lastUse, bool& mustBeAcc0, b
             // def must be the only define for this use
             return false;
         }
+        MUST_BE_TRUE(useInst->getSingleDef(opndNum) == inst, "this user's single def should be this inst.");
 
         int srcId = useInst->getSrcNum(opndNum);
         G4_Operand* src = useInst->getSrc(srcId);
@@ -571,11 +736,29 @@ bool AccSubPass::isAccCandidate(G4_INST* inst, int& lastUse, bool& mustBeAcc0, b
         }
         if (!useInst->canSrcBeAcc(opndNum))
         {
-            return false;
+            // Need further check when swapAccSub is enabled and the operand
+            // number is src2.
+            if (!SwappableUses || opndNum != Opnd_src2)
+                return false;
+            // When src2 is substitutable and swapAccSub is enabled, need to
+            // check whether src1 could use acc.
+            if (!useInst->canSrcBeAcc(Opnd_src1))
+                return false;
         }
         if (!IS_TYPE_FLOAT_FOR_ACC(src->getType()))
         {
             isAllFloat = false;
+        }
+        // Record this swappable use if the swapping on it could help acc
+        // substitution. Both src1 and src2 need recording as, from them, we
+        // need to build the conflict graph and determine which ones should be
+        // removed from acc candidates if two acc candidates sit in the same
+        // ternary instruction, says 'mad'.
+        if (SwappableUses) {
+          if (isCommutativeOnSrc12(useInst) && useInst->getNumSrc() == 3 &&
+              (opndNum == Opnd_src1 || opndNum == Opnd_src2)) {
+            SwappableUses->push_back(use);
+          }
         }
     }
 
@@ -938,6 +1121,197 @@ struct AccAssignment
 };
 
 
+void AccSubPass::doAccSub(G4_BB* bb)
+{
+    bb->resetLocalIds();
+
+    int numGeneralAcc = kernel.getNumAcc();
+    std::vector<AccInterval*> intervals;
+    std::vector<AccInterval*> failIntervals;
+    std::vector<AccInterval*> spillIntervals;
+
+    //build intervals for potential acc candidates as well as pre-existing acc uses from mac/mach/addc/etc
+    for (auto instIter = bb->begin(), instEnd = bb->end(); instIter != instEnd; ++instIter)
+    {
+        G4_INST* inst = *instIter;
+        if (inst->defAcc())
+        {
+            // we should only have single def/use acc at this point, so any use would kill the def
+            auto iter = instIter;
+            auto useIter = std::find_if(++iter, instEnd, [](G4_INST* inst) { return inst->useAcc(); });
+            int lastUseId = useIter == instEnd ? bb->back()->getLocalId() : (*useIter)->getLocalId();
+            AccInterval* newInterval = new AccInterval(inst, lastUseId, true);
+            intervals.push_back(newInterval);
+        }
+        else
+        {
+            int lastUseId = 0;
+            bool isAllFloat = true;
+            if (inst->canInstBeAcc())
+            {
+                getInstACCAttributes(inst, lastUseId, isAllFloat);
+                if (lastUseId)
+                {
+                    // this is a potential candidate for acc substitution
+                    AccInterval* newInterval = new AccInterval(inst, lastUseId);
+                    newInterval->isAllFloat = isAllFloat;
+
+                    intervals.push_back(newInterval);
+                }
+            }
+        }
+    }
+
+    //modified linear scan to assign free accs to intervals
+    AccAssignment accAssign(numGeneralAcc, builder, true);
+
+    for (auto interval : intervals)
+    {
+        // expire intervals
+        accAssign.expireIntervals(interval);
+
+        // assign interval
+        bool foundFreeAcc = accAssign.assignAcc(interval);
+
+        //Spill
+        if (!foundFreeAcc && accAssign.activeIntervals.size() != 0)
+        {
+            // check if we should spill one of the active intervals
+            auto spillCostCmp = [interval](AccInterval* intv1, AccInterval* intv2)
+            {
+                return intv1->getNewSpillCost() < intv2->getNewSpillCost();
+            };
+            auto spillIter = std::min_element(accAssign.activeIntervals.begin(), accAssign.activeIntervals.end(),
+                spillCostCmp);
+            auto spillCandidate = *spillIter;
+            if (interval->getNewSpillCost() > spillCandidate->getNewSpillCost() &&
+                !spillCandidate->isPreAssigned &&
+                !(interval->mustBeAcc0 && spillCandidate->assignedAcc != 0))
+            {
+                bool tmpAssignValue[2];
+
+                tmpAssignValue[0] = accAssign.freeAccs[spillCandidate->assignedAcc];
+                accAssign.freeAccs[spillCandidate->assignedAcc] = true;
+                if (spillCandidate->needBothAcc(builder))
+                {
+                    tmpAssignValue[1] = accAssign.freeAccs[spillCandidate->assignedAcc + 1];
+                    accAssign.freeAccs[spillCandidate->assignedAcc + 1] = true;
+                }
+
+                if (accAssign.assignAcc(interval))
+                {
+#ifdef DEBUG_VERBOSE_ON
+                    std::cerr << "Kicked out:  \t";
+                    spillCandidate->dump();
+#endif
+                    spillIntervals.push_back(spillCandidate);
+                    spillCandidate->spilledAcc = spillCandidate->assignedAcc;
+                    spillCandidate->lastUse = interval->inst->getLocalId();
+
+                    spillCandidate->assignedAcc = -1;
+                    accAssign.activeIntervals.erase(spillIter);
+                }
+                else
+                {
+                    accAssign.freeAccs[spillCandidate->assignedAcc] = tmpAssignValue[0];
+                    if (spillCandidate->needBothAcc(builder))
+                    {
+                        accAssign.freeAccs[spillCandidate->assignedAcc + 1] = tmpAssignValue[1];
+                    }
+                }
+            }
+        }
+
+        if (interval->assignedAcc == -1)
+        {
+            failIntervals.push_back(interval);
+        }
+#ifdef DEBUG_VERBOSE_ON
+        if (interval->assignedAcc == -1)
+        {
+            std::cerr << "Failed:    \t";
+        }
+        else
+        {
+            std::cerr << "Assigned:   \t";
+        }
+        interval->dump();
+#endif
+    }
+
+    //Rescan the spilled and failed cases to do ACC substitution in peephole.
+    if (failIntervals.size() && spillIntervals.size())
+    {
+        for (auto spillInterval : spillIntervals)
+        {
+            AccAssignment accAssign(numGeneralAcc, builder, false);
+            accAssign.freeAccs[spillInterval->spilledAcc] = true;
+            if (spillInterval->needBothAcc(builder))
+            {
+                accAssign.freeAccs[spillInterval->spilledAcc + 1] = true;
+            }
+
+            for (auto failInterval : failIntervals)
+            {
+                if (!((spillInterval->inst->getLocalId() <= failInterval->inst->getLocalId()) &&
+                    (failInterval->lastUse <= spillInterval->lastUse)) ||
+                    failInterval->assignedAcc != -1)
+                {
+                    continue;
+                }
+                accAssign.expireIntervals(failInterval);
+                accAssign.assignAcc(failInterval);
+            }
+        }
+    }
+
+    for (auto interval : intervals)
+    {
+        G4_INST* inst = interval->inst;
+
+        if (!interval->isPreAssigned)
+        {
+            numAccSubCandidateDef++;
+            numAccSubCandidateUse += (int)inst->use_size();
+        }
+        if (!interval->isPreAssigned && interval->assignedAcc != -1)
+        {
+            if (replaceDstWithAcc(inst, interval->assignedAcc))
+            {
+                numAccSubDef++;
+                numAccSubUse += (int)inst->use_size();
+            }
+#if 0
+            std::cout << "Acc sub def inst: \n";
+            inst->emit(std::cout);
+            std::cout << "[" << inst->getLocalId() << "]\n";
+            std::cout << "Uses:\n";
+            for (auto I = inst->use_begin(), E = inst->use_end(); I != E; ++I)
+            {
+                auto&& use = *I;
+                std::cout << "\t";
+                use.first->emit(std::cout);
+                std::cout << "[" << use.first->getLocalId() << "]\n";
+            }
+#endif
+        }
+#if 1
+        if (!interval->isPreAssigned && interval->assignedAcc == -1)
+        {
+            inst->addComment("ACC_Candidate");
+        }
+#endif
+    }
+
+    for (int i = 0, end = (int)intervals.size(); i < end; ++i)
+    {
+        delete intervals[i];
+    }
+
+    return;
+}
+
+
 void AccSubPass::multiAccSub(G4_BB* bb)
 {
     int numGeneralAcc = kernel.getNumAcc();
@@ -965,6 +1339,13 @@ void AccSubPass::multiAccSub(G4_BB* bb)
         }
     }
 
+    bool EnableSwapAccSub =
+        kernel.getOptions()->getOption(vISA_EnableSwapAccSub) &&
+        !kernel.fg.builder->relaxedACCRestrictions3();
+    // Each candidate is an acc interval and its list of associated swappable
+    // uses, where a swappable use is such a use, which is one of the
+    // commutative operands from that user instruction.
+    std::map<AccInterval *, std::vector<USE_DEF_NODE>> SwapCandidates;
     //build intervals for potential acc candidates as well as pre-existing acc uses from mac/mach/addc/etc
     for (auto instIter = bb->begin(), instEnd = bb->end(); instIter != instEnd; ++instIter)
     {
@@ -986,7 +1367,11 @@ void AccSubPass::multiAccSub(G4_BB* bb)
             int bundleBCTimes = 0;
             int bankBCTimes = 0;
             int readSuppressionSrcs = 0;
-            if (isAccCandidate(inst, lastUseId, mustBeAcc0, isAllFloat, readSuppressionSrcs, bundleBCTimes, bankBCTimes, &BCInfo))
+            std::vector<USE_DEF_NODE> SwappableUseList;
+            if (isAccCandidate(inst, lastUseId, mustBeAcc0, isAllFloat,
+                               readSuppressionSrcs, bundleBCTimes, bankBCTimes,
+                               &BCInfo,
+                               EnableSwapAccSub ? &SwappableUseList : nullptr))
             {
                 // this is a potential candidate for acc substitution
                 AccInterval* newInterval = new AccInterval(inst, lastUseId);
@@ -997,6 +1382,127 @@ void AccSubPass::multiAccSub(G4_BB* bb)
                 newInterval->suppressionTimes = readSuppressionSrcs;
 
                 intervals.push_back(newInterval);
+
+                if (EnableSwapAccSub && !SwappableUseList.empty())
+                    std::swap(SwapCandidates[newInterval], SwappableUseList);
+            }
+        }
+    }
+
+    // Resolve conflicts in the swap candidates and swap operands if necessary.
+    if (EnableSwapAccSub) {
+        // For each use inst, at most two operands could be swappable. If both
+        // of them are populated, that 2 candidates are conflict.
+        // TODO: So far, we only consider swap on src1 and src2. But, for
+        // instructions like add3, src0, src1, and src2 are all commutative.
+        std::map<G4_INST *, std::pair<G4_INST *, G4_INST *>> ConflictUseMap;
+        for (auto &I : SwapCandidates) {
+            for (auto &U : I.second) {
+                MUST_BE_TRUE((U.second == Opnd_src1 || U.second == Opnd_src2),
+                             "Only src1 and src2 are swappable.");
+                auto MI = ConflictUseMap.insert(
+                    std::make_pair(U.first, std::make_pair(nullptr, nullptr))).first;
+                if (U.second == Opnd_src1) {
+                    MUST_BE_TRUE(MI->second.first == nullptr, "src1 is already populated");
+                    MI->second.first = I.first->inst;
+                } else {
+                    MUST_BE_TRUE(MI->second.second == nullptr, "src2 is already populated");
+                    MI->second.second = I.first->inst;
+                }
+            }
+        }
+
+        // Now, with the conflict use map, build the confict graph on the
+        // corresponding definitions. Here, the comparator on instruction local
+        // ids is used to ensure that iteration order of the conflict graph (a
+        // std::map) follows the program order. By following the program order
+        // only, the elimination order is more predictable and consistent from
+        // run to run.
+        auto comp = [](G4_INST *LHS, G4_INST *RHS) {return LHS->getLocalId() < RHS->getLocalId();};
+        std::map<G4_INST *, std::set<G4_INST *>, decltype(comp)> ConflictGraph(comp);
+
+        for (auto &I : ConflictUseMap) {
+            auto *def1 = I.second.first;
+            auto *def2 = I.second.second;
+            // When both swappable operands are acc candidates, their
+            // definitions are conflict.
+            if (def1 && def2) {
+                ConflictGraph[def1].insert(def2);
+                ConflictGraph[def2].insert(def1);
+            }
+        }
+        // Now plan the node elimination order to make the conflict graph fully
+        // disconnected. A greedy algorithm is designed to eliminate minimal
+        // nodes in order to fully disconnect the graph. In each steps, we
+        // remove a node with the maximal degrees but minimal degrees from
+        // neighbor nodes.
+        std::set<G4_INST *> Eliminated;
+        while (!ConflictGraph.empty()) {
+            unsigned MaxDeg = ~0U;
+            unsigned MinNeighDeg = ~0U;
+            G4_INST *Node = nullptr;
+            for (auto &I : ConflictGraph) {
+                unsigned Deg = I.second.size();
+                unsigned NeighDeg = 0;
+                // NeighDeg is counted to tell nodes with the same degree.
+                for (auto &I : I.second) {
+                    NeighDeg += ConflictGraph[I].size();
+                }
+                if (!Node || Deg > MaxDeg ||
+                    (Deg == MaxDeg && NeighDeg < MinNeighDeg)) {
+                    Node = I.first;
+                    MaxDeg = Deg;
+                    MinNeighDeg = NeighDeg;
+                    // TODO: A more comprehensive elimination order would
+                    // consider the impact on acc intervals, especially when
+                    // two nodes have the same degree(s). The one reducing the
+                    // chromatic number should be eliminated so that the result
+                    // acc interal graph has a smaller max clique size.
+                }
+            }
+            // If all remaining nodes have 0 degree, CG is fully disconnected.
+            if (MaxDeg == 0)
+                break;
+            // Eliminate this node.
+            auto &Set = ConflictGraph[Node];
+            for (auto *N : Set) {
+                ConflictGraph[N].erase(Node);
+            }
+            ConflictGraph.erase(Node);
+            Eliminated.insert(Node);
+        }
+        // Check the remaining node and swap their uses into src1.
+        for (auto &I : SwapCandidates) {
+            // Skip candidates eliminated but mark them as removed.
+            if (Eliminated.count(I.first->inst)) {
+                I.first->isRemoved = true;
+                continue;
+            }
+            // For remaining swap candidates, need to swap operands if
+            // necessary.
+            for (auto &U : SwapCandidates[I.first]) {
+                // Skip as src1 could use acc.
+                if (U.second == Opnd_src1)
+                    continue;
+                MUST_BE_TRUE(U.second = Opnd_src2,
+                             "Only src1 or src2 is expected.");
+                U.first->swapSrc(1, 2);
+                U.first->swapDefUse(Opnd_src1, Opnd_src2);
+                if (builder.getPlatform() == GENX_TGLLP) {
+                    // If both are src regions, swap src modifiers as well. The
+                    // combinations supported are neither of them has source
+                    // modifier or src1 has no source modifier but src2 has
+                    // negative modifier.
+                    auto *S1 = U.first->getSrc(1);
+                    auto *S2 = U.first->getSrc(2);
+                    if (S1->isSrcRegRegion() && S2->isSrcRegRegion()) {
+                        auto SMod1 = S1->asSrcRegRegion()->getModifier();
+                        auto SMod2 = S2->asSrcRegRegion()->getModifier();
+                        std::swap(SMod1, SMod2);
+                        S1->asSrcRegRegion()->setModifier(SMod1);
+                        S2->asSrcRegRegion()->setModifier(SMod2);
+                    }
+                }
             }
         }
     }
@@ -1004,8 +1510,11 @@ void AccSubPass::multiAccSub(G4_BB* bb)
     //modified linear scan to assign free accs to intervals
     AccAssignment accAssign(numGeneralAcc, builder, true);
 
-    for (auto interval : intervals)
+    for (auto *interval : intervals)
     {
+        if (interval->isRemoved)
+            continue;
+
         // expire intervals
         accAssign.expireIntervals(interval);
 
@@ -1118,15 +1627,27 @@ void AccSubPass::multiAccSub(G4_BB* bb)
         }
     }
 
-    for (auto interval : intervals)
+    for (auto *interval : intervals)
     {
+        if (interval->isRemoved)
+            continue;
+
+        G4_INST* inst = interval->inst;
+
+        if (!interval->isPreAssigned)
+        {
+            numAccSubCandidateDef++;
+            numAccSubCandidateUse += (int)inst->use_size();
+        }
+
         if (!interval->isPreAssigned && interval->assignedAcc != -1)
         {
-            G4_INST* inst = interval->inst;
-            replaceDstWithAcc(inst, interval->assignedAcc);
+            if (replaceDstWithAcc(inst, interval->assignedAcc))
+            {
+                numAccSubDef++;
+                numAccSubUse += (int)inst->use_size();
+            }
 
-            numAccSubDef++;
-            numAccSubUse += (int)inst->use_size();
 #if 0
             std::cout << "Acc sub def inst: \n";
             inst->emit(std::cout);
@@ -1189,7 +1710,7 @@ void AccSubPass::accSub(G4_BB* bb)
         int bundleC = 0;
         int bankC = 0;
         int suppression = 0;
-        if (!isAccCandidate(inst, lastUseId, mustBeAcc0, isAllFloat, suppression, bundleC, bankC, nullptr))
+        if (!isAccCandidate(inst, lastUseId, mustBeAcc0, isAllFloat, suppression, bundleC, bankC, nullptr, nullptr))
         {
             continue;
         }

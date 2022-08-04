@@ -25,6 +25,11 @@ SPDX-License-Identifier: MIT
 #include "../common/EmUtils.h"
 #include "../../../skuwa/iacm_g10_rev_id.h"
 #include "../../../skuwa/iacm_g11_rev_id.h"
+#include "../../../skuwa/iacm_g12_rev_id.h"
+
+namespace llvm {
+    class GenIntrinsicInst;
+}
 
 struct genplatform
 {
@@ -49,6 +54,7 @@ inline bool genplatform::hasSupportForAllOCLImageFormats() const
     bool isDG2B0Plus = SI_WA_FROM(m_platformInfo->usRevId, ACM_G10_GT_REV_ID_B0);
     bool isDG2C0Plus = SI_WA_FROM(m_platformInfo->usRevId, ACM_G10_GT_REV_ID_C0);
     bool isDG2G11EUConfig = GFX_IS_DG2_G11_CONFIG(m_platformInfo->usDeviceID);
+    bool isDG2G12EUConfig = GFX_IS_DG2_G12_CONFIG(m_platformInfo->usDeviceID);
     if ((m_platformInfo->eProductFamily == IGFX_DG2 && isDG2C0Plus) ||
         (m_platformInfo->eProductFamily == IGFX_DG2 && isDG2G11EUConfig && isDG2B0Plus))
     {
@@ -759,30 +765,32 @@ public:
     llvm::Value* create_discard(llvm::Value* condition);
     llvm::Value* create_runtime(llvm::Value* offset);
     llvm::CallInst* create_countbits(llvm::Value* src);
-    llvm::Value* create_waveBallot(llvm::Value* src);
-    llvm::Value* create_waveInverseBallot(llvm::Value* src);
+    llvm::Value* create_waveBallot(llvm::Value* src, llvm::Value* helperLaneMode = nullptr);
+    llvm::Value* create_waveInverseBallot(llvm::Value* src, llvm::Value* helperLaneMode = nullptr);
     llvm::Value* create_waveshuffleIndex(llvm::Value* src, llvm::Value* index, llvm::Value* helperLaneMode = nullptr);
-    llvm::Value* create_waveAll(llvm::Value* src, llvm::Value* type);
+    llvm::Value* create_waveAll(llvm::Value* src, llvm::Value* type, llvm::Value* helperLaneMode = nullptr);
     llvm::Value* create_wavePrefix(
         llvm::Value* src, llvm::Value* type, bool inclusive,
-        llvm::Value *Mask = nullptr);
+        llvm::Value *Mask = nullptr, llvm::Value* helperLaneMode = nullptr);
     llvm::Value* create_wavePrefixBitCount(
-        llvm::Value* src, llvm::Value *Mask = nullptr);
-    llvm::Value* create_waveMatch(llvm::Instruction *inst, llvm::Value *src);
+        llvm::Value* src, llvm::Value *Mask = nullptr, llvm::Value* helperLaneMode = nullptr);
+    llvm::Value* create_waveMatch(llvm::Instruction *inst, llvm::Value *src, llvm::Value* helperLaneMode = nullptr);
     llvm::Value* create_waveMultiPrefix(
         llvm::Instruction *I,
         llvm::Value *Val,
         llvm::Value *Mask,
-        IGC::WaveOps OpKind);
+        IGC::WaveOps OpKind,
+        llvm::Value* helperLaneMode = nullptr);
     llvm::Value* create_waveMultiPrefixBitCount(
         llvm::Instruction *I,
         llvm::Value *Val,
-        llvm::Value *Mask);
+        llvm::Value *Mask,
+        llvm::Value* helperLaneMode = nullptr);
     llvm::Value* create_quadPrefix(llvm::Value* src, llvm::Value* type, bool inclusive = false);
     llvm::Value* get32BitLaneID();
     llvm::Value* getSimdSize();
-    llvm::Value* getFirstLaneID();
-    llvm::Value* readFirstLane(llvm::Value* src);
+    llvm::Value* getFirstLaneID(llvm::Value* helperLaneMode = nullptr);
+    llvm::Value* readFirstLane(llvm::Value* src, llvm::Value* helperLaneMode = nullptr);
 
     void VectorToScalars(
         llvm::Value* vector,
@@ -793,6 +801,8 @@ public:
     llvm::Value* ScalarsToVector(
         llvm::Value* (&scalars)[4],
         unsigned vectorElementCnt);
+
+    llvm::GenIntrinsicInst* CreateLaunder(llvm::Value* V);
 
 private:
 

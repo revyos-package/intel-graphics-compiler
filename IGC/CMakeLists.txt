@@ -53,6 +53,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED TRUE)
 
 
 list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
+list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/BiFModule/cmake)
 list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake/modules)
 
 include(igc_flags_utils)
@@ -223,7 +224,6 @@ unset(_debugConfigs)
 # ======================================================================================================
 # ======================================================================================================
 # ======================================================================================================
-
 
 
 # ======================================================================================================
@@ -487,7 +487,7 @@ if(MSVC)
       ALIAS CompileAsDefault           CompileAs REMOVE_GROUP
       ALIAS DebugInfoDisabled          DebugInfoFormat REMOVE_GROUP
       ALIAS DebugInfoProgramDatabase   "/Zi"
-      ALIAS DisableSpecificWarnings    "/wd4267" "/wd4273" "/wd4091" "/wd4996"
+      ALIAS DisableSpecificWarnings    "/wd4267" "/wd4273" "/wd4091" "/wd4996" "/wd4291"
       ALIAS ExceptionsDisabled         Exceptions REMOVE_GROUP
       ALIAS ExceptionsEnabled          "/EHsc"
       ALIAS FaviorSize                 "/Os"
@@ -679,6 +679,7 @@ if(MSVC)
         ALIAS LinkTimeCodeGeneration     "/LTCG"
         ALIAS ControlFlowGuard           "/guard:cf"
         ALIAS NoDefaultLib               "/NODEFAULTLIB:kernel32.lib"
+        ALIAS ControlFlowEnforcement     "/CETCOMPAT"
       )
   else()
     igc_flag_register_settings(
@@ -697,6 +698,7 @@ if(MSVC)
         ALIAS LinkTimeCodeGeneration     "/LTCG"
         ALIAS ControlFlowGuard           "/guard:cf"
         ALIAS NoDefaultLib
+        ALIAS ControlFlowEnforcement     "/CETCOMPAT"
       )
   endif()
 else()
@@ -712,6 +714,7 @@ else()
       ALIAS LinkTimeCodeGeneration
       ALIAS ControlFlowGuard
       ALIAS NoDefaultLib
+      ALIAS ControlFlowEnforcement
     )
 
   if(IGC_OPTION__COMPILE_LINK_ALLOW_UNSAFE_SIZE_OPT)
@@ -743,7 +746,7 @@ foreach(_compilerFlagName IN ITEMS "CMAKE_CXX_FLAGS" "CMAKE_C_FLAGS")
           SET
             CompileAsDefault
             DisableSpecificWarnings
-            ExceptionsDisabled
+            ExceptionsEnabled
             MultiProcessorCompilation
             DeadCodeEliminate
             CallingConvCdecl
@@ -757,7 +760,7 @@ foreach(_compilerFlagName IN ITEMS "CMAKE_CXX_FLAGS" "CMAKE_C_FLAGS")
             CompileAsDefault
 
             DisableSpecificWarnings
-            ExceptionsDisabled
+            ExceptionsEnabled
             MultiProcessorCompilation
             DeadCodeEliminate
     )
@@ -1083,6 +1086,7 @@ foreach(_linkerFlagName IN ITEMS "CMAKE_EXE_LINKER_FLAGS" "CMAKE_SHARED_LINKER_F
       PATTERN "${IGC_BUILD__RELEASE_PATTERN}"
       SET
         ControlFlowGuard
+        ControlFlowEnforcement
         # Disable LTCG due to release build time increase
         #LinkTimeCodeGeneration
     )
@@ -1299,17 +1303,17 @@ if(IGC_OPTION__LLVM_LLD)
   include(igc_find_liblldELF)
 endif()
 
-# ==================================== WrapperLLVM package =============================================
-
-add_subdirectory(WrapperLLVM)
-igc_sg_define(IGC__WrapperLLVM)
-include_directories("${CMAKE_CURRENT_SOURCE_DIR}/WrapperLLVM/include")
-
 # ==================================== SPIRV-LLVM-Translator package ===================================
 
 if(IGC_OPTION__LINK_KHRONOS_SPIRV_TRANSLATOR)
   include(igc_spirv)
 endif()
+
+# ==================================== WrapperLLVM package =============================================
+
+add_subdirectory(WrapperLLVM)
+igc_sg_define(IGC__WrapperLLVM)
+include_directories("${CMAKE_CURRENT_SOURCE_DIR}/WrapperLLVM/include")
 
 # ======================================== Include directories =========================================
 
@@ -1654,6 +1658,7 @@ foreach(_libBuildSuffix ${IGC_BUILD__MAIN_IGC_LIB_SUFFIXES})
 
   if(MSVC AND IGC_OPTION__BIF_LINK_BC)
     add_dependencies("${IGC_BUILD__PROJ${_libBuildSuffix}}"   "${IGC_BUILD__PROJ__BiFModule_OCL}")
+    add_dependencies("${IGC_BUILD__PROJ${_libBuildSuffix}}"   "${IGC_BUILD__PROJ__BiFModuleCache_OCL}")
     add_dependencies("${IGC_BUILD__PROJ${_libBuildSuffix}}"   "${IGC_BUILD__PROJ__ElfPackager}")
   endif()
 endforeach()

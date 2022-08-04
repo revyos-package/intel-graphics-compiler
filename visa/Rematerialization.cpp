@@ -1,6 +1,6 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (C) 2017-2021 Intel Corporation
+Copyright (C) 2017-2022 Intel Corporation
 
 SPDX-License-Identifier: MIT
 
@@ -126,8 +126,7 @@ namespace vISA
                 if (samplerHeaderMov &&
                     inst->isSplitSend() &&
                     inst->getMsgDesc()->isSampler() &&
-                    inst->getMsgDescRaw() &&
-                    inst->getMsgDescRaw()->isHeaderPresent())
+                    inst->getMsgDesc()->isHeaderPresent())
                 {
                     MUST_BE_TRUE(samplerHeaderMov->getExecSize() == 1, "Unexpected sampler header");
                     samplerHeaderMap.insert(std::make_pair(inst, samplerHeaderMov));
@@ -531,9 +530,9 @@ namespace vISA
             (G4_RegFileKind::G4_GRF | G4_RegFileKind::G4_INPUT)) == 0x0)
             return false;
 
-        // Skip remat if src opnd uses special acc registers
-        if (src->getAccRegSel() != ACC_UNDEFINED)
-            return false;
+        G4_AccRegSel accRegSel = src->getAccRegSel();
+        if (accRegSel != ACC_UNDEFINED && accRegSel != NOACC)
+          return false;
 
         // Lookup defs of src in program
         auto opIt = operations.find(topdcl);
@@ -635,7 +634,7 @@ namespace vISA
                 float loopInstToTotalInstRatio = (float)getNumRematsInLoop() / (float)loopInstsBeforeRemat*100.0f;
                 if (rpe.getMaxRP() < rematRegPressure * 1.4f)
                 {
-                    // If max RPE is not very high, dont sink too many instructions in loop
+                    // If max RPE is not very high, don't sink too many instructions in loop
                     if(loopInstToTotalInstRatio > 1.75f)
                         return false;
                 }
@@ -690,7 +689,7 @@ namespace vISA
             if (srcOpnd->isSrcRegRegion())
             {
                 // If src operand base is non-regvar (eg, architecture
-                // register) then dont remat. Moving around such
+                // register) then don't remat. Moving around such
                 // registers could be dangerous.
                 if (!srcOpnd->getBase()->isRegVar())
                     return false;
@@ -722,7 +721,7 @@ namespace vISA
                     return false;
 
                 // If an instruction has physical registers allocated then
-                // dont optimize it.
+                // don't optimize it.
                 if (srcOpndRgn->getBase()->asRegVar()->getPhyReg() &&
                     !srcOpndTopDcl->isInput())
                     return false;
@@ -773,7 +772,7 @@ namespace vISA
                     auto extMsgOpnd = uniqueDefInst->getSrc(1);
                     MUST_BE_TRUE(extMsgOpnd->isSrcRegRegion() == true, "Unexpected src opnd for sampler");
 
-                    // Dont remat if sampler def is outside loop and use inside loop
+                    // Don't remat if sampler def is outside loop and use inside loop
                     if (onlyUseInLoop)
                         return false;
 
@@ -782,8 +781,7 @@ namespace vISA
 
                     bool samplerHeaderNotUsed = uniqueDefInst->getSrc(0)->asSrcRegRegion()->getTopDcl() != kernel.fg.builder->getBuiltinSamplerHeader();
 
-                    if (!uniqueDefInst->getMsgDescRaw() ||
-                        !uniqueDefInst->getMsgDescRaw()->isHeaderPresent() ||
+                    if (!uniqueDefInst->getMsgDesc()->isHeaderPresent() ||
                         samplerHeaderNotUsed)
                     {
                         len += uniqueDefInst->getMsgDesc()->getSrc0LenRegs();
@@ -1004,7 +1002,7 @@ namespace vISA
                 auto src0Rgn = uniqueDef->first->getSrc(0)->asSrcRegRegion();
                 auto src0TopDcl = src0Rgn->getTopDcl();
                 auto ops = operations.find(src0TopDcl);
-                MUST_BE_TRUE(ops != operations.end(), "Didnt find record in map");
+                MUST_BE_TRUE(ops != operations.end(), "Didn't find record in map");
                 MUST_BE_TRUE((*ops).second.numUses == 1, "Expecting src0 to be used only in sampler");
 
                 G4_Declare* newSrc0Dcl = nullptr;
@@ -1024,7 +1022,7 @@ namespace vISA
 
                         auto dupOp = headerDefInst->cloneInst();
                         auto headerDefDst = headerDefInst->getDst();
-                        assert(!headerDefDst->isIndirect()); // we dont allow send header to be defined indirectly
+                        assert(!headerDefDst->isIndirect()); // we don't allow send header to be defined indirectly
                         dupOp->setDest(kernel.fg.builder->createDst(
                             newSrc0Dcl->getRegVar(), headerDefDst->getRegOff(), headerDefDst->getSubRegOff(),
                             headerDefDst->getHorzStride(), headerDefDst->getType()));
@@ -1046,7 +1044,6 @@ namespace vISA
                 0, 1, samplerDst->getElemType());
 
             auto dstMsgDesc = dstInst->getMsgDescRaw();
-            // TODO: this may not hold when we start using load/store descriptors
             MUST_BE_TRUE(dstMsgDesc, "expected raw descriptor");
 
             auto newMsgDesc = kernel.fg.builder->createGeneralMsgDesc(
@@ -1245,6 +1242,11 @@ namespace vISA
                                     rematSrc = createSrcRgn(src->asSrcRegRegion(), uniqueDef->first->getDst(),
                                         (*prevRematIt).second.first->getDst()->getTopDcl());
 
+                                    if (src->asSrcRegRegion()->getAccRegSel() == NOACC)
+                                    {
+                                      rematSrc->setAccRegSel(NOACC);
+                                    }
+
                                     reduceNumUses(src->getTopDcl());
 
 #if 0
@@ -1265,6 +1267,12 @@ namespace vISA
                                 std::list<G4_INST*> newInsts;
                                 G4_INST* cacheInst = nullptr;
                                 rematSrc = rematerialize(src->asSrcRegRegion(), bb, uniqueDef, newInsts, cacheInst);
+
+                                if (src->asSrcRegRegion()->getAccRegSel() == NOACC)
+                                {
+                                  rematSrc->setAccRegSel(NOACC);
+                                }
+
                                 while (!newInsts.empty())
                                 {
                                     bb->insertBefore(instIt, newInsts.front());

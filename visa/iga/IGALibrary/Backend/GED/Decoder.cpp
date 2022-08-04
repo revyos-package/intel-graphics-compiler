@@ -1198,8 +1198,8 @@ Instruction *Decoder::decodeSendInstruction(Kernel& kernel)
         decodeSendInfoXe(sdi);
     } else if (platform() == Platform::XE_HP) {
         decodeSendInfoXeHP(sdi);
-    } else if (platform() == Platform::XE_HPG ||
-        platform() == Platform::XE_HPC)
+    } else if (platform() >= Platform::XE_HPG
+    )
     {
         decodeSendInfoXeHPG(sdi);
     } else {
@@ -1258,6 +1258,7 @@ Instruction *Decoder::decodeSendInstruction(Kernel& kernel)
 
     return inst;
 }
+
 
 void Decoder::decodeSendDestination(Instruction *inst)
 {
@@ -1353,6 +1354,7 @@ void Decoder::decodeSendSource1(Instruction *inst)
         rgn,
         implSrcType);
 }
+
 
 
 ///////////////////////////////////////////////////////////////////////
@@ -2143,6 +2145,7 @@ void Decoder::decodeOptions(Instruction *inst)
         }
     }
 
+
     if (os.supportsDepCtrl()) {
         GED_DEP_CTRL dpCtrl = GED_DEP_CTRL_Normal;
         GED_DECODE_RAW_TO(DepCtrl, dpCtrl);
@@ -2156,11 +2159,10 @@ void Decoder::decodeOptions(Instruction *inst)
         }
     }
 
-    if (GED_WORKAROUND(
-        /* really need to get GED to support ThrCtrl on GEN7-8 send's */
-            (!os.isSendOrSendsFamily() && os.supportsThreadCtrl()) ||
-            (os.isSendOrSendsFamily() && platform() >= Platform::GEN9)))
-    {
+    bool hasThreadCtrl =
+      !os.isSendOrSendsFamily() && os.supportsThreadCtrl() ||
+      (os.isSendOrSendsFamily() && platform() >= Platform::GEN9);
+    if (hasThreadCtrl) {
         GED_THREAD_CTRL trdCntrl = GED_THREAD_CTRL_Normal;
         GED_DECODE_RAW_TO(ThreadCtrl, trdCntrl);
         decodeThreadOptions(inst, trdCntrl);

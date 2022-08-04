@@ -12,6 +12,7 @@ SPDX-License-Identifier: MIT
 
 #include "DebugInfo/ScalarVISAModule.h"
 #include "DebugInfo/DwarfDebug.hpp"
+#include "DebugInfo/VISADebugInfo.hpp"
 #include "Compiler/CISACodeGen/DebugInfo.hpp"
 #include "llvm/IR/IntrinsicInst.h"
 
@@ -91,8 +92,10 @@ bool DebugInfoPass::runOnModule(llvm::Module& M)
         std::vector<std::pair<unsigned int, std::pair<llvm::Function*, IGC::VISAModule*>>> sortedVISAModules;
 
         // Sort modules in order of their placement in binary
-        DbgDecoder decodedDbg(m_currShader->ProgramOutput()->m_debugDataGenISA);
-        auto getGenOff = [&decodedDbg](std::vector<std::pair<unsigned int, unsigned int>>& data, unsigned int VISAIndex)
+        IGC::VISADebugInfo VisaDbgInfo(m_currShader->ProgramOutput()->m_debugDataGenISA);
+        const auto &decodedDbg = VisaDbgInfo.getRawDecodedData();
+        auto getGenOff = [&decodedDbg](const std::vector<std::pair<unsigned int, unsigned int>>& data,
+                                       unsigned int VISAIndex)
         {
             unsigned retval = 0;
             for (auto& item : data)
@@ -223,7 +226,7 @@ bool DebugInfoPass::runOnModule(llvm::Module& M)
             if (--size == 0)
                 finalize = true;
 
-            EmitDebugInfo(finalize, &decodedDbg);
+            EmitDebugInfo(finalize, VisaDbgInfo);
         }
 
         // set VISA dbg info to nullptr to indicate 1-step debug is enabled
@@ -237,7 +240,7 @@ bool DebugInfoPass::runOnModule(llvm::Module& M)
         if (finalize)
         {
             m_currShader->GetContext()->metrics.CollectDataFromDebugInfo(
-                &m_currShader->GetDebugInfoData(), &decodedDbg);
+                &m_currShader->GetDebugInfoData(), &VisaDbgInfo);
 
             IDebugEmitter::Release(m_pDebugEmitter);
         }
@@ -262,11 +265,12 @@ static void debugDump(const CShader* Shader, llvm::StringRef Ext,
     fclose(DumpFile);
 }
 
-void DebugInfoPass::EmitDebugInfo(bool finalize, DbgDecoder* decodedDbg)
+void DebugInfoPass::EmitDebugInfo(bool finalize,
+                                  const IGC::VISADebugInfo& VisaDbgInfo)
 {
     IGC_ASSERT(m_pDebugEmitter);
 
-    std::vector<char> buffer = m_pDebugEmitter->Finalize(finalize, decodedDbg);
+    std::vector<char> buffer = m_pDebugEmitter->Finalize(finalize, VisaDbgInfo);
 
     if (IGC_IS_FLAG_ENABLED(ShaderDumpEnable) || IGC_IS_FLAG_ENABLED(ElfDumpEnable))
         debugDump(m_currShader, "elf", { buffer.data(), buffer.size() });
@@ -287,64 +291,42 @@ void DebugInfoPass::EmitDebugInfo(bool finalize, DbgDecoder* decodedDbg)
 
 // Detect instructions with an address class pattern. Then remove all opcodes of this pattern from
 // this instruction's last operand (metadata of DIExpression).
-// Pattern 1: !DIExpression(DW_OP_constu, 4, DW_OP_swap, DW_OP_xderef)
-void DebugInfoData::extractAddressClass(llvm::Function& F, CShader* pShader, IDebugEmitter* pDebugEmitter)
+// Pattern: !DIExpression(DW_OP_constu, 4, DW_OP_swap, DW_OP_xderef)
+void DebugInfoData::extractAddressClass(llvm::Function& F)
 {
-    IGC_ASSERT_MESSAGE(pDebugEmitter, "Missing debug emitter");
-    VISAModule* visaModule = pDebugEmitter->getCurrentVISA();
-    IGC_ASSERT_MESSAGE(visaModule, "Missing visa module");
-
-    llvm::IRBuilder<> Builder(F.getParent()->getContext());
     DIBuilder di(*F.getParent());
 
     for (auto& bb : F)
     {
         for (auto& pInst : bb)
         {
-            if (isa<CallInst>(&pInst))
+            if (auto* DI = dyn_cast<DbgVariableIntrinsic>(&pInst))
             {
-                CallInst* CI = cast<CallInst>(&pInst);
-                IGC_ASSERT_MESSAGE(CI, "Missing call instruction");
-                if (!CI->arg_empty() &&
-                    CI->arg_size() >= 3 &&
-                    (CI->getIntrinsicID() == Intrinsic::dbg_declare || CI->getIntrinsicID() == Intrinsic::dbg_value))
+                const DIExpression* DIExpr = DI->getExpression();
+                llvm::SmallVector<uint64_t, 5> newElements;
+                for (auto I = DIExpr->expr_op_begin(), E = DIExpr->expr_op_end(); I != E; ++I)
                 {
-                    DIExpression* DIExpr = nullptr;
-                    if (auto* DDI = dyn_cast<DbgDeclareInst>(&pInst))
+                    if (I->getOp() == dwarf::DW_OP_constu)
                     {
-                        DIExpr = DDI->getExpression();
-                    }
-                    else if (auto* DVI = dyn_cast<DbgValueInst>(&pInst))
-                    {
-                        DIExpr = DVI->getExpression();
-                    }
-
-                    llvm::SmallVector<uint64_t, 5> Exprs;
-                    if (DIExpr)
-                    {
-                        auto numElements = DIExpr->getNumElements();
-                        // If DWARF opcodes in this call instruction's last operand,
-                        // which is metadata of DIExpression, match the pattern,
-                        // then prepare a new DIExpression with the same content
-                        // except the pattern's DWARF opcodes. The currently processed
-                        // instruction's last operand will be replaced with
-                        // this new DIExpression.
-                        if (numElements >= 4 &&
-                            DIExpr->getElement(numElements - 4) == dwarf::DW_OP_constu &&
-                            DIExpr->getElement(numElements - 2) == dwarf::DW_OP_swap &&
-                            DIExpr->getElement(numElements - 1) == dwarf::DW_OP_xderef)
+                        auto patternI = I;
+                        if (++patternI != E && patternI->getOp() == dwarf::DW_OP_swap &&
+                            ++patternI != E && patternI->getOp() == dwarf::DW_OP_xderef)
                         {
-                            for (unsigned int j = 0; j != numElements - 4; ++j)
-                            {
-                                Exprs.push_back(DIExpr->getElement(j));
-                            }
-
-                            DIExpression* newDIExpr = di.createExpression(Exprs);
-                            Value* newMD = MetadataAsValue::get(F.getContext(), newDIExpr);
-
-                            CI->setArgOperand(CI->getNumArgOperands() - 1, newMD);
+                            I = patternI;
+                            continue;
                         }
                     }
+                    I->appendToVector(newElements);
+                }
+
+                if (newElements.size() < DIExpr->getNumElements())
+                {
+                    DIExpression* newDIExpr = di.createExpression(newElements);
+#if LLVM_VERSION_MAJOR < 13
+                    DI->setArgOperand(2, MetadataAsValue::get(newDIExpr->getContext(), newDIExpr));
+#else
+                    DI->setExpression(newDIExpr);
+#endif
                 }
             }
         }
@@ -634,11 +616,12 @@ CatchAllLineNumber::~CatchAllLineNumber()
 
 bool CatchAllLineNumber::runOnFunction(llvm::Function& F)
 {
-    // Insert placeholder intrinsic instruction in each kernel.
+    // Insert placeholder intrinsic instruction in each kernel/stack call function.
     if (!F.getSubprogram() || F.isDeclaration())
         return false;
 
-    if (F.getCallingConv() != llvm::CallingConv::SPIR_KERNEL)
+    if (F.getCallingConv() != llvm::CallingConv::SPIR_KERNEL &&
+        !F.hasFnAttribute("visaStackCall"))
         return false;
 
     llvm::IRBuilder<> Builder(F.getParent()->getContext());

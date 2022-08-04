@@ -83,6 +83,8 @@ private:
     uint64_t writeZEInfo();
     // write .note.intelgt.compat section
     std::pair<uint64_t, uint64_t> writeCompatibilityNote();
+    // write .note.intelgt.compat section
+    std::pair<uint64_t, uint64_t> writeMetricsNote(uint64_t sizeRsrv, uint64_t* offset);
     // write string table
     uint64_t writeStrTab();
     // write section header
@@ -264,6 +266,20 @@ ZEELFObjectBuilder::addSectionMisc(std::string name, const uint8_t* data, uint64
 
     addStandardSection(sectName,
         data, size, SHT_ZEBIN_MISC, 0, 0, 0, m_otherStdSections);
+}
+
+void
+ZEELFObjectBuilder::addSectionMetrics(std::string name, const uint8_t* data, uint64_t size)
+{
+    // adjust the section name
+    std::string sectName;
+    if (name != "")
+        sectName = m_MetricsNoteName + "." + name;
+    else
+        sectName = m_MetricsNoteName;
+
+    addStandardSection(sectName,
+        data, size, ELF::SHT_NOTE, 0, 0, 0, m_otherStdSections);
 }
 
 void
@@ -596,6 +612,27 @@ std::pair<uint64_t, uint64_t> ELFWriter::writeCompatibilityNote() {
     return std::make_pair(start_off, m_W.OS.tell() - start_off);
 }
 
+std::pair<uint64_t, uint64_t> ELFWriter::writeMetricsNote(uint64_t sizeRsrv, uint64_t* offset) {
+    auto padToRequiredAlign = [&]() {
+        // The alignment of the Elf word, name and descriptor is 4.
+        // Implementations differ from the specification here: in practice all
+        // variants align both the name and descriptor to 4-bytes.
+        uint64_t cur = m_W.OS.tell();
+        uint64_t next = llvm::alignTo(cur, 4);
+        writePadding(next - cur);
+    };
+
+    // Align the section offset to the required alignment first.
+    // TODO: Handle the section alignment in a more generic place.
+    padToRequiredAlign();
+    uint64_t start_off = m_W.OS.tell();
+    *offset = start_off;
+    // Reserve space for metrics data
+    writePadding(sizeRsrv);
+
+    return std::make_pair(start_off, m_W.OS.tell() - start_off);
+}
+
 uint64_t ELFWriter::writeStrTab()
 {
     uint64_t start_off = m_W.OS.tell();
@@ -660,7 +697,8 @@ void ELFWriter::writeSections()
         }
         case ELF::SHT_PROGBITS:
         case SHT_ZEBIN_VISAASM:
-        case SHT_ZEBIN_SPIRV: {
+        case SHT_ZEBIN_SPIRV:
+        case SHT_ZEBIN_MISC: {
             IGC_ASSERT(nullptr != entry.section);
             IGC_ASSERT(entry.section->getKind() == Section::STANDARD);
             const StandardSection* const stdsect =
@@ -714,8 +752,26 @@ void ELFWriter::writeSections()
             break;
 
         case ELF::SHT_NOTE: {
-            if (entry.sectName == m_ObjBuilder.m_CompatNoteName)
+            // Currently we don't seem to reorder strings in the .strtab, and
+            // the offset returned by LLVM StringTableBuilder::add() will still
+            // be valid, so the section name can be checked in this way.
+            //  Other possibilities are: creating a new section kind and set
+            // the appropriate section pointer, or emitting .strtab before
+            // the note section.
+            if (entry.sectName == m_ObjBuilder.m_CompatNoteName) {
                 std::tie(entry.offset, entry.size) = writeCompatibilityNote();
+            }
+            if (entry.sectName == m_ObjBuilder.m_MetricsNoteName) {
+                uint64_t metricsDataBeginOffset = 0;
+                std::tie(entry.offset, entry.size) = writeMetricsNote(64, &metricsDataBeginOffset);
+                IGC_ASSERT(nullptr != entry.section);
+                IGC_ASSERT(entry.section->getKind() == Section::STANDARD);
+                const StandardSection* const stdsect =
+                    static_cast<const StandardSection*>(entry.section);
+                IGC_ASSERT(nullptr != stdsect);
+                if (stdsect->m_size + stdsect->m_padding > 0)
+                    entry.size = writeSectionData(stdsect->m_data, stdsect->m_size, stdsect->m_padding);
+            }
             break;
         }
 
@@ -759,8 +815,15 @@ void ELFWriter::writeHeader()
     // e_ident[EI_VERSION]
     m_W.OS << char(ELF::EV_CURRENT);
 
+    // e_ident[EI_OSABI]
+    m_W.OS << char(ELF::ELFOSABI_NONE);
+
+    // ABI version is hard coded right now. In future, if more ABI versions exist then revisit this.
+    // e_ident[EI_ABIVERSION]
+    m_W.OS << char(1);
+
     // e_ident padding
-    m_W.OS.write_zeros(ELF::EI_NIDENT - ELF::EI_OSABI);
+    m_W.OS.write_zeros(ELF::EI_NIDENT - ELF::EI_PAD);
 
     // e_type: Currently IGC always emits a relocatable file
     m_W.write<uint16_t>(ELF::ET_REL);
@@ -942,6 +1005,15 @@ zeInfoKernel& ZEInfoBuilder::createKernel(const std::string& name)
     return k;
 }
 
+// createFunction - create a zeInfoFunction and add it into zeInfoContainer
+zeInfoFunction& ZEInfoBuilder::createFunction(const std::string& name)
+{
+    mContainer.functions.emplace_back();
+    zeInfoFunction& f = mContainer.functions.back();
+    f.name = name;
+    return f;
+}
+
 bool ZEInfoBuilder::empty() const
 {
     return mContainer.kernels.empty();
@@ -956,7 +1028,8 @@ zeInfoPayloadArgument& ZEInfoBuilder::addPayloadArgumentByPointer(
     int32_t arg_index,
     PreDefinedAttrGetter::ArgAddrMode addrmode,
     PreDefinedAttrGetter::ArgAddrSpace addrspace,
-    PreDefinedAttrGetter::ArgAccessType access_type)
+    PreDefinedAttrGetter::ArgAccessType access_type,
+    int32_t alignment)
 {
     arg_list.emplace_back();
     zeInfoPayloadArgument& arg = arg_list.back();
@@ -967,6 +1040,13 @@ zeInfoPayloadArgument& ZEInfoBuilder::addPayloadArgumentByPointer(
     arg.addrmode = PreDefinedAttrGetter::get(addrmode);
     arg.addrspace = PreDefinedAttrGetter::get(addrspace);
     arg.access_type = PreDefinedAttrGetter::get(access_type);
+
+    if (addrmode == PreDefinedAttrGetter::ArgAddrMode::slm &&
+        addrspace == PreDefinedAttrGetter::ArgAddrSpace::local) {
+        arg.slm_alignment = alignment;
+    } else {
+        IGC_ASSERT_MESSAGE(alignment == 0, "Only expect a nonzero alignment for slm ptr now");
+    }
     return arg;
 }
 

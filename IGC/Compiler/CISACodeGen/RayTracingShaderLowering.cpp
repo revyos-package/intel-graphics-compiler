@@ -20,6 +20,7 @@ SPDX-License-Identifier: MIT
 #include "RayTracingShaderLowering.hpp"
 #include "AdaptorCommon/RayTracing/RTBuilder.h"
 #include "IGCPassSupport.h"
+#include "Compiler/CISACodeGen/EmitVISAPass.hpp"
 #include "common/LLVMWarningsPush.hpp"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/Module.h"
@@ -185,6 +186,7 @@ bool RayTracingShaderLowering::runOnModule(Module& M)
             case GenISAIntrinsic::GenISA_AsyncStackPtr:
             case GenISAIntrinsic::GenISA_SyncStackPtr:
             case GenISAIntrinsic::GenISA_SWStackPtr:
+            case GenISAIntrinsic::GenISA_rt_spill_anchor:
             {
                 DeadInsts.push_back(GII);
                 RTB.SetInsertPoint(GII);

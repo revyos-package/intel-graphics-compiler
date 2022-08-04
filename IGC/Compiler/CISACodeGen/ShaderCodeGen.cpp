@@ -26,6 +26,7 @@ SPDX-License-Identifier: MIT
 #include "Compiler/CISACodeGen/ScalarizerCodeGen.hpp"
 #include "Compiler/CISACodeGen/CodeSinking.hpp"
 #include "Compiler/CISACodeGen/AddressArithmeticSinking.hpp"
+#include "Compiler/CISACodeGen/SinkCommonOffsetFromGEP.h"
 #include "Compiler/CISACodeGen/HoistURBWrites.hpp"
 #include "Compiler/CISACodeGen/ConstantCoalescing.hpp"
 #include "Compiler/CISACodeGen/CheckInstrTypes.hpp"
@@ -72,6 +73,7 @@ SPDX-License-Identifier: MIT
 #include "Compiler/CISACodeGen/PromoteInt8Type.hpp"
 #include "Compiler/CISACodeGen/CalculateLocalIDs.hpp"
 #include "Compiler/CISACodeGen/PrepareLoadsStoresPass.h"
+#include "Compiler/CISACodeGen/HFpackingOpt.hpp"
 
 #include "Compiler/CISACodeGen/SLMConstProp.hpp"
 #include "Compiler/Optimizer/OpenCLPasses/DebuggerSupport/ImplicitGIDPass.hpp"
@@ -170,6 +172,7 @@ SPDX-License-Identifier: MIT
 #include "Compiler/SampleCmpToDiscard.h"
 #include "Compiler/Optimizer/IGCInstCombiner/IGCInstructionCombining.hpp"
 #include "DebugInfo.hpp"
+#include "AdaptorCommon/RayTracing/RayTracingPasses.hpp"
 #include "AdaptorCommon/RayTracing/RayTracingAddressSpaceAliasAnalysis.h"
 #include "Compiler/SamplerPerfOptPass.hpp"
 #include "Compiler/CISACodeGen/HalfPromotion.h"
@@ -477,6 +480,11 @@ static void AddLegalizationPasses(CodeGenContext& ctx, IGCPassManager& mpm, PSSi
         mpm.add(createCalculateLocalIDsPass());
     }
 
+    if (ctx.type == ShaderType::RAYTRACING_SHADER)
+    {
+        mpm.add(createLowerGlobalRootSignaturePass());
+    }
+
     if (ctx.type == ShaderType::PIXEL_SHADER)
     {
         mpm.add(new DiscardLowering());
@@ -572,7 +580,7 @@ static void AddLegalizationPasses(CodeGenContext& ctx, IGCPassManager& mpm, PSSi
         mpm.add(llvm::createAggressiveDCEPass());
         // TODO: we probably should be running other passes on the result
 
-        if (!IGC::ForceAlwaysInline())
+        if (!IGC::ForceAlwaysInline(&ctx))
         {
             mpm.add(new PurgeMetaDataUtils());
         }
@@ -602,15 +610,12 @@ static void AddLegalizationPasses(CodeGenContext& ctx, IGCPassManager& mpm, PSSi
 
     if (ctx.m_instrTypes.hasGenericAddressSpacePointers)
     {
-        if (!isOptDisabled &&
-            IGC_IS_FLAG_ENABLED(EnableGASResolver))
+        if (IGC_IS_FLAG_ENABLED(EnableGASResolver))
         {
             mpm.add(createSROAPass());
             mpm.add(createFixAddrSpaceCastPass());
             mpm.add(createResolveGASPass());
         }
-        if(IGC_IS_FLAG_ENABLED(DetectCastToGAS))
-            mpm.add(createCastToGASAnalysisPass());
         mpm.add(createGenericAddressDynamicResolutionPass());
     }
 
@@ -692,7 +697,8 @@ static void AddLegalizationPasses(CodeGenContext& ctx, IGCPassManager& mpm, PSSi
     {
         mpm.add(CreatePrivateMemoryResolution());
     }
-
+    // Should help MemOpt pass to merge more loads
+    mpm.add(createSinkCommonOffsetFromGEPPass());
     // Run MemOpt
     if (!isOptDisabled &&
         ctx.m_instrTypes.hasLoadStore && IGC_IS_FLAG_DISABLED(DisableMemOpt) && !ctx.getModuleMetaData()->disableMemOptforNegativeOffsetLoads) {
@@ -718,6 +724,13 @@ static void AddLegalizationPasses(CodeGenContext& ctx, IGCPassManager& mpm, PSSi
 
         mpm.add(createMemOptPass(AllowNegativeSymPtrsForLoad, AllowVector8LoadStore));
 
+        if (ctx.type == ShaderType::RAYTRACING_SHADER &&
+            static_cast<RayDispatchShaderContext&>(ctx).doSpillWidening())
+        {
+            mpm.add(createRTSpillShrinkPass());
+            mpm.add(createMemOptPass(AllowNegativeSymPtrsForLoad, AllowVector8LoadStore));
+        }
+
         if ((ctx.type == ShaderType::RAYTRACING_SHADER || ctx.hasSyncRTCalls())
             && IGC_IS_FLAG_ENABLED(EnableLSCCacheOptimization))
         {
@@ -732,6 +745,31 @@ static void AddLegalizationPasses(CodeGenContext& ctx, IGCPassManager& mpm, PSSi
         {
             mpm.add(new ImplicitGIDRestoring());
         }
+    }
+
+    if (ctx.type == ShaderType::RAYTRACING_SHADER)
+    {
+        if (IGC_IS_FLAG_ENABLED(EnableStackIDReleaseScheduling))
+            mpm.add(createStackIDSchedulingPass());
+        // This will help eliminate some redundant loads in some cases. Need
+        // to run this before create ldraw*/storeraw* intrinsics for raytracing
+        // memory.
+        mpm.add(createEarlyCSEPass());
+        if (IGC_IS_FLAG_DISABLED(DisableRTMemDSE))
+            mpm.add(createRayTracingMemDSEPass());
+        // Convert load/store to ldraw*/storeraw*
+        mpm.add(createRaytracingStatefulPass());
+        if (IGC_IS_FLAG_DISABLED(DisableRayTracingConstantCoalescing))
+        {
+            // block load RTGlobals
+            mpm.add(createRayTracingConstantCoalescingPass());
+        }
+        // lift raygen shader global and local pointer to inline data access.
+        mpm.add(CreateBindlessInlineDataPass());
+    }
+    else if (ctx.hasSyncRTCalls())
+    {
+        mpm.add(createRaytracingStatefulPass());
     }
 
     if (ctx.type == ShaderType::OPENCL_SHADER &&
@@ -764,9 +802,11 @@ static void AddLegalizationPasses(CodeGenContext& ctx, IGCPassManager& mpm, PSSi
 #if LLVM_VERSION_MAJOR >= 12
         mpm.add(createIPSCCPPass());
 #else
-        if (IGC_GET_FLAG_VALUE(FunctionControl) == FLAG_FCALL_DEFAULT)
+        if (!ctx.m_hasStackCalls)
         {
-            // Don't run IPConstantProp when debugging function calls, to avoid folding function arg/ret constants
+            // Don't run IPConstantProp when stackcalls are present.
+            // Let global constants be relocated inside stack funcs.
+            // We cannot process SLM constants inside stackcalls, so don't propagate them.
             mpm.add(createIPConstantPropagationPass());
         }
         mpm.add(createConstantPropagationPass());
@@ -782,6 +822,12 @@ static void AddLegalizationPasses(CodeGenContext& ctx, IGCPassManager& mpm, PSSi
     if (IGC_IS_FLAG_ENABLED(EnableSplitIndirectEEtoSel))
     {
         mpm.add(createSplitIndirectEEtoSelPass());
+    }
+
+    // This pass can create constant expression
+    if (ctx.m_DriverInfo.HasDoubleLoadStore())
+    {
+        mpm.add(new HandleLoadStoreInstructions());
     }
 
     // Split big vector & 3-element load/store, etc.
@@ -814,6 +860,8 @@ static void AddLegalizationPasses(CodeGenContext& ctx, IGCPassManager& mpm, PSSi
     }
     else
     {
+        // Also break and lower GEP constexpr.
+        mpm.add(new BreakConstantExpr());
         mpm.add(createGEPLoweringPass());
     }
 
@@ -857,7 +905,10 @@ static void AddLegalizationPasses(CodeGenContext& ctx, IGCPassManager& mpm, PSSi
         }
     }
 
-    if (IGC_IS_FLAG_ENABLED(ForceHalfPromotion) ||
+    // Enabling half promotion AIL for compute shaders only at this point. 
+    // If needed ctx.type check can be removed to apply for all shader types
+    if (IGC_IS_FLAG_ENABLED(ForceHalfPromotion) || 
+        (ctx.getModuleMetaData()->compOpt.WaForceHalfPromotion && ctx.type == ShaderType::COMPUTE_SHADER) ||
         (!ctx.platform.supportFP16() && IGC_IS_FLAG_ENABLED(EnableHalfPromotion)))
     {
         mpm.add(new HalfPromotion());
@@ -869,12 +920,6 @@ static void AddLegalizationPasses(CodeGenContext& ctx, IGCPassManager& mpm, PSSi
     if (ctx.m_DriverInfo.benefitFromTypeDemotion() &&
         IGC_IS_FLAG_ENABLED(EnableTypeDemotion)) {
         mpm.add(createTypeDemotePass());
-    }
-
-    // This pass can create constant expression
-    if (ctx.m_DriverInfo.HasDoubleLoadStore())
-    {
-        mpm.add(new HandleLoadStoreInstructions());
     }
 
     // Do Genx strengthreduction (do things like fdiv -> inv + mul)
@@ -927,6 +972,9 @@ static void AddLegalizationPasses(CodeGenContext& ctx, IGCPassManager& mpm, PSSi
 
     if (ctx.type == ShaderType::RAYTRACING_SHADER)
     {
+        if (ctx.platform.WaPredicatedStackIDRelease())
+            mpm.add(createRayTracingPredicatedStackIDReleasePass());
+
         if (IGC_IS_FLAG_DISABLED(DisableRTFenceElision))
             mpm.add(createSynchronizationObjectCoalescing());
     }
@@ -974,8 +1022,11 @@ static void AddLegalizationPasses(CodeGenContext& ctx, IGCPassManager& mpm, PSSi
         }
     }
 
-    // Legalize RuntimeValue calls for push analysis
-    mpm.add(new RuntimeValueLegalizationPass());
+    if (ctx.m_instrTypes.hasRuntimeValueVector)
+    {
+        // Legalize RuntimeValue calls for push analysis
+        mpm.add(new RuntimeValueLegalizationPass());
+    }
 
     mpm.add(createInstSimplifyLegacyPass());
     // This pass inserts bitcasts for vector loads/stores.
@@ -1196,6 +1247,11 @@ void CodeGen(DomainShaderContext* ctx, CShaderProgram::KernelShaderMap& shaders)
 // check based on performance measures.
 static bool SimdEarlyCheck(CodeGenContext* ctx)
 {
+    if (ctx->m_instrTypes.numPsInputs > 22 && ctx->m_instrTypes.numInsts > 1000)
+    {
+        return false;
+    }
+
     if (ctx->m_sampler < 11 || ctx->m_inputCount < 16 || ctx->m_tempCount < 40 || ctx->m_dxbcCount < 280 || ctx->m_ConstantBufferCount < 500)
     {
         if (ctx->m_tempCount < 90 && ctx->m_ConstantBufferCount < 210)
@@ -1934,7 +1990,10 @@ void OptimizeIR(CodeGenContext* const pContext)
             mpm.add(createIPSCCPPass());
 #else
             mpm.add(createConstantPropagationPass());
-            mpm.add(createIPConstantPropagationPass());
+
+            // Don't run IPConstantProp if there are stackcalls
+            if (!pContext->m_hasStackCalls)
+                mpm.add(createIPConstantPropagationPass());
 #endif
         }
 
@@ -2003,6 +2062,12 @@ void OptimizeIR(CodeGenContext* const pContext)
         mpm.add(createLogicalAndToBranchPass());
         mpm.add(llvm::createEarlyCSEPass());
 
+        if (IGC_IS_FLAG_ENABLED(EnableHFpacking) &&
+            pContext->type == ShaderType::COMPUTE_SHADER)
+        {
+            mpm.add(createHFpackingOptPass());
+        }
+
         if (pContext->m_instrTypes.CorrelatedValuePropagationEnable)
         {
             mpm.add(llvm::createCorrelatedValuePropagationPass());
@@ -2010,10 +2075,6 @@ void OptimizeIR(CodeGenContext* const pContext)
 
         mpm.add(new BreakConstantExpr());
         mpm.add(new IGCConstProp());
-
-        // Optimize extracts from RuntimeValue vectors
-        mpm.add(new RuntimeValueVectorExtractPass());
-
         mpm.add(new CustomSafeOptPass());
         if (!pContext->m_DriverInfo.WADisableCustomPass())
         {
@@ -2050,7 +2111,8 @@ void OptimizeIR(CodeGenContext* const pContext)
 
         bool disableGOPT = ( (IsStage1FastestCompile(pContext->m_CgFlag, pContext->m_StagingCtx) ||
                                IGC_GET_FLAG_VALUE(ForceFastestSIMD)) &&
-                             (IGC_GET_FLAG_VALUE(FastestS1Experiments) & FCEXP_DISABLE_GOPT));
+                             ((IGC_GET_FLAG_VALUE(FastestS1Experiments) & FCEXP_DISABLE_GOPT) ||
+                               pContext->getModuleMetaData()->compOpt.DisableFastestGopt));
 
         if (pContext->m_instrTypes.hasMultipleBB && !disableGOPT)
         {
@@ -2108,7 +2170,17 @@ void OptimizeIR(CodeGenContext* const pContext)
                     LoopUnrollThreshold = IGC_GET_FLAG_VALUE(SetLoopUnrollThreshold);
                 }
 
-                if (LoopUnrollThreshold > 0 && !IGC_IS_FLAG_ENABLED(DisableLoopUnroll))
+                // if the shader contains indexable_temp, we'll keep unroll
+                bool unroll = IGC_IS_FLAG_DISABLED(DisableLoopUnroll);
+                bool hasIndexTemp = (pContext->m_indexableTempSize[0] > 0);
+                bool disableLoopUnrollStage1 =
+                    IsStage1FastestCompile(pContext->m_CgFlag, pContext->m_StagingCtx) &&
+                       (IGC_GET_FLAG_VALUE(FastestS1Experiments) == FCEXP_NO_EXPRIMENT ||
+                        (IGC_GET_FLAG_VALUE(FastestS1Experiments) & FCEXP_DISABLE_UNROLL));
+                if ((LoopUnrollThreshold > 0 &&
+                     unroll &&
+                     !disableLoopUnrollStage1)
+                    || hasIndexTemp)
                 {
                     mpm.add(IGCLLVM::createLoopUnrollPass());
                 }
@@ -2288,8 +2360,16 @@ void OptimizeIR(CodeGenContext* const pContext)
             mpm.add(createInsertBranchOptPass());
         }
 
+        if (pContext->m_instrTypes.hasRuntimeValueVector)
+        {
+            // Optimize extracts from RuntimeValue vectors. It should be executed
+            // after constants propagation and loop unrolling
+            mpm.add(createVectorBitCastOptPass());
+            mpm.add(new RuntimeValueVectorExtractPass());
+        }
+
         if (pContext->m_enableSubroutine &&
-            IGC_GET_FLAG_VALUE(FunctionControl) == FLAG_FCALL_DEFAULT)
+            getFunctionControl(pContext) == FLAG_FCALL_DEFAULT)
         {
             mpm.add(createEstimateFunctionSizePass(EstimateFunctionSize::AL_Kernel));
             mpm.add(createSubroutineInlinerPass());
@@ -2358,7 +2438,7 @@ void OptimizeIR(CodeGenContext* const pContext)
 
         mpm.add(CreateGatingSimilarSamples());
 
-        if (!IGC::ForceAlwaysInline())
+        if (!IGC::ForceAlwaysInline(pContext))
         {
             mpm.add(new PurgeMetaDataUtils());
         }
@@ -2373,6 +2453,11 @@ void OptimizeIR(CodeGenContext* const pContext)
         if (pContext->m_instrTypes.numOfLoop)
         {
             mpm.add(createDeadPHINodeEliminationPass());
+        }
+
+
+        if (IGC_IS_FLAG_ENABLED(EnableMadLoopSlice)) {
+            mpm.add(createMadLoopSlicePass());
         }
 
         mpm.run(*pContext->getModule());

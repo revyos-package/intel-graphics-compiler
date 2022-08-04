@@ -25,6 +25,7 @@ namespace IGC
 namespace vISA
 {
     struct ZESymEntry;
+    struct ZEFuncAttribEntry;
 }
 
 namespace iOpenCL
@@ -38,13 +39,19 @@ public:
     // Setup ZEBin platform, and ELF header information. The program scope information
     // is also be parsed from SOpenCLProgramInfo in the constructor
     ZEBinaryBuilder(const PLATFORM plat, bool is64BitPointer,
-        const IGC::SOpenCLProgramInfo& programInfo, const uint8_t* spvData, uint32_t spvSize);
+        const IGC::SOpenCLProgramInfo& programInfo,
+        const uint8_t* spvData,      uint32_t spvSize,
+        const uint8_t* metricsData,  uint32_t metricsSize,
+        const uint8_t* buildOptions, uint32_t buildOptionsSize);
 
     // Set the ProductFamily as the specified value.
     void setProductFamily(PRODUCT_FAMILY value);
 
     // Set the GfxCoreFamily as the specified value.
     void setGfxCoreFamily(GFXCORE_FAMILY value);
+
+    // Pair of name for the section (1st elem) and VISA asm text (2nd elem).
+    using NamedVISAAsm = std::pair<std::string, std::string>;
 
     /// add kernel information. Also create kernel metadata information for .ze_info
     /// This function can be called several times for adding different kernel information
@@ -56,7 +63,7 @@ public:
         const IGC::SOpenCLKernelInfo& annotations,
         const uint32_t grfSize,
         const IGC::CBTILayout& layout,
-        const std::string& visaasm,
+        const std::vector<NamedVISAAsm>& visaasm,
         bool isProgramDebuggable);
 
     // getElfSymbol - find a symbol name in ELF binary and return a symbol entry
@@ -95,8 +102,14 @@ private:
     /// add spir-v section
     void addSPIRV(const uint8_t* data, uint32_t size);
 
+    /// add miscellaneous info section (section with SHT_ZEBIN_MISC type)
+    void addMiscInfoSection(std::string sectName, const uint8_t* data, uint32_t size);
+
     /// add runtime symbols
     void addRuntimeSymbols();
+
+    /// add note section for IGC metrics
+    void addMetrics(const uint8_t* data, uint32_t size);
 
     /// add program scope symbols (e.g. symbols defined in global/const buffer)
     void addProgramSymbols(const IGC::SOpenCLProgramInfo& annotations);
@@ -110,9 +123,14 @@ private:
         const std::string& kernelName, const char* kernelBinary,
         unsigned int kernelBinarySize);
 
-    /// add execution environment
+    /// add kernel execution environment
     void addKernelExecEnv(const IGC::SOpenCLKernelInfo& annotations,
                           zebin::zeInfoKernel& zeinfoKernel);
+
+    /// add execution environment for external function
+    void addFunctionExecEnv(const IGC::SOpenCLKernelInfo& annotations,
+                            const vISA::ZEFuncAttribEntry& zeFuncAttr,
+                            zebin::zeInfoFunction& zeFunction);
 
     /// add experimental properties
     void addKernelExperimentalProperties(const IGC::SOpenCLKernelInfo& annotations,
@@ -159,6 +177,9 @@ private:
     /// Add everything used to be in patch token iOpenCL::PATCH_TOKEN_GTPIN_INFO
     /// into gtpin_info section
     void addGTPinInfo(const IGC::SOpenCLKernelInfo& annotations);
+
+    /// Add function attributes for external functions.
+    void addFunctionAttrs(const IGC::SOpenCLKernelInfo& annotations);
 
     /// ------------ Verifier sub-functions ------------
     bool hasSystemKernel(

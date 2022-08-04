@@ -29,6 +29,7 @@ endif()
 
 # In Prebuild mode there is nothing to do here for now.
 if(IGC_OPTION__CLANG_MODE STREQUAL PREBUILDS_MODE_NAME)
+  message(STATUS "[Clang] Will use Clang prebuilds")
   return()
 endif()
 
@@ -38,6 +39,8 @@ if(NOT IGC_OPTION__CLANG_MODE)
   if(EXISTS "${DEFAULT_IGC_CLANG_SOURCES_DIR}")
     set(IGC_OPTION__CLANG_SOURCES_DIR "${DEFAULT_IGC_CLANG_SOURCES_DIR}")
   else()
+    message(STATUS "[Clang] No mode was specified and the default IGC Clang source dir not exist. Try take Clang from system")
+    set(IGC_TRY_TO_TAKE_CLANG_FROM_SYSTEM ON)
     return()
   endif()
 endif()

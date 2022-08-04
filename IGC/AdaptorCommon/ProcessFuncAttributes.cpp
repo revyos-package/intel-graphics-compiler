@@ -18,6 +18,7 @@ SPDX-License-Identifier: MIT
 #include "common/LLVMWarningsPush.hpp"
 
 #include "llvm/IR/Attributes.h"
+#include "llvmWrapper/IR/InstrTypes.h"
 #include "llvmWrapper/IR/Instructions.h"
 
 #include <llvm/Pass.h>
@@ -253,7 +254,7 @@ bool ProcessFuncAttributes::runOnModule(Module& M)
     CodeGenContext* pCtx = getAnalysis<CodeGenContextWrapper>().getCodeGenContext();
     EstimateFunctionSize& efs = getAnalysis<EstimateFunctionSize>();
     bool isOptDisable = getAnalysis<MetaDataUtilsWrapper>().getModuleMetaData()->compOpt.OptDisable;
-    auto FCtrl = IGC_GET_FLAG_VALUE(FunctionControl);
+    auto FCtrl = getFunctionControl(pCtx);
 
     std::set<llvm::Function *> fastMathFunct;
     GlobalVariable *gv_fastMath = M.getGlobalVariable("__FastRelaxedMath", true);
@@ -379,12 +380,12 @@ bool ProcessFuncAttributes::runOnModule(Module& M)
                 // Go through call sites and remove NoInline atrributes.
                 // Verifier fails if a call has optnone but not noinline, so if we remove noinline, we must also remove optnone
                 if (callInst->hasFnAttr(llvm::Attribute::NoInline)) {
-                    callInst->removeAttribute(AttributeList::FunctionIndex, llvm::Attribute::NoInline);
-                    callInst->removeAttribute(AttributeList::FunctionIndex, llvm::Attribute::OptimizeNone);
+                    IGCLLVM::removeFnAttr(callInst, llvm::Attribute::NoInline);
+                    IGCLLVM::removeFnAttr(callInst, llvm::Attribute::OptimizeNone);
                 }
                 // Remove AlwaysInline at callsites
                 if (isOptDisable && callInst->hasFnAttr(llvm::Attribute::AlwaysInline)) {
-                    callInst->removeAttribute(AttributeList::FunctionIndex, llvm::Attribute::AlwaysInline);
+                    IGCLLVM::removeFnAttr(callInst, llvm::Attribute::AlwaysInline);
                 }
             }
         }
@@ -581,6 +582,12 @@ bool ProcessFuncAttributes::runOnModule(Module& M)
                 SetNoInline(F);
             }
 
+            if (IGC_IS_FLAG_ENABLED(PartitionUnit) && efs.isStackCallAssigned(F))
+            {
+                F->addFnAttr("visaStackCall");
+                SetNoInline(F);
+            }
+
             if (!F->hasFnAttribute(llvm::Attribute::NoInline) &&
                 IGC_IS_FLAG_DISABLED(DisableAddingAlwaysAttribute))
             {
@@ -600,7 +607,7 @@ bool ProcessFuncAttributes::runOnModule(Module& M)
                 }
                 if (shouldAlwaysInline)
                 {
-                    if (IGC_IS_FLAG_ENABLED(ControlKernelTotalSize) &&
+                    if ((IGC_IS_FLAG_ENABLED(ControlKernelTotalSize) || IGC_IS_FLAG_ENABLED(ControlUnitSize)) &&
                         efs.shouldEnableSubroutine() &&
                         efs.isTrimmedFunction(F))
                     {
@@ -663,43 +670,60 @@ bool ProcessFuncAttributes::runOnModule(Module& M)
     auto SelectFCtrl = IGC_GET_FLAG_VALUE(SelectiveFunctionControl);
     if (SelectFCtrl != FLAG_FCALL_DEFAULT)
     {
-        std::ifstream inputFile(IGC::Debug::GetFunctionDebugFile());
-        if (inputFile.is_open())
+        if (SelectFCtrl == FLAG_FCALL_DUMP_CALLABLE_FUNCTIONS)
         {
-            std::string line;
-            while (std::getline(inputFile, line))
+            // Dump all callable function names
+            std::ofstream outputFile(IGC::Debug::GetFunctionDebugFile());
+            if (outputFile.is_open())
             {
-                if (Function* F = M.getFunction(line))
+                for (auto& F : M)
                 {
-                    if (SelectFCtrl == FLAG_FCALL_FORCE_INLINE)
-                    {
-                        F->removeFnAttr("referenced-indirectly");
-                        F->removeFnAttr("visaStackCall");
-                        SetAlwaysInline(F);
-                    }
-                    else if (SelectFCtrl == FLAG_FCALL_FORCE_SUBROUTINE)
-                    {
-                        F->removeFnAttr("referenced-indirectly");
-                        F->removeFnAttr("visaStackCall");
-                        SetNoInline(F);
-                    }
-                    else if (SelectFCtrl == FLAG_FCALL_FORCE_STACKCALL)
-                    {
-                        F->removeFnAttr("referenced-indirectly");
-                        F->addFnAttr("visaStackCall");
-                        SetNoInline(F);
-                    }
-                    else if (SelectFCtrl == FLAG_FCALL_FORCE_INDIRECTCALL)
-                    {
-                        pCtx->m_enableFunctionPointer = true;
-                        F->addFnAttr("referenced-indirectly");
-                        F->addFnAttr("visaStackCall");
-                        F->setLinkage(GlobalValue::ExternalLinkage);
-                        SetNoInline(F);
-                    }
+                    if (!F.isDeclaration() && !isEntryFunc(pMdUtils , &F))
+                        outputFile << F.getName().str() << std::endl;
                 }
             }
-            inputFile.close();
+            outputFile.close();
+        }
+        else
+        {
+            std::ifstream inputFile(IGC::Debug::GetFunctionDebugFile());
+            if (inputFile.is_open())
+            {
+                std::string line;
+                while (std::getline(inputFile, line))
+                {
+                    if (Function* F = M.getFunction(line))
+                    {
+                        if (SelectFCtrl == FLAG_FCALL_FORCE_INLINE)
+                        {
+                            F->removeFnAttr("referenced-indirectly");
+                            F->removeFnAttr("visaStackCall");
+                            SetAlwaysInline(F);
+                        }
+                        else if (SelectFCtrl == FLAG_FCALL_FORCE_SUBROUTINE)
+                        {
+                            F->removeFnAttr("referenced-indirectly");
+                            F->removeFnAttr("visaStackCall");
+                            SetNoInline(F);
+                        }
+                        else if (SelectFCtrl == FLAG_FCALL_FORCE_STACKCALL)
+                        {
+                            F->removeFnAttr("referenced-indirectly");
+                            F->addFnAttr("visaStackCall");
+                            SetNoInline(F);
+                        }
+                        else if (SelectFCtrl == FLAG_FCALL_FORCE_INDIRECTCALL)
+                        {
+                            pCtx->m_enableFunctionPointer = true;
+                            F->addFnAttr("referenced-indirectly");
+                            F->addFnAttr("visaStackCall");
+                            F->setLinkage(GlobalValue::ExternalLinkage);
+                            SetNoInline(F);
+                        }
+                    }
+                }
+                inputFile.close();
+            }
         }
     }
 
@@ -725,7 +749,7 @@ bool ProcessFuncAttributes::runOnModule(Module& M)
         {
             IGC_ASSERT_MESSAGE(0, "Recursion detected but not enabled!");
         }
-        if (IGC::ForceAlwaysInline())
+        if (IGC::ForceAlwaysInline(pCtx))
         {
             IGC_ASSERT_MESSAGE(0, "Cannot have recursion when forcing inline!");
         }
@@ -796,7 +820,8 @@ ModulePass *createProcessBuiltinMetaDataPass()
 
 bool ProcessBuiltinMetaData::runOnModule(Module& M)
 {
-    if (IGC::ForceAlwaysInline())
+    CodeGenContext* pCtx = getAnalysis<CodeGenContextWrapper>().getCodeGenContext();
+    if (IGC::ForceAlwaysInline(pCtx))
     {
         return false;
     }

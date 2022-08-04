@@ -1,6 +1,6 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (C) 2017-2021 Intel Corporation
+Copyright (C) 2017-2022 Intel Corporation
 
 SPDX-License-Identifier: MIT
 
@@ -389,12 +389,12 @@ int CISA_IR_Builder::AddKernel(VISAKernel *& kernel, const char* kernelName)
         return VISA_FAILURE;
     }
 
-    VISAKernelImpl * kerneltemp = new (m_mem) VISAKernelImpl(VISA_BUILD_TYPE::KERNEL, this, kernelName);
+    unsigned int funcId = this->m_kernel_count++;
+    VISAKernelImpl * kerneltemp = new (m_mem) VISAKernelImpl(VISA_BUILD_TYPE::KERNEL, this, kernelName, funcId);
     kernel = static_cast<VISAKernel*>(kerneltemp);
     m_kernel = kerneltemp;
 
     m_kernelsAndFunctions.push_back(kerneltemp);
-    this->m_kernel_count++;
     this->m_nameToKernel[kernelName] = m_kernel;
 
     if (m_builderMode == vISA_ASM_WRITER)
@@ -423,11 +423,11 @@ int CISA_IR_Builder::AddFunction(VISAFunction *& function, const char* functionN
         return VISA_FAILURE;
     }
 
-    VISAKernelImpl* kerneltemp = new (m_mem) VISAKernelImpl(VISA_BUILD_TYPE::FUNCTION, this, functionName);
+    unsigned int funcId = this->m_function_count++;
+    VISAKernelImpl* kerneltemp = new (m_mem) VISAKernelImpl(VISA_BUILD_TYPE::FUNCTION, this, functionName, funcId);
     function = static_cast<VISAFunction*>(kerneltemp);
     m_kernel = kerneltemp;
     m_kernelsAndFunctions.push_back(kerneltemp);
-    m_kernel->m_functionId = this->m_function_count++;
     this->m_nameToKernel[functionName] = m_kernel;
 
     if (m_builderMode == vISA_ASM_WRITER)
@@ -447,11 +447,11 @@ int CISA_IR_Builder::AddPayloadSection(VISAFunction *& function, const char* fun
         return VISA_FAILURE;
     }
 
-    VISAKernelImpl* kerneltemp = new (m_mem) VISAKernelImpl(VISA_BUILD_TYPE::PAYLOAD, this, functionName);
+    unsigned int funcId = this->m_function_count++;
+    VISAKernelImpl* kerneltemp = new (m_mem) VISAKernelImpl(VISA_BUILD_TYPE::PAYLOAD, this, functionName, funcId);
     function = static_cast<VISAFunction*>(kerneltemp);
     m_kernel = kerneltemp;
     m_kernelsAndFunctions.push_back(kerneltemp);
-    m_kernel->m_functionId = this->m_function_count++;
     this->m_nameToKernel[functionName] = m_kernel;
 
     return VISA_SUCCESS;
@@ -660,7 +660,7 @@ void CISA_IR_Builder::ProcessSgInvokeList(
     }
 }
 
-#define DEBUG_LTO
+//#define DEBUG_LTO
 #ifdef DEBUG_LTO
 #define DEBUG_PRINT(msg) \
     std::cerr << __LINE__ << " " << msg;
@@ -682,6 +682,7 @@ void CISA_IR_Builder::LinkTimeOptimization(
     std::set<G4_Kernel*> visited;
     std::list<G4_INST*> dummyContainer;
     unsigned int raUID = 0;
+    unsigned int funcUID = 0;
 
     // append instructions from callee to caller
     for (auto& [callee, sgInvokeList] : callee2Callers)
@@ -724,7 +725,6 @@ void CISA_IR_Builder::LinkTimeOptimization(
             {
                 auto& calleeBuilder = callee->fg.builder;
                 auto& callerBuilder = caller->fg.builder;
-                const RegionDesc *rDesc = callerBuilder->getRegionStride1();
                 replacedArgDcl = replacedArgDcl ?
                     replacedArgDcl :
                     callerBuilder->createDeclareNoLookup("newArg", G4_GRF, callerBuilder->numEltPerGRF<Type_UD>(), 32, Type_UD);
@@ -747,7 +747,7 @@ void CISA_IR_Builder::LinkTimeOptimization(
                                     replacedArgDcl->getRegVar(),
                                     src->asSrcRegRegion()->getRegOff(),
                                     src->asSrcRegRegion()->getSubRegOff(),
-                                    rDesc,
+                                    src->asSrcRegRegion()->getRegion(),
                                     src->getType());
                             inst->setSrc(replacedArgSrc, i);
                         }
@@ -758,6 +758,18 @@ void CISA_IR_Builder::LinkTimeOptimization(
                     G4_Declare* topDcl = dst->getTopDcl();
                     if (!topDcl) continue;
                     G4_Declare* rootDcl = topDcl->getRootDeclare();
+
+                    if (calleeBuilder->isPreDefArg(rootDcl))
+                    {
+                        G4_DstRegRegion *replacedArgDst = callerBuilder->createDst(
+                                replacedArgDcl->getRegVar(),
+                                dst->asDstRegRegion()->getRegOff(),
+                                dst->asDstRegRegion()->getSubRegOff(),
+                                dst->asDstRegRegion()->getHorzStride(),
+                                dst->getType());
+                        inst->setDest(replacedArgDst);
+                    }
+
                     if (calleeBuilder->isPreDefRet(rootDcl))
                     {
                         G4_DstRegRegion *replacedRetDst = callerBuilder->createDst(
@@ -770,8 +782,18 @@ void CISA_IR_Builder::LinkTimeOptimization(
                     }
 
                 }
-                for (G4_INST* inst : callerInsts)
+
+                // Trace backward from callsite to replace Arg with newArg
+                auto rIt = it;
+                rIt --;
+                for (; rIt != callerInsts.begin(); --rIt)
                 {
+                    G4_INST *inst = *rIt;
+                    if (inst->opcode() == G4_pseudo_fcall ||
+                        inst->opcode() == G4_call)
+                    {
+                        break;
+                    }
                     G4_Operand *dst = inst->getDst();
                     if (!dst) continue;
                     G4_Declare* topDcl = dst->getTopDcl();
@@ -779,15 +801,28 @@ void CISA_IR_Builder::LinkTimeOptimization(
                     G4_Declare* rootDcl = topDcl->getRootDeclare();
                     if (callerBuilder->isPreDefArg(rootDcl))
                     {
+                        G4_Declare* dcl = dst->getBase()->asRegVar()->getDeclare();
+                        G4_Declare* newDcl = callerBuilder->createTempVar(dcl->getTotalElems(), dcl->getElemType(), Any, dcl->getName());
+                        newDcl->setAliasDeclare(replacedArgDcl, dcl->getAliasOffset());
                         G4_DstRegRegion *replacedArgDst = callerBuilder->createDst(
-                                replacedArgDcl->getRegVar(),
+                                newDcl->getRegVar(),
                                 dst->asDstRegRegion()->getRegOff(),
                                 dst->asDstRegRegion()->getSubRegOff(),
                                 dst->asDstRegRegion()->getHorzStride(),
                                 dst->getType());
                         inst->setDest(replacedArgDst);
                     }
-
+                }
+                auto fIt = it;
+                fIt++;
+                for (; fIt != callerInsts.end(); ++fIt)
+                {
+                    G4_INST *inst = *fIt;
+                    if (inst->opcode() == G4_pseudo_fcall ||
+                        inst->opcode() == G4_call)
+                    {
+                        break;
+                    }
                     for (int i = 0, numSrc = inst->getNumSrc(); i < numSrc; ++i)
                     {
                         G4_Operand *src = inst->getSrc(i);
@@ -801,7 +836,7 @@ void CISA_IR_Builder::LinkTimeOptimization(
                                     replacedRetDcl->getRegVar(),
                                     src->asSrcRegRegion()->getRegOff(),
                                     src->asSrcRegRegion()->getSubRegOff(),
-                                    rDesc,
+                                    src->asSrcRegRegion()->getRegion(),
                                     src->getType());
                             inst->setSrc(replacedRetSrc, i);
                         }
@@ -813,6 +848,8 @@ void CISA_IR_Builder::LinkTimeOptimization(
             std::map<G4_Declare*, long long> stackPointers;
             // A hash map to record where the instruction is on defs
             std::map<G4_Declare*, std::list<vISA::G4_INST*>::iterator> defInst;
+            // A set of operand to avoid cloning due to S2L
+            std::set<G4_Declare*> avoidCloning;
 
             if (removeStackArg)
             {
@@ -890,6 +927,30 @@ void CISA_IR_Builder::LinkTimeOptimization(
                     }
                     return it;
                 };
+                std::function<void(G4_Operand *, INST_LIST&, G4_Declare*)> removeDeadCode;
+                removeDeadCode = [&](G4_Operand *src, INST_LIST& instList, G4_Declare* stopDcl)
+                {
+                    if (!src ||
+                        src->getTopDcl() == stopDcl ||
+                        defInst.find(src->getTopDcl()) == defInst.end())
+                    {
+                        return;
+                    }
+                    auto instIt = defInst[src->getTopDcl()];
+                    G4_INST *inst = *instIt;
+                    if (static_cast<int>(inst->getExecSize() != 1))
+                    {
+                        return;
+                    }
+                    if (inst->opcode() == G4_mov ||
+                        inst->opcode() == G4_add)
+                    {
+                        DEBUG_PRINT("removeFrame (" << stackPointers[src->getTopDcl()] << ") ");
+                        DEBUG_UTIL(inst->dump());
+                        instList.erase(instIt);
+                        removeDeadCode(inst->getSrc(0), instList, stopDcl);
+                    }
+                };
 
                 // A list of store in order to perform store-to-load forwarding
                 std::list<std::list<vISA::G4_INST*>::iterator> storeList;
@@ -908,15 +969,8 @@ void CISA_IR_Builder::LinkTimeOptimization(
                         {
                             stackPointers[dst->getTopDcl()] = getPointerOffset(inst, stackPointers[rootDcl]);
                             defInst[dst->getTopDcl()] = callerIt;
-                            // beginIt is the update of SP before pushing arguments onto stack
-                            // We do not remove it immediately since we don't know if all S2L can be perform at this stage
-                            std::string prefix = (removeStackFrame && callerIt != beginIt) ? "removeFrame " : "";
-                            DEBUG_PRINT(prefix << "(" << stackPointers[dst->getTopDcl()] << ") ");
+                            DEBUG_PRINT("(" << stackPointers[dst->getTopDcl()] << ") ");
                             DEBUG_UTIL(inst->dump());
-                            if (removeStackFrame && callerIt != beginIt)
-                            {
-                                callerInsts.erase(callerIt);
-                            }
                         }
                         else if (stackPointers.find(rootDcl) != stackPointers.end())
                         {
@@ -969,14 +1023,8 @@ void CISA_IR_Builder::LinkTimeOptimization(
                         {
                             stackPointers[dst->getTopDcl()] = getPointerOffset(inst, stackPointers[rootDcl]);
                             defInst[dst->getTopDcl()] = calleeIt;
-                            std::string prefix = removeStackFrame ? "removeFrame " : "";
-                            DEBUG_PRINT(prefix << "(" << stackPointers[dst->getTopDcl()] << ") ");
+                            DEBUG_PRINT("(" << stackPointers[dst->getTopDcl()] << ") ");
                             DEBUG_UTIL(inst->dump());
-                            if (removeStackFrame)
-                            {
-                                calleeInsts.erase(calleeIt);
-                                break;
-                            }
                         }
                         else if (stackPointers.find(rootDcl) != stackPointers.end())
                         {
@@ -987,14 +1035,8 @@ void CISA_IR_Builder::LinkTimeOptimization(
                                 assert(execSize == 1);
                                 stackPointers[dst->getTopDcl()] = getPointerOffset(inst, offset);
                                 defInst[dst->getTopDcl()] = calleeIt;
-                                std::string prefix = removeStackFrame ? "removeFrame " : "";
-                                DEBUG_PRINT(prefix << "(" << stackPointers[dst->getTopDcl()] << ") ");
+                                DEBUG_PRINT("(" << stackPointers[dst->getTopDcl()] << ") ");
                                 DEBUG_UTIL(inst->dump());
-                                if (removeStackFrame)
-                                {
-                                    calleeInsts.erase(calleeIt);
-                                    break;
-                                }
                             }
                             else if (inst->opcode() == G4_sends ||
                                     inst->opcode() == G4_send)
@@ -1008,11 +1050,25 @@ void CISA_IR_Builder::LinkTimeOptimization(
                                         DEBUG_PRINT("remove prevFP on callee's frame:\n");
                                         DEBUG_UTIL(inst->dump());
                                         calleeInsts.erase(calleeIt);
+                                        removeDeadCode(inst->getSrc(0), calleeInsts, calleeBuilder->getFE_FP());
+                                        removeDeadCode(inst->getSrc(1), calleeInsts, calleeBuilder->getFE_FP());
+                                        if (removeStackFrame)
+                                        {
+                                            DEBUG_PRINT("removed:");
+                                            DEBUG_UTIL((*defInst[calleeBuilder->getFE_SP()])->dump());
+                                            calleeInsts.erase(defInst[calleeBuilder->getFE_SP()]);
+                                            DEBUG_PRINT("removed:");
+                                            DEBUG_UTIL((*defInst[calleeBuilder->getFE_FP()])->dump());
+                                            calleeInsts.erase(defInst[calleeBuilder->getFE_FP()]);
+                                        }
                                         break;
                                     }
-                                    DEBUG_PRINT("skip for now (private variable on the callee's frame):\n");
-                                    DEBUG_UTIL(inst->dump());
-                                    assert(0);
+                                    else
+                                    {
+                                        DEBUG_PRINT("skip for now (private variable on the callee's frame):\n");
+                                        DEBUG_UTIL(inst->dump());
+                                        assert(0);
+                                    }
                                 }
                                 auto storeIt = storeList.front();
                                 G4_INST *storeInst = *storeIt;
@@ -1026,9 +1082,13 @@ void CISA_IR_Builder::LinkTimeOptimization(
                                 assert(stackPointers[getRootDeclare(storeInst->getSrc(0))] ==
                                        stackPointers[getRootDeclare( loadInst->getSrc(0))] &&
                                        "Store and load have different SP offset");
+                                removeDeadCode(storeInst->getSrc(0), callerInsts, callerBuilder->getFE_SP());
+                                removeDeadCode(loadInst->getSrc(0), calleeInsts, calleeBuilder->getFE_SP());
                                 // promote the load into mov
                                 inst->setOpcode(G4_mov);
-                                loadInst->setSrc(storeInst->getSrc(1), 0);
+                                auto newSrc = storeInst->getSrc(1);
+                                loadInst->setSrc(newSrc, 0);
+                                avoidCloning.insert(newSrc->getTopDcl());
                                 DEBUG_PRINT("\tforwarded:");
                                 DEBUG_UTIL(inst->dump());
                                 // erase the store
@@ -1036,7 +1096,7 @@ void CISA_IR_Builder::LinkTimeOptimization(
                             }
                             else
                             {
-                                assert(0 && "not implemented");
+                                //assert(0 && "not implemented");
                             }
                         }
                     }
@@ -1044,15 +1104,88 @@ void CISA_IR_Builder::LinkTimeOptimization(
 
                 // All args has been removed on the stack
                 // Remove SP updating instruction
-                if (storeList.empty() && !noArgOnStack)
+                if (storeList.empty() && !noArgOnStack && removeStackFrame)
                 {
                     DEBUG_PRINT("removed:");
                     DEBUG_UTIL((*defInst[callerBuilder->getFE_SP()])->dump());
                     callerInsts.erase(defInst[callerBuilder->getFE_SP()]);
+                    DEBUG_PRINT("removed:");
+                    DEBUG_UTIL((*defInst[calleeBuilder->getFE_SP()])->dump());
+                    calleeInsts.erase(defInst[calleeBuilder->getFE_SP()]);
+                    DEBUG_PRINT("removed:");
+                    DEBUG_UTIL((*defInst[calleeBuilder->getFE_FP()])->dump());
+                    calleeInsts.erase(defInst[calleeBuilder->getFE_FP()]);
                 }
 
             }
 
+            std::map<G4_Declare*, G4_Declare*> newDclMap;
+            auto cloneDcl = [&](G4_Operand* opd)
+            {
+                if (opd)
+                {
+                    G4_Declare* topDcl = opd->getTopDcl();
+                    G4_RegVar* var =
+                        opd->isAddrExp() ?
+                        opd->asAddrExp()->getRegVar() :
+                        opd->getBase() && opd->getBase()->isRegVar()?
+                            opd->getBase()->asRegVar() :
+                            nullptr;
+                    if (!var)
+                        return;
+                    if (avoidCloning.find(topDcl) != avoidCloning.end())
+                        return;
+                    G4_Declare* dcl = var->getDeclare();
+                    if (topDcl && topDcl == callee->fg.builder->getFE_SP())
+                    {
+                        G4_Declare* newDcl = caller->fg.builder->cloneDeclare(newDclMap, dcl);
+                        opd->setTopDcl(caller->fg.builder->getFE_SP());
+                        opd->setBase(newDcl->getRegVar());
+                        newDcl->setAliasDeclare(caller->fg.builder->getFE_SP(), newDcl->getAliasOffset());
+                    }
+                    else if (topDcl && topDcl == callee->fg.builder->getFE_FP())
+                    {
+                        G4_Declare* newDcl = caller->fg.builder->cloneDeclare(newDclMap, dcl);
+                        opd->setTopDcl(caller->fg.builder->getFE_FP());
+                        opd->setBase(newDcl->getRegVar());
+                        newDcl->setAliasDeclare(caller->fg.builder->getFE_FP(), newDcl->getAliasOffset());
+                    }
+                    else if (topDcl && topDcl == callee->fg.builder->getStackCallArg())
+                    {
+                        G4_Declare* newDcl = caller->fg.builder->cloneDeclare(newDclMap, dcl);
+                        opd->setTopDcl(caller->fg.builder->getStackCallArg());
+                        opd->setBase(newDcl->getRegVar());
+                        newDcl->setAliasDeclare(caller->fg.builder->getStackCallArg(), newDcl->getAliasOffset());
+                    }
+                    else if (topDcl && topDcl == callee->fg.builder->getStackCallRet())
+                    {
+                        G4_Declare* newDcl = caller->fg.builder->cloneDeclare(newDclMap, dcl);
+                        opd->setTopDcl(caller->fg.builder->getStackCallRet());
+                        opd->setBase(newDcl->getRegVar());
+                        newDcl->setAliasDeclare(caller->fg.builder->getStackCallRet(), newDcl->getAliasOffset());
+                    }
+                    else if (topDcl && (topDcl == replacedArgDcl || topDcl == replacedRetDcl))
+                    {
+                        G4_Declare* newDcl = caller->fg.builder->createTempVar(dcl->getTotalElems(), dcl->getElemType(), Any, dcl->getName());
+                        newDcl->setAliasDeclare(topDcl, dcl->getAliasOffset());
+                    }
+                    else
+                    {
+                        G4_Declare* newDcl = caller->fg.builder->cloneDeclare(newDclMap, dcl);
+                        if (opd->isAddrExp())
+                        {
+                            assert(topDcl == nullptr);
+                            opd->asAddrExp()->setRegVar(newDcl->getRegVar());
+                        }
+                        else
+                        {
+                            opd->setTopDcl(newDcl->getAliasDeclare() ? newDcl->getAliasDeclare() : newDcl);
+                            opd->setBase(newDcl->getRegVar());
+                        }
+                    }
+                }
+            };
+            std::map<G4_Label*, G4_Label*> labelMap;
             if (inlining)
             {
                 auto& builder = caller->fg.builder;
@@ -1061,69 +1194,45 @@ void CISA_IR_Builder::LinkTimeOptimization(
                 G4_INST* ra = caller->fg.createNewLabelInst(raLabel);
                 // We don't need calleeLabel (first instruction) anymore after inlining
                 calleeInsts.pop_front();
-                std::map<G4_Declare*, G4_Declare*> newDclMap;
+                // Iterate once to clone labels
+                for (G4_INST* inst : calleeInsts)
+                {
+                    if (inst->opcode() == G4_label)
+                    {
+                        std::string name = inst->getSrc(0)->asLabel()->getLabel();
+                        G4_Label *newLabel = builder->createLabel(name + "_" + std::to_string(funcUID), LABEL_BLOCK);
+                        labelMap[inst->getSrc(0)->asLabel()] = newLabel;
+                    }
+                }
+
+                // clone instructions
                 for (G4_INST* fret : calleeInsts)
                 {
-                    G4_INST* inst = fret->cloneInst();
-                    auto cloneDcl = [&](G4_Operand* opd)
+                    G4_INST* inst = nullptr;
+                    if (fret->opcode() == G4_label)
                     {
-                        if (opd)
-                        {
-                            G4_Declare* topDcl = opd->getTopDcl();
-                            G4_RegVar* var =
-                                opd->isAddrExp() ?
-                                opd->asAddrExp()->getRegVar() :
-                                opd->getBase() && opd->getBase()->isRegVar()?
-                                    opd->getBase()->asRegVar() :
-                                    nullptr;
-                            if (!var)
-                                return;
-                            G4_Declare* dcl = var->getDeclare();
-                            if (topDcl && topDcl == callee->fg.builder->getStackCallArg())
-                            {
-                                G4_Declare* newDcl = caller->fg.builder->cloneDeclare(newDclMap, dcl);
-                                opd->setTopDcl(caller->fg.builder->getStackCallArg());
-                                opd->setBase(newDcl->getRegVar());
-                                newDcl->setAliasDeclare(caller->fg.builder->getStackCallArg(), newDcl->getAliasOffset());
-                            }
-                            else if (topDcl && topDcl == callee->fg.builder->getStackCallRet())
-                            {
-                                G4_Declare* newDcl = caller->fg.builder->cloneDeclare(newDclMap, dcl);
-                                opd->setTopDcl(caller->fg.builder->getStackCallRet());
-                                opd->setBase(newDcl->getRegVar());
-                                newDcl->setAliasDeclare(caller->fg.builder->getStackCallRet(), newDcl->getAliasOffset());
-                            }
-                            else if (topDcl && (topDcl == replacedArgDcl || topDcl == replacedRetDcl))
-                            {
-                                G4_Declare* newDcl = caller->fg.builder->createTempVar(topDcl->getTotalElems(), topDcl->getElemType(), Any, topDcl->getName());
-                                newDcl->setAliasDeclare(topDcl, 0);
-                                caller->Declares.push_back(newDcl);
-                            }
-                            else
-                            {
-                                G4_Declare* newDcl = caller->fg.builder->cloneDeclare(newDclMap, dcl);
-                                if (opd->isAddrExp())
-                                {
-                                    assert(topDcl == nullptr);
-                                    opd->asAddrExp()->setRegVar(newDcl->getRegVar());
-                                }
-                                else
-                                {
-                                    opd->setTopDcl(newDcl->getAliasDeclare() ? newDcl->getAliasDeclare() : newDcl);
-                                    opd->setBase(newDcl->getRegVar());
-                                }
-                            }
-                        }
-                    };
+                        inst = caller->fg.createNewLabelInst(labelMap[fret->getSrc(0)->asLabel()]);
+                    }
+                    else
+                    {
+                        inst = fret->cloneInst();
+                    }
                     for (int i = 0, numSrc = inst->getNumSrc(); i < numSrc; ++i)
                     {
                         cloneDcl(inst->getSrc(i));
                     }
+                    if (inst->opcode() == G4_goto)
+                    {
+                        inst->asCFInst()->setUip(labelMap[fret->asCFInst()->getUip()]);
+                    }
                     cloneDcl(inst->getDst());
+                    cloneDcl(inst->getPredicate());
                     // add predicate into declaration list
                     if (G4_VarBase* flag = inst->getCondModBase())
                     {
-                        caller->Declares.push_back(flag->asRegVar()->getDeclare());
+                        G4_Declare* newDcl = caller->fg.builder->cloneDeclare(newDclMap, flag->asRegVar()->getDeclare());
+                        inst->getCondMod()->setBase(newDcl->getRegVar());
+                        inst->getCondMod()->setTopDcl(newDcl);
                     }
                     callerInsts.insert(it, inst);
                     if (inst->opcode() != G4_pseudo_fret)
@@ -1136,6 +1245,7 @@ void CISA_IR_Builder::LinkTimeOptimization(
                 callerInsts.insert(it, ra);
                 // remove the call
                 callerInsts.erase(it);
+                funcUID ++;
             }
             else
             {
@@ -1147,19 +1257,30 @@ void CISA_IR_Builder::LinkTimeOptimization(
                 visited.insert(callee);
                 for (G4_INST* fret : calleeInsts)
                 {
-                    if (fret->opcode() != G4_pseudo_fret)
+                    G4_INST* inst = fret->cloneInst();
+                    for (int i = 0, numSrc = inst->getNumSrc(); i < numSrc; ++i)
+                    {
+                        cloneDcl(inst->getSrc(i));
+                    }
+                    cloneDcl(inst->getDst());
+                    cloneDcl(inst->getPredicate());
+                    // add predicate into declaration list
+                    if (G4_VarBase* flag = inst->getCondModBase())
+                    {
+                        G4_Declare* newDcl = caller->fg.builder->cloneDeclare(newDclMap, flag->asRegVar()->getDeclare());
+                        inst->getCondMod()->setBase(newDcl->getRegVar());
+                        inst->getCondMod()->setTopDcl(newDcl);
+                    }
+                    if (inst->opcode() == G4_goto)
+                    {
+                        inst->asCFInst()->setUip(fret->asCFInst()->getUip());
+                    }
+                    callerInsts.insert(callerInsts.end(), inst);
+                    if (inst->opcode() != G4_pseudo_fret)
                         continue;
-                    // Change fret to ret
-                    fret->setOpcode(G4_return);
-                    rets[calleeLabel].push_back(fret);
-                }
-                callerInsts.insert(callerInsts.end(), calleeInsts.begin(), calleeInsts.end());
-                // Append declarations from callee to caller
-                auto callerDclCount = caller->Declares.size();
-                for (auto curDcl : callee->Declares)
-                {
-                    curDcl->setDeclId(curDcl->getDeclId() + callerDclCount);
-                    caller->Declares.push_back(curDcl);
+                    // Change inst to ret
+                    inst->setOpcode(G4_return);
+                    rets[calleeLabel].push_back(inst);
                 }
             }
         }
@@ -1189,7 +1310,37 @@ void CISA_IR_Builder::LinkTimeOptimization(
             }
         }
     }
+}
 
+static void retrieveBarrierInfoFromCallee(VISAKernelImpl* entry, std::set<VISAKernelImpl*>& visited)
+{
+    auto res = visited.insert(entry);
+    if (!res.second)
+        return;
+
+    for (G4_BB* bb : entry->getKernel()->fg)
+    {
+        if (!bb->isEndWithFCall())
+            continue;
+
+        G4_INST* fcall = bb->back();
+        if (fcall->asCFInst()->isIndirectCall())
+            continue;
+
+        const char* funcName = fcall->getSrc(0)->asLabel()->getLabel();
+        VISAKernelImpl* callee = entry->getCISABuilder()->getKernel(funcName);
+        // Propagate properties of callee to caller recursively.
+        retrieveBarrierInfoFromCallee(callee, visited);
+        entry->getIRBuilder()->usedBarries() |= callee->getIRBuilder()->usedBarries();
+    }
+    // numBarriers property is propagated to IGC and onwards in to NEO patch
+    // token. We need this logic here to propagate barrier usage to IGC and
+    // further to NEO so it can set up WG size appropriately.  Without this
+    // setting barrier would cause machine to hang.
+    // TODO: How to set numBarriers when callee is indirect in patch token
+    // path? For zebin path, the barrier information of an indirect (external)
+    // function will be provided in the corresponding .ze_info field.
+    entry->getIRBuilder()->getJitInfo()->numBarriers = entry->getIRBuilder()->numBarriers();
 }
 
 // Stitch the FG of subFunctions to mainFunc
@@ -1247,14 +1398,6 @@ static void Stitch_Compiled_Units(
                 // Connect new fg
                 mainFunc->fg.addPredSuccEdges(cur, callee->fg.getEntryBB());
                 mainFunc->fg.addPredSuccEdges(callee->fg.getUniqueReturnBlock(), retBlock);
-
-                // propagate properties of callee to mainFunc
-                // usesBarrier property is propagated to IGC and onwards in to NEO patch
-                // token. we need this logic here to propagate barrier usage to IGC and
-                // further to NEO so it can setup WG size appropriately. without this
-                // setting barrier would cause machine to hang.
-                // TODO: How to set usesBarrier when callee is indirect?
-                mainFunc->fg.builder->getJitInfo()->usesBarrier |= callee->fg.builder->getJitInfo()->usesBarrier;
 
                 G4_INST* calleeLabel = callee->fg.getEntryBB()->front();
                 ASSERT_USER(calleeLabel->isLabel() == true, "Entry inst is not label");
@@ -1512,7 +1655,40 @@ int CISA_IR_Builder::Compile(const char* nameInput, std::ostream* os, bool emit_
                     m_options.getuInt32Option(vISA_Linker));
         }
     }
+    const char* rawStr = m_options.getOptionCstr(vISA_ForceAssignRhysicalReg);
+    if (rawStr && *rawStr != '\0')
+    {
+        std::vector<int> token;
+        std::map<int, int> forceAssign;
+        const char* DELIMITERS = ":, ";
+        std::string line(rawStr);
+        std::size_t pos = 0;
+        std::size_t found;
+        for (; (found = line.find_first_of(DELIMITERS, pos)) != std::string::npos; ++pos) {
+            // Skip consecutive whitespaces.
+            if (found == pos)
+                continue;
+            token.push_back(std::stoi(line.substr(pos, found - pos)));
+            pos = found;
+        }
+        if (pos < line.length())
+            token.push_back(std::stoi(line.substr(pos)));
 
+        for (unsigned int i = 0; i < token.size() - 1; i += 2)
+        {
+            forceAssign[token[i]] = token[i+1];
+        }
+
+        for (G4_Declare* dcl : m_kernelsAndFunctions.front()->getKernel()->Declares)
+        {
+            if (forceAssign.find(dcl->getDeclId()) != forceAssign.end())
+            {
+                std::cerr << "Force assigning DeclId : " << dcl->getDeclId() << " to r" << forceAssign[dcl->getDeclId()] << "\n";
+                dcl->getRegVar()->setPhyReg(m_kernelsAndFunctions.front()->getIRBuilder()->phyregpool.getGreg(forceAssign[dcl->getDeclId()]), 0);
+                dcl->dump();
+            }
+        }
+     }
 
 
     VISAKernelImpl* oldMainKernel = nullptr;
@@ -1746,6 +1922,13 @@ int CISA_IR_Builder::Compile(const char* nameInput, std::ostream* os, bool emit_
             }
         }
 
+        // Set usesBarrier property for each kernel and function appropriately.
+        {
+            std::set<VISAKernelImpl*> visited;
+            for (VISAKernelImpl* f : m_kernelsAndFunctions)
+                retrieveBarrierInfoFromCallee(f, visited);
+        }
+
         // reset debug info offset of functionsToStitch
         for (auto func : subFunctions)
         {
@@ -1858,7 +2041,7 @@ int CISA_IR_Builder::Compile(const char* nameInput, std::ostream* os, bool emit_
 #ifndef DLL_MODE
     if (criticalMsg.str().length() > 0)
     {
-        std::cerr << "[vISA Finalizer Messsages]\n" << criticalMsg.str();
+        std::cerr << "[vISA Finalizer Messages]\n" << criticalMsg.str();
     }
 #endif //DLL_MODE
 
@@ -4432,4 +4615,9 @@ const VISAKernelImpl* CISA_IR_Builder::getKernel(const std::string& name) const
     if (it == m_nameToKernel.end())
         return nullptr;
     return it->second;
+}
+
+VISAKernelImpl* CISA_IR_Builder::getKernel(const std::string& name)
+{
+    return const_cast<VISAKernelImpl*>(const_cast<const CISA_IR_Builder*>(this)->getKernel(name));
 }

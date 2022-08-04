@@ -2341,7 +2341,8 @@ void CustomUnsafeOptPass::reassociateMulAdd(Function& F)
     }
 
     auto modMD = getAnalysis<MetaDataUtilsWrapper>().getModuleMetaData();
-    if (!modMD->compOpt.MadEnable)
+    if (!modMD->compOpt.MadEnable &&
+        !m_ctx->m_DriverInfo.RespectPerInstructionContractFlag())
     {
         return;
     }
@@ -2481,6 +2482,7 @@ private:
     static bool canOptimizeNdotL(SmallVector<Instruction*, 4> & Values, FCmpInst* FC);
     static bool canOptimizeDirectOutput(SmallVector<Instruction*, 4> & Values, GenIntrinsicInst* GII, Value*& SI, unsigned int ShaderLength);
     static bool canOptimizeMulMaxMatch(SmallVector<Instruction*, 4> & Values, Instruction* I);
+    static bool canOptimizeSelectOutput(SelectInst* SI);
     static bool DotProductMatch(const Instruction* I);
     static bool DotProductSourceMatch(const Instruction* I);
     static BasicBlock* tryFoldAndSplit(
@@ -2514,6 +2516,8 @@ private:
         ArrayRef<Instruction*> Values,
         const DenseSet<const Value*>& FoldedVals);
     static unsigned int shortPathToOutput(Value* inst, unsigned int limit);
+    static Instruction* FindLastFoldedValue(const DenseSet<const Value*>& FoldedVals,
+        BasicBlock* currentBB);
 
     CodeGenContext* m_ctx;
     unsigned int m_ShaderLength;
@@ -2889,12 +2893,23 @@ bool EarlyOutPatterns::DotProductMatch(const Instruction* I)
     Value* Z2 = nullptr;
 
     // dp3
-    return match(I,
+    if (match(I,
         m_FAdd(
             m_FMul(m_Value(Z1), m_Value(Z2)),
             m_FAdd(
                 m_FMul(m_Value(X1), m_Value(X2)),
-                m_FMul(m_Value(Y1), m_Value(Y2)))));
+                m_FMul(m_Value(Y1), m_Value(Y2)))))) {
+        return true;
+    }
+    if (match(I,
+        m_FAdd(
+            m_FAdd(
+                m_FMul(m_Value(X1), m_Value(X2)),
+                m_FMul(m_Value(Y1), m_Value(Y2))),
+            m_FMul(m_Value(Z1), m_Value(Z2))))) {
+        return true;
+    }
+    return false;
 }
 
 // Does is a dot product pattern the source of this instruction?
@@ -2943,6 +2958,19 @@ bool EarlyOutPatterns::canOptimizeMulMaxMatch(SmallVector<Instruction*, 4> & Val
         }
     }
     return true;
+}
+
+bool EarlyOutPatterns::canOptimizeSelectOutput(SelectInst *SI)
+{
+    if (FCmpInst* FC = dyn_cast<FCmpInst>(SI->getCondition()))
+    {
+        ConstantFP* src1 = dyn_cast<ConstantFP>(FC->getOperand(1));
+        if (FC->getPredicate() != FCmpInst::FCMP_OGT || !FC->hasOneUse() || !src1 || !src1->isZero()) {
+            return false;
+        }
+        return true;
+    }
+    return false;
 }
 
 bool EarlyOutPatterns::canOptimizeNdotL(SmallVector<Instruction*, 4> & Values, FCmpInst* FC)
@@ -3114,34 +3142,62 @@ bool EarlyOutPatterns::canOptimizeSampleInst(SmallVector<Instruction*, 4> & Chan
     return false;
 }
 
+enum class CS_PATTERNS
+{
+#define EARLY_OUT_CS_PATTERN(Name, Val) Name = Val,
+#include "igc_regkeys_enums_defs.h"
+EARLY_OUT_CS_PATTERNS
+#undef EARLY_OUT_CS_PATTERN
+#undef EARLY_OUT_CS_PATTERNS
+};
+
+enum class PS_PATTERNS
+{
+#define EARLY_OUT_PS_PATTERN(Name, Val) Name = Val,
+#include "igc_regkeys_enums_defs.h"
+EARLY_OUT_PS_PATTERNS
+#undef EARLY_OUT_PS_PATTERN
+#undef EARLY_OUT_PS_PATTERNS
+};
+
 bool EarlyOutPatterns::processBlock(BasicBlock* BB)
 {
     bool Changed = false;
     bool BBSplit = true;
-    bool SamplePatternEnable = 0;
-    bool DPMaxPatternEnable = 0;
-    bool DPFSatPatternEnable = 0;
-    bool NdotLPatternEnable = 0;
-    bool DirectOutputPatternEnable = 0;
-    bool MulMaxMatchEnable = 0;
+    bool SamplePatternEnable = false;
+    bool DPMaxPatternEnable = false;
+    bool DPFSatPatternEnable = false;
+    bool NdotLPatternEnable = false;
+    bool DirectOutputPatternEnable = false;
+    bool MulMaxMatchEnable = false;
+    bool SelectFcmpPatternEnable = false;
 
     // Each pattern below is given a bit to toggle on/off
     // to isolate the performance for each individual pattern.
     if (m_ctx->type == ShaderType::COMPUTE_SHADER)
     {
-        SamplePatternEnable = (IGC_GET_FLAG_VALUE(EarlyOutPatternSelectCS) & 0x1) != 0;
-        DPMaxPatternEnable = (IGC_GET_FLAG_VALUE(EarlyOutPatternSelectCS) & 0x2) != 0;
-        DPFSatPatternEnable = (IGC_GET_FLAG_VALUE(EarlyOutPatternSelectCS) & 0x4) != 0;
-        NdotLPatternEnable = (IGC_GET_FLAG_VALUE(EarlyOutPatternSelectCS) & 0x8) != 0;
+        auto PatEnable = [](CS_PATTERNS Pat) {
+            return (IGC_GET_FLAG_VALUE(EarlyOutPatternSelectCS) & (uint32_t)Pat) != 0;
+        };
+
+        SamplePatternEnable     = PatEnable(CS_PATTERNS::SamplePatternEnable);
+        DPMaxPatternEnable      = PatEnable(CS_PATTERNS::DPMaxPatternEnable);
+        DPFSatPatternEnable     = PatEnable(CS_PATTERNS::DPFSatPatternEnable);
+        NdotLPatternEnable      = PatEnable(CS_PATTERNS::NdotLPatternEnable);
+        SelectFcmpPatternEnable = PatEnable(CS_PATTERNS::SelectFcmpPatternEnable);
     }
     else if (m_ctx->type == ShaderType::PIXEL_SHADER)
     {
-        SamplePatternEnable = (IGC_GET_FLAG_VALUE(EarlyOutPatternSelectPS) & 0x1) != 0;
-        DPMaxPatternEnable = (IGC_GET_FLAG_VALUE(EarlyOutPatternSelectPS) & 0x2) != 0;
-        DPFSatPatternEnable = (IGC_GET_FLAG_VALUE(EarlyOutPatternSelectPS) & 0x4) != 0;
-        NdotLPatternEnable = (IGC_GET_FLAG_VALUE(EarlyOutPatternSelectPS) & 0x8) != 0;
-        DirectOutputPatternEnable = (IGC_GET_FLAG_VALUE(EarlyOutPatternSelectPS) & 0x10) != 0;
-        MulMaxMatchEnable = (IGC_GET_FLAG_VALUE(EarlyOutPatternSelectPS) & 0x20) != 0;
+        auto PatEnable = [](PS_PATTERNS Pat) {
+            return (IGC_GET_FLAG_VALUE(EarlyOutPatternSelectPS) & (uint32_t)Pat) != 0;
+        };
+
+        SamplePatternEnable       = PatEnable(PS_PATTERNS::SamplePatternEnable);
+        DPMaxPatternEnable        = PatEnable(PS_PATTERNS::DPMaxPatternEnable);
+        DPFSatPatternEnable       = PatEnable(PS_PATTERNS::DPFSatPatternEnable);
+        NdotLPatternEnable        = PatEnable(PS_PATTERNS::NdotLPatternEnable);
+        DirectOutputPatternEnable = PatEnable(PS_PATTERNS::DirectOutputPatternEnable);
+        MulMaxMatchEnable         = PatEnable(PS_PATTERNS::MulMaxMatchEnable);
     }
 
     while (BBSplit)
@@ -3235,12 +3291,17 @@ bool EarlyOutPatterns::processBlock(BasicBlock* BB)
                     Values.push_back(&II);
                 }
             }
+            else if (auto* SI = dyn_cast<SelectInst>(&II))
+            {
+                OptCandidate = SelectFcmpPatternEnable && canOptimizeSelectOutput(SI);
+                if (OptCandidate)
+                    Values.push_back(&II);
+            }
             if (OptCandidate)
             {
                 BasicBlock* BB1 = tryFoldAndSplit(Values, Root,
                     FoldThreshold, FoldThresholdMultiChannel, RatioNeeded);
                 BBSplit = (BB1 != nullptr);
-
                 if (BBSplit)
                 {
                     BB = BB1;
@@ -3393,7 +3454,7 @@ DenseSet<const Value*> EarlyOutPatterns::tryAndFoldValues(ArrayRef<Instruction*>
     {
         for (auto UI : inst->users())
         {
-            if (auto * useInst = dyn_cast<Instruction>(UI))
+            if (auto* useInst = dyn_cast<Instruction>(UI))
             {
                 if (useInst->getParent() == inst->getParent())
                 {
@@ -3419,33 +3480,38 @@ DenseSet<const Value*> EarlyOutPatterns::tryAndFoldValues(ArrayRef<Instruction*>
     return FoldedVals;
 }
 
+Instruction* EarlyOutPatterns::FindLastFoldedValue(const DenseSet<const Value*>& FoldedVals, BasicBlock* currentBB)
+{
+    // traverse the block backwards and find the last folded value
+    for (BasicBlock::reverse_iterator re = currentBB->rbegin(), ri = currentBB->rend(); re != ri; ++re)
+    {
+        if (FoldedVals.count(&(*re)))
+        {
+            re--;
+            return &*re;
+        }
+    }
+    // default to return the last instruction in the block
+    return &*(currentBB->rbegin());
+}
+
 // return the new block where the code after inst was moved
 BasicBlock* EarlyOutPatterns::SplitBasicBlock(Instruction* inst, const DenseSet<const Value*>& FoldedVals)
 {
     IRBuilder<> builder(inst->getContext());
     BasicBlock* currentBB = inst->getParent();
-    BasicBlock* endifBlock = BasicBlock::Create(inst->getContext(), VALUE_NAME("EO_endif"), currentBB->getParent(), currentBB->getNextNode());
-    BasicBlock* elseBlock = BasicBlock::Create(inst->getContext(), VALUE_NAME("EO_else"), currentBB->getParent(), currentBB->getNextNode());
-
+    Instruction* lastFoldedInst = FindLastFoldedValue(FoldedVals, currentBB);
+    BasicBlock* elseBlock = currentBB->splitBasicBlock(inst->getNextNode(), "EO_else");
+    currentBB->getTerminator()->eraseFromParent();
+    BasicBlock* endifBlock = elseBlock->splitBasicBlock(lastFoldedInst->getIterator(), "EO_endif");
     currentBB->replaceSuccessorsPhiUsesWith(endifBlock);
 
-    // copy the end of the block to the else part
-    elseBlock->getInstList().splice(elseBlock->begin(),
-        currentBB->getInstList(),
-        inst->getNextNode()->getIterator(),
-        currentBB->getTerminator()->getIterator());
-    endifBlock->getInstList().splice(endifBlock->begin(), currentBB->getInstList(), currentBB->getTerminator());
-    if (isa<ReturnInst>(endifBlock->getTerminator()))
-    {
-        MoveOutputToConvergeBlock(elseBlock, endifBlock);
-    }
-    builder.SetInsertPoint(elseBlock);
-    builder.CreateBr(endifBlock);
     // split the blocks
     ValueToValueMapTy VMap;
+
     BasicBlock* ifBlock = CloneBasicBlock(elseBlock, VMap);
     ifBlock->setName(VALUE_NAME("EO_IF"));
-    currentBB->getParent()->getBasicBlockList().insertAfter(currentBB->getIterator(), ifBlock);
+    currentBB->getParent()->getBasicBlockList().insert(endifBlock->getIterator(), ifBlock);
     for (auto II = ifBlock->begin(), IE = ifBlock->end(); II != IE; ++II)
     {
         for (unsigned op = 0, E = II->getNumOperands(); op != E; ++op)
@@ -3487,11 +3553,9 @@ BasicBlock* EarlyOutPatterns::SplitBasicBlock(Instruction* inst, const DenseSet<
             VMap[it]->replaceAllUsesWith(ConstantFP::get(it->getType(), 0.0));
         }
     }
-
     // branching
     builder.SetInsertPoint(currentBB);
     builder.CreateCondBr(inst, ifBlock, elseBlock);
-
     return elseBlock;
 }
 

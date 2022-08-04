@@ -42,14 +42,22 @@ if(IGC_OPTION__SPIRV_TRANSLATOR_MODE STREQUAL SOURCE_MODE_NAME)
 endif()
 
 # Handle dependent options for Prebuild mode.
-# Nothing here for now.
 if(IGC_OPTION__SPIRV_TRANSLATOR_MODE STREQUAL PREBUILDS_MODE_NAME)
+  message(STATUS "[SPIRV] Will use SPIRV translator prebuilds")
+  # Set spirv translator source dir, as it is needed when using prebuild translator later
+  set(IGC_OPTION__SPIRV_TRANSLATOR_SOURCE_DIR "${DEFAULT_SPIRV_TRANSLATOR_SOURCE_DIR}" CACHE PATH "Path to SPIRV translator sources")
   return()
 endif()
 
 # No mode was specified, start searching.
 if(NOT IGC_OPTION__SPIRV_TRANSLATOR_MODE)
   message(STATUS "[SPIRV] Using default procedure to determine SPIRV mode")
+  # OpenCL Clang and Vector Compiler share the library Spirv Translator, so we cannot build Spriv Translator
+  # if OpenCL Clang is taken from the system.
+  if(IGC_TRY_TO_TAKE_CLANG_FROM_SYSTEM)
+    message(STATUS "[SPIRV] No mode was specified for SPIRV. Clang is trying to be taken from the system, so the SPIRV translator not will be built from the source")
+    return()
+  endif()
   if(EXISTS "${DEFAULT_SPIRV_TRANSLATOR_SOURCE_DIR}")
     set(IGC_BUILD__SPIRV_TRANSLATOR_SOURCES ON)
     set(IGC_OPTION__SPIRV_TRANSLATOR_SOURCE_DIR ${DEFAULT_SPIRV_TRANSLATOR_SOURCE_DIR})

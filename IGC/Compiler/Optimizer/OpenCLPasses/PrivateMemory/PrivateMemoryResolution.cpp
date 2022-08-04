@@ -277,6 +277,7 @@ bool PrivateMemoryResolution::safeToUseScratchSpace(llvm::Module& M) const
 
     //
     // Do not use scratch space if module has any stack call.
+    // Do not use scratch space if modeule has any variable length alloca
     //
     if (bOCLLegacyStatelessCheck) {
         if (auto * FGA = getAnalysisIfAvailable<GenXFunctionGroupAnalysis>()) {
@@ -284,7 +285,16 @@ bool PrivateMemoryResolution::safeToUseScratchSpace(llvm::Module& M) const
                 for (auto& I : *FGA) {
                     if (I->hasStackCall())
                         return false;
+                    if (I->hasVariableLengthAlloca())
+                        return false;
                 }
+            }
+        }
+        else {
+            // Check individual functions if FGA not available
+            for (auto& F : M) {
+                if (F.hasFnAttribute("visaStackCall") || F.hasFnAttribute("hasVLA"))
+                    return false;
             }
         }
     }
@@ -382,6 +392,16 @@ bool PrivateMemoryResolution::safeToUseScratchSpace(llvm::Module& M) const
         //
         const unsigned int totalPrivateMemPerWI = m_ModAllocaInfo->getTotalPrivateMemPerWI(&F);
 
+        //FIXME: for now, to shrink size, let's use SIMD8 if have to.
+        //later, maybe, we want to change to legacy behavior: SIMD16, to avoid potential spill.
+        //but even so, when we support slot0 and slot1, then, we could still use SIMD8.
+        if (Ctx.platform.hasScratchSurface() &&
+            Ctx.hasSyncRTCalls() &&
+            totalPrivateMemPerWI > scratchSpaceLimitPerWI) {
+            simd_size = numLanes(Ctx.platform.getMinDispatchMode());
+            scratchSpaceLimitPerWI = maxScratchSpaceBytes / simd_size;
+        }
+
         if (totalPrivateMemPerWI > scratchSpaceLimitPerWI) {
             // IGC errors out when we are trying to remove statelesspvtmem of OCL (even though OCl still supports statelesspvtmem).
             // This assertion tests a scenario where (pvt_mem_usage > 256k) while statelessprivatememory is not supported.
@@ -454,10 +474,22 @@ bool PrivateMemoryResolution::runOnModule(llvm::Module& M)
             // okay so those passes wouldn't optimize away null pointer
             // dereferences because they would have otherwise been undefined
             // behavior.
+#if LLVM_VERSION_MAJOR <= 10
             F.addFnAttr("null-pointer-is-valid", "true");
+#else
+            F.addFnAttr(llvm::Attribute::NullPointerIsValid);
+#endif
         }
         // Resolve collected alloca instructions for current function
         changed |= resolveAllocaInstructions(hasStackCall || hasVLA);
+
+        // Initialize the stack mem usage per function group to the kernel's privateMemPerWI
+        if (isEntryFunc(m_pMdUtils, m_currFunction))
+        {
+            auto funcMD = modMD.FuncMD.find(m_currFunction);
+            if (funcMD != modMD.FuncMD.end())
+                modMD.PrivateMemoryPerFG[m_currFunction] = funcMD->second.privateMemoryPerWI;
+        }
     }
 
     if (FGA)
@@ -478,9 +510,11 @@ bool PrivateMemoryResolution::runOnModule(llvm::Module& M)
             if (funcIt == modMD.FuncMD.end())
                 return 0;
 
-            // Stack offsets should be OWORD aligned
             uint32_t currFuncPrivateMem = (uint32_t)(funcIt->second.privateMemoryPerWI);
-            currFuncPrivateMem = iSTD::Align(currFuncPrivateMem, SIZE_OWORD);
+            // Add 1 OWORD for FP stack write
+            if IGC_IS_FLAG_ENABLED(EnableWriteOldFPToStack)
+                currFuncPrivateMem += SIZE_OWORD;
+
             CallGraphNode* Node = CG[F];
 
             // Function has recursion, don't search CG further
@@ -501,8 +535,8 @@ bool PrivateMemoryResolution::runOnModule(llvm::Module& M)
                 }
             }
 
-            // Recursively calculate the private mem usage of all callees
-            uint32_t maxSize = currFuncPrivateMem;
+            // Recursively calculate the max private mem usage of all callees
+            uint32_t maxSize = 0;
             for (auto childF : childFuncs)
             {
                 IGC_ASSERT(childF);
@@ -519,11 +553,10 @@ bool PrivateMemoryResolution::runOnModule(llvm::Module& M)
                     argSize += iSTD::Align(static_cast<DWORD>(DL.getTypeAllocSize(childF->getReturnType())), SIZE_OWORD);
                 }
 
-                uint32_t stackFrameSize = currFuncPrivateMem + argSize + SIZE_OWORD;
-                uint32_t size = stackFrameSize + AnalyzeCGPrivateMemUsage(childF);
+                uint32_t size = argSize + AnalyzeCGPrivateMemUsage(childF);
                 maxSize = std::max(maxSize, size);
             }
-            return maxSize;
+            return currFuncPrivateMem + maxSize;
         };
 
         // Calculate the max private mem used by each function group
@@ -534,27 +567,30 @@ bool PrivateMemoryResolution::runOnModule(llvm::Module& M)
         {
             FunctionGroup* FG = *GI;
             Function* pKernel = FG->getHead();
-            uint32_t maxPrivateMem = modMD.FuncMD[pKernel].privateMemoryPerWI;
+            uint32_t maxPrivateMem = 0;
 
             if (FG->hasStackCall())
             {
                 // Analyze call depth for stack memory required
                 maxPrivateMem = AnalyzeCGPrivateMemUsage(pKernel);
-
-                // If indirect calls or recursions exist, add additional 4KB,
-                // and hope we don't run out.
-                if (FG->hasIndirectCall() || FG->hasRecursion())
-                {
-                    maxPrivateMem += (4 * 1024);
-                }
+            }
+            if (FG->hasIndirectCall() || FG->hasRecursion())
+            {
+                // If indirect calls or recursions exist, add additional 4KB and hope we don't run out.
+                maxPrivateMem += (4 * 1024);
             }
             if (FG->hasVariableLengthAlloca())
             {
                 // Add another 1KB if there are VLAs
                 maxPrivateMem += 1024;
             }
+            maxPrivateMem = std::max(maxPrivateMem, Ctx.getPrivateMemoryMinimalSizePerThread());
             maxPrivateMem = std::max(maxPrivateMem, (uint32_t)(IGC_GET_FLAG_VALUE(ForcePerThreadPrivateMemorySize)));
-            FG->setMaxPrivateMemOnStack((unsigned)maxPrivateMem);
+
+            if (maxPrivateMem > 0)
+            {
+                modMD.PrivateMemoryPerFG[pKernel] = (unsigned)maxPrivateMem;
+            }
         }
     }
 
@@ -1244,7 +1280,7 @@ bool PrivateMemoryResolution::resolveAllocaInstructions(bool privateOnStack)
 
     if (IGC_IS_FLAG_ENABLED(UseOffsetInLocation) &&
         (privateOnStack == false) &&
-        (IGC::ForceAlwaysInline()))
+        (IGC::ForceAlwaysInline(&Ctx)))
     {
         IGC_ASSERT_MESSAGE(perThreadOffsetInst, "perThreadOffset will not be marked as Output");
         if (perThreadOffsetInst)

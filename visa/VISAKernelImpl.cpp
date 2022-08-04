@@ -752,12 +752,15 @@ int VISAKernelImpl::InitializeFastPath()
 {
     m_kernelMem = new vISA::Mem_Manager(4096);
 
+    uint32_t funcId;
+    GetFunctionId(funcId);
     m_kernel = new (m_mem) G4_Kernel(
         *getCISABuilder()->getPlatformInfo(),
         m_instListNodeAllocator,
         *m_kernelMem,
         m_options,
         m_kernelAttrs,
+        funcId,
         m_major_version,
         m_minor_version);
     m_kernel->setName(m_name.c_str());
@@ -3256,9 +3259,19 @@ int VISAKernelImpl::AppendVISADataMovementInst(
     if (IS_GEN_BOTH_PATH)
     {
         G4_Predicate * g4Pred = (pred != NULL)? pred->g4opnd->asPredicate() : NULL;
+        G4_DstRegRegion *g4Dst = tmpDst->g4opnd->asDstRegRegion();
         status = m_builder->translateVISADataMovementInst(opcode, CISA_DM_FMIN /*ignored */,
             g4Pred, executionSize, emask, satMode ? g4::SAT : g4::NOSAT,
-            tmpDst->g4opnd->asDstRegRegion(), src0->g4opnd, GET_G4_OPNG(src1));
+            g4Dst, src0->g4opnd, GET_G4_OPNG(src1));
+
+        if (opcode == ISA_MOV && g4Dst->isTmReg() && g4Dst->getLeftBound() == 16)
+        {
+            if (m_builder->getPlatform() == Xe_PVC || m_builder->getPlatform() == Xe_PVCXT)
+            {
+                ERROR_PRINT("Pause counter is not supported on PVC and PVCXT");
+                return VISA_FAILURE;
+            }
+        }
     }
     if (IS_VISA_BOTH_PATH)
     {

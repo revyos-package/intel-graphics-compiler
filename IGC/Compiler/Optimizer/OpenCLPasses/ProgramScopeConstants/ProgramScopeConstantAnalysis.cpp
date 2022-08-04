@@ -219,7 +219,7 @@ bool ProgramScopeConstantAnalysis::runOnModule(Module& M)
 #if LLVM_VERSION_MAJOR < 11
         offset = iSTD::Align(offset, m_DL->getPreferredAlignment(globalVar));
 #else
-        offset = iSTD::Align(offset, m_DL->getPreferredAlign(globalVar).value());
+        offset = iSTD::Align(offset, (unsigned)m_DL->getPreferredAlign(globalVar).value());
 #endif
         inlineProgramScopeOffsets[globalVar] = offset;
         offset += (unsigned)(m_DL->getTypeAllocSize(globalVar->getType()->getPointerElementType()));
@@ -415,7 +415,6 @@ void ProgramScopeConstantAnalysis::addData(Constant* initializer,
             const unsigned pointedToAddrSpace = WalkCastsToFindNamedAddrSpace(initializer);
 
             IGC_ASSERT(addressSpace == ADDRESS_SPACE_GLOBAL || addressSpace == ADDRESS_SPACE_CONSTANT);
-            IGC_ASSERT_MESSAGE(pointerSize == 8, "Can global var pointer ever be 32bits?");
 
             // We can only patch global and constant pointers.
             if (pointedToAddrSpace == ADDRESS_SPACE_GLOBAL || pointedToAddrSpace == ADDRESS_SPACE_CONSTANT)

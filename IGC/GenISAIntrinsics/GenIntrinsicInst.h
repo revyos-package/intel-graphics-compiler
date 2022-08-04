@@ -34,7 +34,6 @@ See LICENSE.TXT for details.
 #include "common/LLVMWarningsPush.hpp"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/Function.h"
-#include "llvm/IR/Instructions.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Module.h"
 #include "common/LLVMWarningsPop.hpp"
@@ -43,6 +42,8 @@ See LICENSE.TXT for details.
 #include "common/Types.hpp"
 #include "GenIntrinsics.h"
 #include "Probe/Assertion.h"
+
+#include "llvmWrapper/IR/Instructions.h"
 
 namespace llvm {
 /// IntrinsicInst - A useful wrapper class for inspecting calls to intrinsic
@@ -322,19 +323,19 @@ class LdMSIntrinsic : public SamplerLoadIntrinsic {
 public:
     inline Value* getImmOffset(unsigned int i)
     {
-        return getOperand(getNumArgOperands() - 3 + i);
+        return getOperand(arg_size() - 3 + i);
     }
     inline void setImmOffset(unsigned int i, Value* val)
     {
-        return setOperand(getNumArgOperands() - 3 + i, val);
+        return setOperand(arg_size() - 3 + i, val);
     }
     inline Value* getCoordinate(unsigned int i)
     {
-        return getOperand(getNumArgOperands() - 8 + i);
+        return getOperand(arg_size() - 8 + i);
     }
     inline void setCoordinate(unsigned int i, Value* val)
     {
-        return setOperand(getNumArgOperands() - 8 + i, val);
+        return setOperand(arg_size() - 8 + i, val);
     }
     static inline bool classof(const GenIntrinsicInst *I) {
         switch(I->getIntrinsicID()) {
@@ -829,6 +830,16 @@ public:
         }
         return usage;
     }
+    inline llvm::Value* getVertexIndex() const
+    {
+        llvm::Value* pVertexIndex = nullptr;
+        if (getIntrinsicID() == GenISAIntrinsic::GenISA_DCL_GSsystemValue)
+        {
+            // TODO: deprecate usage of GSSystemValue intrinsic
+            pVertexIndex = getOperand(0);
+        }
+        return pVertexIndex;
+    }
 };
 
 class WavePrefixIntrinsic : public GenIntrinsicInst
@@ -1065,6 +1076,7 @@ public:
     }
 
     Value* getStackID() const { return getOperand(0); }
+    Value* getPredicate() const { return getOperand(1); }
 };
 
 class ReportHitHLIntrinsic : public GenIntrinsicInst {
@@ -1297,6 +1309,7 @@ public:
 
     Value* getFlags()  const { return getOperand(0); }
 };
+
 
 class RayQueryInstrisicBase : public GenIntrinsicInst
 {
@@ -1571,6 +1584,21 @@ public:
         auto& C = this->getContext();
         setOperand(1, ConstantInt::get(Type::getInt32Ty(C), Offset));
     }
+};
+
+class SpillAnchorIntrinsic : public GenIntrinsicInst {
+public:
+    // Methods for support type inquiry through isa, cast, and dyn_cast:
+    static inline bool classof(const GenIntrinsicInst *I) {
+        GenISAIntrinsic::ID ID = I->getIntrinsicID();
+        return ID == GenISAIntrinsic::GenISA_rt_spill_anchor;
+    }
+
+    static inline bool classof(const Value *V) {
+        return isa<GenIntrinsicInst>(V) && classof(cast<GenIntrinsicInst>(V));
+    }
+
+    Value* getValue() const { return getOperand(0); }
 };
 
 class StaticConstantPatchIntrinsic : public GenIntrinsicInst {

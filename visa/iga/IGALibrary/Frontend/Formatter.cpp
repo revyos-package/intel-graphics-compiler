@@ -59,6 +59,7 @@ protected:
     ansi_esc ANSI_COMMENT;
 
     void formatDstOp(const Instruction &i);
+
     void formatSrcOp(SourceIndex ix, const Instruction &i);
     void formatSyncAllSrc0(const Instruction &i);
     void formatBareRegisterUnescaped(RegName regName, int regNum);
@@ -223,7 +224,10 @@ public:
                 emit(" ");
             }
             emit("[");
-            emitHexDigits<PC>(i.getPC(), 4);
+            // emit PC. if basePCOffset is specified, PC is printed after adding
+            // the offset specified in command line. By default, basePCOffset
+            // is 0
+            emitHexDigits<PC>(i.getPC()+opts.basePCOffset, 4);
             emit("] ");
         }
 
@@ -269,7 +273,7 @@ public:
         }
         formatPrefixComment(i, currInstBits);
 
-        const bool isSend = i.getOpSpec().isSendOrSendsFamily();
+        const bool isSend = i.is(Op::SEND); // not for sendc
         if (isSend) {
             bool sendPrinted = false;
             if (platform() >= Platform::XE_HPG && opts.printLdSt) {
@@ -325,6 +329,11 @@ public:
         RegSet rsAccS(model);
         rsAccS.addSourceImplicit(i);
         emitSet("s-impl", rsAccS);
+
+        RegSet rsDescS(model);
+        rsDescS.addSourceDescriptorInputs(i);
+        emitSet("s-desc", rsDescS);
+
 
         if (!first)
             newline();
@@ -410,6 +419,7 @@ public:
         formatEolComments(i, debugSendDecode);
     }
 private:
+
 
 
     void formatInstructionPrefix(const Instruction& i) {
@@ -1013,6 +1023,18 @@ void Formatter::formatDstOp(const Instruction &i)
     finishColumn();
 }
 
+static bool sendSrc1NeedsLengthSuffix(const Formatter &f, const Instruction &i)
+{
+    // If Src1.Length is not encoded in the ExDesc (but rather in EU ISA)
+    // then we need to emit Src1.Length somewhere else.  We've chosen
+    // to the suffix the source register.
+    //   e.g. r1:4
+    // This holds for XeHP with ExBSO
+    // and for imm descs in XeHPG+ as well
+    auto exDesc = i.getExtMsgDescriptor();
+    return i.hasInstOpt(InstOpt::EXBSO) || // includes the XeHPG+ imm cases
+        (exDesc.isImm() && f.platform() >= Platform::XE_HPG);
+}
 
 void Formatter::formatSrcOp(
     SourceIndex srcIx,
@@ -1025,30 +1047,14 @@ void Formatter::formatSrcOp(
 
     switch (src.getKind()) {
     case Operand::Kind::DIRECT: {
-        // If Src1.Length is not encoded in the ExDesc (but rather in EU ISA)
-        // then we need to emit Src1.Length somewhere else.  We've chosen
-        // to the suffix the source register.
-        //   e.g. r1:4
-        // This holds for XeHP with ExBSO
-        // and for imm descs in XeHPG+ as well
-        auto exDesc = i.getExtMsgDescriptor();
-        const bool isSendSrc1 = srcIx == SourceIndex::SRC1 &&
-            os.isSendOrSendsFamily();
-        auto src1NeedsLenSuffix =
-            isSendSrc1 && i.hasInstOpt(InstOpt::EXBSO);
-        src1NeedsLenSuffix |= // includes the XeHPG+ imm cases
-            isSendSrc1 &&
-            exDesc.isImm() &&
-            platform() >= Platform::XE_HPG;
-        //
-        if (src1NeedsLenSuffix) {
-            formatSendSrcWithLength(
-                src,
-                i.getSrc1Length());
+        if (os.isSendOrSendsFamily() &&
+            srcIx == SourceIndex::SRC1 &&
+            sendSrc1NeedsLengthSuffix(*this, i))
+        {
+            formatSendSrcWithLength(src, i.getSrc1Length());
             break;
         }
-        bool hasSubreg =
-            os.hasSrcSubregister(static_cast<int>(srcIx), i.isMacro());
+        bool hasSubreg = os.hasSrcSubregister(int(srcIx), i.isMacro());
         bool isSimt =
             i.getExecSize() > ExecSize::SIMD1 &&
                 (src.getRegion() != Region::SRC110 ||
@@ -1291,7 +1297,6 @@ void Formatter::formatInstOpts(
 } // end formatInstOpts
 
 bool Formatter::formatLoadStoreSyntax(const Instruction& i) {
-    // TODO: relax this, but ensure nothing breaks
     if (platform() < Platform::XE_HPG) {
         // We will not even try on <=XeHPG
         return false;
@@ -1431,8 +1436,7 @@ bool Formatter::formatLoadStoreSyntax(const Instruction& i) {
 ///////////////////////////////////////////////////////////////////////////////
 //
 // Public interfaces into the kernel
-void FormatOpts::addApiOpts(uint32_t fmtOpts)
-{
+void FormatOpts::addApiOpts(uint32_t fmtOpts, uint32_t pcOff) {
     numericLabels =
         (fmtOpts & IGA_FORMATTING_OPT_NUMERIC_LABELS) != 0;
     syntaxExtensions =
@@ -1455,6 +1459,7 @@ void FormatOpts::addApiOpts(uint32_t fmtOpts)
         (fmtOpts & IGA_FORMATTING_OPT_PRINT_ANSI) != 0;
     printJson =
         (fmtOpts & IGA_FORMATTING_OPT_PRINT_JSON) != 0;
+    basePCOffset = pcOff;
 }
 
 void FormatKernel(

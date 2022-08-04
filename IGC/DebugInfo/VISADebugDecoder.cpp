@@ -95,8 +95,8 @@ void IGC::DbgDecoder::LiveIntervalGenISA::print(llvm::raw_ostream &OS) const {
 void IGC::DbgDecoder::LiveIntervalGenISA::dump() const { print(llvm::dbgs()); }
 
 void IGC::DbgDecoder::SubroutineInfo::print(llvm::raw_ostream &OS) const {
-  OS << "Name=" << name << " [" << startVISAIndex << ";" << endVISAIndex
-     << "], retvals: ";
+  OS << "[" << startVISAIndex << ";" << endVISAIndex << "] Name=" << name
+     << ", retvals: ";
   PrintItems(OS, retval, ", ");
 }
 
@@ -158,22 +158,29 @@ void IGC::DbgDecoder::DbgInfoFormat::print(llvm::raw_ostream &OS) const {
   OS << "  RelocOffset: " << relocOffset << "\n";
   OS << "  NumSubroutines: " << subs.size() << "\n";
 
-  OS << "  Subroutines: [\n    ";
-  PrintItems(OS, subs, "\n    ");
-  OS << "  ]\n";
+  OS << "  Subroutines (VI-sorted): [\n    ";
+  auto SubsCopy = subs;
+  std::sort(SubsCopy.begin(), SubsCopy.end(),
+            [](const auto &LSub, const auto &RSub) {
+              return LSub.startVISAIndex < RSub.startVISAIndex;
+            });
+  PrintItems(OS, SubsCopy, "\n    ");
+  OS << "\n  ]\n";
   OS << "  CFI: {\n";
   cfi.print(OS);
   OS << "  }\n";
 
-  OS << "  Vars:\n  ";
-  PrintItems(OS, Vars, "\n  ");
-  OS << "\n  CisaIndex:\n";
+  OS << "  Vars: {\n    ";
+  PrintItems(OS, Vars, "\n    ");
+  OS << "\n  }\n";
+  OS << "  CisaIndex: {\n";
   std::for_each(CISAIndexMap.begin(), CISAIndexMap.end(), [&OS](const auto &V) {
     auto VisaIndex = V.first;
     auto GenOff = V.second;
-    OS << "  GI: 0x" << llvm::Twine::utohexstr(GenOff)
+    OS << "    GI: 0x" << llvm::Twine::utohexstr(GenOff)
        << " -> VI: " << VisaIndex << "\n";
   });
+  OS << "  }\n";
   OS << "</VISADebugInfo>";
 }
 
@@ -186,9 +193,8 @@ void IGC::DbgDecoder::print(llvm::raw_ostream &OS) const {
   size_t i = 0;
   for (const auto &k : compiledObjs) {
     OS << "CO[" << i << "] = " << k.kernelName << "\n";
-    OS << "    ";
     if (k.subs.empty()) {
-      OS << "- no subroutines\n";
+      OS << "  - no subroutines\n";
     } else {
       for (const auto &Sub : k.subs)
         OS << "    " << Sub.name << "\n";
@@ -199,7 +205,6 @@ void IGC::DbgDecoder::print(llvm::raw_ostream &OS) const {
     k.print(OS);
     OS << "\n";
   }
-  OS << "-------------------------------------\n";
 }
 
 void IGC::DbgDecoder::dump() const { print(llvm::dbgs()); }

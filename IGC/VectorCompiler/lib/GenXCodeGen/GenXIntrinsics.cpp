@@ -22,7 +22,7 @@ SPDX-License-Identifier: MIT
 #include "visa_igc_common_header.h"
 #include "llvm/GenXIntrinsics/GenXIntrinsics.h"
 #include "llvm/IR/Constants.h"
-#include "llvm/IR/Instructions.h"
+#include "llvmWrapper/IR/Instructions.h"
 #include "llvm/IR/Intrinsics.h"
 
 #include "llvmWrapper/IR/DerivedTypes.h"
@@ -50,14 +50,17 @@ using namespace llvm;
 // aid readability.
 
 // Region access intrinsics do not appear in this table
-const GenXIntrinsicInfo::TableType GenXIntrinsicInfo::Table = {
+const GenXIntrinsicInfo::TableType &GenXIntrinsicInfo::getTable() {
+  static TableType Table = {
 #include "GenXIntrinsicInfoTable.inc"
-};
+  };
+  return Table;
+}
 
 // Get the category and modifier for an arg idx (-1 means return value).
 // The returned ArgInfo struct contains just the short read from the table,
 // and has methods for accessing the various fields.
-GenXIntrinsicInfo::ArgInfo GenXIntrinsicInfo::getArgInfo(int Idx) {
+GenXIntrinsicInfo::ArgInfo GenXIntrinsicInfo::getArgInfo(int Idx) const {
   // Read through the fields in the table to find the one with the right
   // arg index...
   for (auto AI : getInstDesc())
@@ -71,7 +74,7 @@ GenXIntrinsicInfo::ArgInfo GenXIntrinsicInfo::getArgInfo(int Idx) {
 // for this call. If the intrinsic does not have a ARGCOUNT descriptor
 // this will always return the number of operands to the call (ie, there
 // is no trailing null zone), even if there are some trailing nulls.
-unsigned GenXIntrinsicInfo::getTrailingNullZoneStart(CallInst *CI) {
+unsigned GenXIntrinsicInfo::getTrailingNullZoneStart(CallInst *CI) const {
   auto AI =
       std::find_if(getInstDesc().begin(), getInstDesc().end(),
                    [](auto Arg) { return Arg.getCategory() == ARGCOUNT; });
@@ -79,7 +82,7 @@ unsigned GenXIntrinsicInfo::getTrailingNullZoneStart(CallInst *CI) {
     return CI->getNumOperands();
   unsigned BaseArg = AI->getArgIdx();
   unsigned TrailingNullStart = BaseArg;
-  for (unsigned Idx = BaseArg; Idx < CI->getNumArgOperands(); ++Idx) {
+  for (unsigned Idx = BaseArg; Idx < IGCLLVM::getNumArgOperands(CI); ++Idx) {
     if (auto CA = dyn_cast<Constant>(CI->getArgOperand(Idx)))
       if (CA->isNullValue())
         continue;
@@ -94,7 +97,7 @@ unsigned GenXIntrinsicInfo::getTrailingNullZoneStart(CallInst *CI) {
  *
  * Return:  bit N set if execution size 1<<N is allowed
  */
-unsigned GenXIntrinsicInfo::getExecSizeAllowedBits() {
+unsigned GenXIntrinsicInfo::getExecSizeAllowedBits() const {
   for (auto AI : getInstDesc()) {
     if (!AI.isGeneral()) {
       switch (AI.getCategory()) {
@@ -120,16 +123,20 @@ unsigned GenXIntrinsicInfo::getExecSizeAllowedBits() {
  *
  * Return:  true if it permitted, false otherwise.
  */
-bool GenXIntrinsicInfo::getPredAllowed() {
+bool GenXIntrinsicInfo::getPredAllowed() const {
   // Simply search the intrinsic description for an IMPLICITPRED
   // entry. Not very efficient, but the situations where this
   // check is needed are expected to be infrequent.
-  for (auto AI : getInstDesc()) {
-    if (AI.getCategory() == IMPLICITPRED)
-      return true;
-  }
+  return any_of(getInstDesc(),
+                [](auto AI) { return AI.getCategory() == IMPLICITPRED; });
+}
 
-  return false;
+/***********************************************************************
+ * isElementWise : determine if this intrinsic has element-wise semantics.
+ */
+bool GenXIntrinsicInfo::isElementWise() const {
+  return any_of(getInstDesc(),
+                [](auto AI) { return AI.getCategory() == ELEMENTWISE; });
 }
 
 unsigned GenXIntrinsicInfo::getOverridedExecSize(CallInst *CI,
@@ -176,8 +183,10 @@ unsigned GenXIntrinsicInfo::getOverridedExecSize(CallInst *CI,
   case GenXIntrinsic::genx_dpas2:
   case GenXIntrinsic::genx_dpas_nosrc0:
   case GenXIntrinsic::genx_dpasw:
-  case GenXIntrinsic::genx_dpasw_nosrc0:
-    return ST ? ST->dpasWidth() : 8;
+  case GenXIntrinsic::genx_dpasw_nosrc0: {
+    unsigned Width = ST ? ST->dpasWidth() : 8;
+    return Width;
+  }
   }
 
   return 0;

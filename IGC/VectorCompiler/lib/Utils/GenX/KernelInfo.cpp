@@ -1,6 +1,6 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (C) 2021 Intel Corporation
+Copyright (C) 2021-2022 Intel Corporation
 
 SPDX-License-Identifier: MIT
 
@@ -325,9 +325,31 @@ void vc::KernelMetadata::updateBTIndicesMD(std::vector<int> &&BTIndices) {
                internal::KernelMDOp::BTIndices);
 }
 
+void vc::KernelMetadata::updateSLMSizeMD(unsigned Size) {
+  SLMSize = Size;
+  auto *Ty = Type::getInt32Ty(F->getContext());
+  auto *C = ConstantInt::get(Ty, SLMSize);
+  ExternalNode->replaceOperandWith(genx::KernelMDOp::SLMSize,
+                                   ValueAsMetadata::get(C));
+}
+
 bool vc::hasKernel(const Module &M) {
   NamedMDNode *KernelsMD = M.getNamedMetadata(genx::FunctionMD::GenXKernels);
   if (!KernelsMD)
     return false;
   return KernelsMD->getNumOperands();
+}
+
+const llvm::Argument &vc::getImplicitArg(const llvm::Function &Kernel,
+                                         KernelMetadata::ImpValue ImplArgID) {
+  IGC_ASSERT_MESSAGE(vc::isKernel(Kernel), "a kernel was expected");
+  vc::KernelMetadata KM{&Kernel};
+  auto *ImplArgIt = std::find_if(
+      Kernel.arg_begin(), Kernel.arg_end(),
+      [&KM, ImplArgID](const Argument &Arg) {
+        return vc::isImplicitArgKind(KM.getArgKind(Arg.getArgNo()), ImplArgID);
+      });
+  IGC_ASSERT_MESSAGE(ImplArgIt != Kernel.arg_end(),
+                     "the requested implicit arg wasn't found");
+  return *ImplArgIt;
 }

@@ -42,6 +42,7 @@ public:
 public:
     static constexpr char *MergeFuncName = "__mergeContinuation";
     static constexpr char *BTDTarget = "btd.target";
+    static constexpr char* SpillSize = "spill.size";
     enum RTMemoryAccessMode
     {
         STATELESS,
@@ -98,9 +99,19 @@ private:
 
     void init()
     {
+        // KMD behavior across operating systems differs currently, the value of MaxSlicesSupported is reported to be 1 on Linux.
+        // If this is the case, rely on SliceInfo structure passed from runtime.
+        uint32_t enabledSlices = 0;
+        for (unsigned int sliceID = 0; sliceID < GT_MAX_SLICE; ++sliceID)
+        {
+            if (SysInfo.SliceInfo[sliceID].Enabled) {
+                enabledSlices++;
+            }
+        }
+
         if (Ctx.platform.isProductChildOf(IGFX_PVC))
         {
-            NumDSSPerSlice = SysInfo.MaxSubSlicesSupported / SysInfo.MaxSlicesSupported;
+            NumDSSPerSlice = SysInfo.MaxSubSlicesSupported / std::max(SysInfo.MaxSlicesSupported, enabledSlices);
             EuCountPerDSS = SysInfo.MaxEuPerSubSlice;
             MaxDualSubSlicesSupported = SysInfo.MaxSubSlicesSupported;
 
@@ -123,9 +134,7 @@ private:
             // platforms, it must calculated before finding the index of the
             // SubSlice.
 
-            uint32_t numberOfSSesPerSlice = SysInfo.MaxSubSlicesSupported / SysInfo.MaxSlicesSupported;
-
-            IGC_ASSERT(numberOfSSesPerSlice <= GT_MAX_SUBSLICE_PER_SLICE);
+            IGC_ASSERT(NumDSSPerSlice <= GT_MAX_SUBSLICE_PER_SLICE);
 
             for (unsigned int sliceID = 0; sliceID < GT_MAX_SLICE; ++sliceID)
             {
@@ -134,11 +143,11 @@ private:
                     // SubSliceInfo size is GT_MAX_SUBSLICE_PER_SLICE, but
                     // actual number, calculated for given platform, of SubSlices is used
                     // to iterate only through SubSlices present on the platform.
-                    for (unsigned int ssID = 0; ssID < numberOfSSesPerSlice; ++ssID)
+                    for (unsigned int ssID = 0; ssID < NumDSSPerSlice; ++ssID)
                     {
                         if (SysInfo.SliceInfo[sliceID].SubSliceInfo[ssID].Enabled)
                         {
-                            MaxDualSubSlicesSupported = std::max(MaxDualSubSlicesSupported, (sliceID * numberOfSSesPerSlice) + ssID + 1);
+                            MaxDualSubSlicesSupported = std::max(MaxDualSubSlicesSupported, (sliceID * NumDSSPerSlice) + ssID + 1);
                         }
                     }
                 }
@@ -146,7 +155,7 @@ private:
         }
         else
         {
-            NumDSSPerSlice = SysInfo.MaxDualSubSlicesSupported / SysInfo.MaxSlicesSupported;
+            NumDSSPerSlice = SysInfo.MaxDualSubSlicesSupported / std::max(SysInfo.MaxSlicesSupported, enabledSlices);
             EuCountPerDSS = SysInfo.EUCount / SysInfo.DualSubSliceCount;
             MaxDualSubSlicesSupported = SysInfo.MaxDualSubSlicesSupported;
 
@@ -169,9 +178,7 @@ private:
             // platforms, it must calculated before finding the index of the
             // DualSubSlice.
 
-            uint32_t numberOfDSSesPerSlice = SysInfo.MaxDualSubSlicesSupported / SysInfo.MaxSlicesSupported;
-
-            IGC_ASSERT(numberOfDSSesPerSlice <= GT_MAX_DUALSUBSLICE_PER_SLICE);
+            IGC_ASSERT(NumDSSPerSlice <= GT_MAX_DUALSUBSLICE_PER_SLICE);
 
             for (unsigned int sliceID = 0; sliceID < GT_MAX_SLICE; ++sliceID)
             {
@@ -180,11 +187,11 @@ private:
                     // DSSInfo size is GT_MAX_DUALSUBSLICE_PER_SLICE, but
                     // actual number, calculated for given platform, of DualSubSlices is used
                     // to iterate only through DualSubSlices present on the platform.
-                    for (unsigned int dssID = 0; dssID < numberOfDSSesPerSlice; ++dssID)
+                    for (unsigned int dssID = 0; dssID < NumDSSPerSlice; ++dssID)
                     {
                         if (SysInfo.SliceInfo[sliceID].DSSInfo[dssID].Enabled)
                         {
-                            MaxDualSubSlicesSupported = std::max(MaxDualSubSlicesSupported, (sliceID * numberOfDSSesPerSlice) + dssID + 1);
+                            MaxDualSubSlicesSupported = std::max(MaxDualSubSlicesSupported, (sliceID * NumDSSPerSlice) + dssID + 1);
                         }
                     }
                 }
@@ -379,6 +386,8 @@ public:
     Value* CreateSWHotZonePtrIntrinsic(Value *Addr, Type *PtrTy, bool AddDecoration);
     Value* CreateAsyncStackPtrIntrinsic(Value *Addr, Type *PtrTy, bool AddDecoration);
     Value* CreateSyncStackPtrIntrinsic(Value* Addr, Type* PtrTy, bool AddDecoration);
+
+
     CallInst* CreateSWStackPtrIntrinsic(
         Value *Addr, bool AddDecoration, const Twine &Name = "");
     SWStackPtrVal* getSWStackPointer(
@@ -395,7 +404,8 @@ public:
     AsyncStackPointerVal* getAsyncStackPointer(bool BuildAddress = false);
     SyncStackPointerVal*  getSyncStackPointer();
     CallInst* CreateBTDCall(Value* RecordPointer);
-    StackIDReleaseIntrinsic* CreateStackIDRelease(Value* StackID = nullptr);
+    StackIDReleaseIntrinsic* CreateStackIDRelease(
+        Value* StackID = nullptr, Value* Flag = nullptr);
     CallInst* createMergeCall();
 
     // Note: 'traceRayCtrl' should be already by 8 bits to its location
@@ -627,7 +637,10 @@ public:
 
     void setGlobalBufferPtr(Value* GlobalBufferPtr);
     void setDisableRTGlobalsKnownValues(bool shouldDisable);
-
+    GenIntrinsicInst* getSpillAnchor(Value* V);
+    static void setSpillSize(ContinuationHLIntrinsic& CI, uint32_t SpillSize);
+    static Optional<uint32_t> getSpillSize(
+        const ContinuationHLIntrinsic& CI);
 public:
     static Instruction* getEntryFirstInsertionPt(
         Function &F,
@@ -698,16 +711,14 @@ private:
         uint32_t dim,
         IGC::CallableShaderTypeMD ShaderTy);
 
-    Value* getTraceRayPayload(
-        Value* bvhLevel,
-        Value* traceRayCtrl,
-        bool isRayQuery,
-        const Twine& PayloadName = "");
-
     Value* emitStateRegID(uint32_t BitStart, uint32_t BitEnd);
+    std::pair<uint32_t, uint32_t> getSliceIDBitsInSR0() const;
+    std::pair<uint32_t, uint32_t> getSubsliceIDBitsInSR0() const;
+    std::pair<uint32_t, uint32_t> getDualSubsliceIDBitsInSR0() const;
     Value* getSliceID();
     Value* getSubsliceID();
     Value* getDualSubsliceID();
+
     Value* getGlobalDSSID();
 
     Value* getInstanceLeafPtr(Value* instLeafTopPtr);
@@ -720,6 +731,13 @@ private:
     const IGC::RayDispatchShaderContext& RtCtx() const;
 //printf
 public:
+
+    Value* getTraceRayPayload(
+        Value* bvhLevel,
+        Value* traceRayCtrl,
+        bool isRayQuery,
+        const Twine& PayloadName = "");
+
     void printTraceRay(const TraceRayAsyncHLIntrinsic* trace);
     void printDispatchRayIndex(const std::vector<Value*>& Indices);
 public:

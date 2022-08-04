@@ -2577,6 +2577,37 @@ void LivenessAnalysis::dumpGlobalVarNum() const
     std::cerr << "total var num: " << numVarId << " global var num: " << global_var_num << "\n";
 }
 
+void LivenessAnalysis::reportUndefinedUses() const
+{
+    auto dumpVar = [](G4_RegVar* var)
+    {
+        int size = var->getDeclare()->getTotalElems() * var->getDeclare()->getElemSize();
+        std::cerr << var->getName() << "(" << size << "), ";
+    };
+
+    std::cerr << "\nPossible undefined uses in kernel " << fg.getKernel()->getName() << ":\n";
+    unsigned count = 0;
+    for (auto var : vars)
+    {
+        // Skip if the var is not involved in RA.
+        if (!var->isRegAllocPartaker())
+            continue;
+        // Skip if the var is a AddrSpillLoc.
+        if (var->isRegVarAddrSpillLoc())
+            continue;
+        // Skip if the var is not in use_in of BB0
+        if (!isUseIn(fg.getEntryBB(), var->getId()))
+            continue;
+        // Skip if the var is in def_in of BB0
+        if (def_in[fg.getEntryBB()->getId()].isSet(var->getId()))
+            continue;
+
+        if (count++ % 10 == 0) std::cerr << "\n";
+            dumpVar(var);
+    }
+    std::cerr << "\n";
+}
+
 bool LivenessAnalysis::isEmptyLiveness() const
 {
     return numBBId == 0;
@@ -3559,10 +3590,16 @@ static void replaceSSO(G4_Kernel& kernel)
             {
                 if (kernel.fg.getIsStackCallFunc())
                 {
-                    bb->erase(instIt);
+                    instIt = bb->erase(instIt);
+                    --instIt;
                 }
                 else
                     inst->setDest(dst);
+
+                // if an earlier pass inserted pseudokill for SSO dcl, remove it
+                // but our final target is the instruction actually defining SSO.
+                if (inst->isPseudoKill())
+                    continue;
 
                 // Also update scratch msg dcl to be an alias
                 kernel.fg.builder->getSpillSurfaceOffset()->setAliasDeclare(

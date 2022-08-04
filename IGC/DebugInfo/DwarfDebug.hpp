@@ -61,8 +61,7 @@ class DIE;
 class DIEBlock;
 class DIEEntry;
 class DwarfDebug;
-
-class DbgDecoder;
+class VISADebugInfo;
 
 /// \brief This struct describes location entries emitted in the .debug_loc
 /// section.
@@ -572,8 +571,6 @@ public:
   //
   DwarfDebug(IGC::StreamEmitter *A, ::IGC::VISAModule *M);
 
-  ~DwarfDebug();
-
   IGC::StreamEmitter &getStreamEmitter() const { return *Asm; }
 
   const IGC::DebugEmitterOpts &getEmitterSettings() const {
@@ -652,7 +649,7 @@ private:
   // line#, vector<inlinedAt>
   llvm::DenseMap<unsigned int, std::vector<llvm::DILocation *>> isStmtSet;
 
-  const DbgDecoder *decodedDbg = nullptr;
+  const IGC::VISAObjectDebugInfo *VisaDbgInfo = nullptr;
 
   // store all instructions corresponding to same InlinedAt MDNode
   llvm::DenseMap<llvm::MDNode *, std::vector<const llvm::Instruction *>>
@@ -710,8 +707,14 @@ public:
   // SIMD width
   unsigned short simdWidth = 0;
 
-  const DbgDecoder *getDecodedDbg() { return decodedDbg; }
-  void setDecodedDbg(const DbgDecoder *d) { decodedDbg = d; }
+  const IGC::VISAObjectDebugInfo &getVisaDebugInfo() {
+    IGC_ASSERT(VisaDbgInfo);
+    return *VisaDbgInfo;
+  }
+
+  void setVisaDbgInfo(const IGC::VISAObjectDebugInfo &VDI) {
+    VisaDbgInfo = &VDI;
+  }
 
   llvm::MCSymbol *CopyDebugLoc(unsigned int offset);
   unsigned int CopyDebugLocNoReloc(unsigned int o);
@@ -723,6 +726,7 @@ public:
 private:
   void encodeRange(CompileUnit *TheCU, DIE *ScopeDIE,
                    const llvm::SmallVectorImpl<InsnRange> *Ranges);
+  void encodeScratchAddrSpace(std::vector<uint8_t> &data);
   uint32_t writeSubroutineCIE();
   uint32_t writeStackcallCIE();
   void writeFDESubroutine(VISAModule *m);
@@ -734,14 +738,17 @@ private:
   uint32_t offsetCIESubroutine = 0;
 
   // r[MAX-GRF - 3]
-  static const unsigned int SpecialGRFOff = 3;
+  static const unsigned int SpecialGRFOff_VISAABI1 = 3;
+  static const unsigned int SpecialGRFOff_VISAABI2 = 1;
   static const unsigned int RetIpSubReg = 0;
   static const unsigned int RetEMSubReg = 1;
   static const unsigned int BESPSubReg = 2;
   static const unsigned int BEFPSubReg = 3;
 
   uint32_t GetSpecialGRF() {
-    return GetVISAModule()->getNumGRFs() - SpecialGRFOff;
+    if (!EmitSettings.ZeBinCompatible)
+      return GetVISAModule()->getNumGRFs() - SpecialGRFOff_VISAABI1;
+    return GetVISAModule()->getNumGRFs() - SpecialGRFOff_VISAABI2;
   }
 };
 } // namespace IGC

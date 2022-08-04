@@ -1,6 +1,6 @@
 #=========================== begin_copyright_notice ============================
 #
-# Copyright (C) 2017-2021 Intel Corporation
+# Copyright (C) 2017-2022 Intel Corporation
 #
 # SPDX-License-Identifier: MIT
 #
@@ -18,7 +18,7 @@ add_subdirectory(CorrectlyRoundedDivSqrt)
 add_subdirectory(DebuggerSupport)
 add_subdirectory(DeviceEnqueueFuncs)
 add_subdirectory(DisableLoopUnrollOnRetry)
-add_subdirectory(ExtenstionFuncs)
+add_subdirectory(ExtensionFuncs)
 add_subdirectory(GenericAddressResolution)
 add_subdirectory(ImageFuncs)
 add_subdirectory(LocalBuffers)
@@ -49,8 +49,8 @@ set(IGC_BUILD__SRC__OpenCLPasses
     "${CMAKE_CURRENT_SOURCE_DIR}/TransformUnmaskedFunctionsPass.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/KernelFunctionCloning.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/ErrorCheckPass.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/PoisonFP64KernelsPass.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/JointMatrixFuncsResolutionPass.cpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/ResolvePointersComparison.cpp"
   )
 set(IGC_BUILD__SRC__Optimizer_OpenCLPasses_All
     ${IGC_BUILD__SRC__OpenCLPasses}
@@ -65,7 +65,7 @@ set(IGC_BUILD__SRC__Optimizer_OpenCLPasses_All
     ${IGC_BUILD__SRC__OpenCLPasses_DeviceEnqueueFuncs}
     ${IGC_BUILD__SRC__OpenCLPasses_DisableLoopUnrollOnRetry}
     ${IGC_BUILD__SRC__OpenCLPasses_DpasFuncs}
-    ${IGC_BUILD__SRC__OpenCLPasses_ExtenstionFuncs}
+    ${IGC_BUILD__SRC__OpenCLPasses_ExtensionFuncs}
     ${IGC_BUILD__SRC__OpenCLPasses_GenericAddressResolution}
     ${IGC_BUILD__SRC__OpenCLPasses_ImageFuncs}
     ${IGC_BUILD__SRC__OpenCLPasses_LocalBuffers}
@@ -103,7 +103,6 @@ set(IGC_BUILD__HDR__OpenCLPasses
     "${CMAKE_CURRENT_SOURCE_DIR}/KernelFunctionCloning.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/ErrorCheckPass.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/JointMatrixFuncsResolutionPass.h"
-    "${CMAKE_CURRENT_SOURCE_DIR}/ResolvePointersComparison.h"
   )
 set(IGC_BUILD__HDR__Optimizer_OpenCLPasses_All
     ${IGC_BUILD__HDR__OpenCLPasses}
@@ -118,7 +117,7 @@ set(IGC_BUILD__HDR__Optimizer_OpenCLPasses_All
     ${IGC_BUILD__HDR__OpenCLPasses_DeviceEnqueueFuncs}
     ${IGC_BUILD__HDR__OpenCLPasses_DisableLoopUnrollOnRetry}
     ${IGC_BUILD__HDR__OpenCLPasses_DpasFuncs}
-    ${IGC_BUILD__HDR__OpenCLPasses_ExtenstionFuncs}
+    ${IGC_BUILD__HDR__OpenCLPasses_ExtensionFuncs}
     ${IGC_BUILD__HDR__OpenCLPasses_GenericAddressResolution}
     ${IGC_BUILD__HDR__OpenCLPasses_ImageFuncs}
     ${IGC_BUILD__HDR__OpenCLPasses_LocalBuffers}
@@ -162,7 +161,7 @@ set(IGC_BUILD_Compiler_OpenCLPasses_Groups
     Compiler__OpenCLPasses_DeviceEnqueueFuncs
     Compiler__OpenCLPasses_DisableLoopUnrollOnRetry
     Compiler__OpenCLPasses_DpasFuncs
-    Compiler__OpenCLPasses_ExtenstionFuncs
+    Compiler__OpenCLPasses_ExtensionFuncs
     Compiler__OpenCLPasses_GenericAddressResolution
     Compiler__OpenCLPasses_GenericAddressSpaceStaticResolution
     Compiler__OpenCLPasses_ImageFuncs

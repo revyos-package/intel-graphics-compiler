@@ -135,7 +135,7 @@ public:
     void emitInst(const Instruction &i) {
         comments.clear();
 
-        const bool isSend = i.getOpSpec().isSendOrSendsFamily();
+        //const bool isSend = i.getOpSpec().isSendOrSendsFamily();
         emitIndent();
         emit("{");
         emit("\"kind\":\"I\"");
@@ -658,10 +658,7 @@ public:
 
         if (srcIx == 0 && i.getSrc0Length() >= 0) {
             emit("{");
-            const auto di =
-                tryDecode(platform(), i.getSubfunction().send, i.getExecSize(),
-                    i.getExtMsgDescriptor(), i.getMsgDescriptor(),
-                    nullptr);
+            const auto di = tryDecode(i, nullptr);
             emit("\"kind\":\"AD\"");
             emit(", \"surf\":");
             if (di) {
@@ -703,6 +700,7 @@ public:
     void emitAddrSurfInfo(const Instruction &i, const MessageInfo &mi) {
         emit("{\"type\":");
         switch (mi.addrType) {
+        case AddrType::INVALID: emit("\"invalid\""); break;
         case AddrType::FLAT: emit("\"flat\""); break;
         case AddrType::BTI:  emit("\"bti\""); break;
         case AddrType::BSS:  emit("\"bss\""); break;

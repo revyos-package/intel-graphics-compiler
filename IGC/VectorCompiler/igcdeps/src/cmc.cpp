@@ -645,7 +645,7 @@ static void setArgumentsInfo(const GenXOCLRuntimeInfo::KernelInfo &Info,
         Kernel.createPrivateBaseAnnotation(Arg.getIndex(), Arg.getSizeInBytes(),
                                            ArgOffset, Arg.getBTI(),
                                            PrivMemSize);
-        Kernel.m_kernelInfo.m_executionEnivronment
+        Kernel.m_kernelInfo.m_executionEnvironment
             .PerThreadPrivateOnStatelessSize = PrivMemSize;
         Kernel.m_kernelInfo.m_argIndexMap[Arg.getIndex()] = Arg.getBTI();
       }
@@ -680,8 +680,8 @@ static void setExecutionInfo(const GenXOCLRuntimeInfo::KernelInfo &BackendInfo,
   Kernel.m_GRFSizeInBytes = BackendInfo.getGRFSizeInBytes();
   Kernel.m_kernelInfo.m_kernelName = BackendInfo.getName();
 
-  iOpenCL::ExecutionEnivronment &ExecEnv =
-      Kernel.m_kernelInfo.m_executionEnivronment;
+  iOpenCL::ExecutionEnvironment &ExecEnv =
+      Kernel.m_kernelInfo.m_executionEnvironment;
   ExecEnv.CompiledSIMDSize = BackendInfo.getSIMDSize();
   // SLM size in bytes, align to 1KB.
   ExecEnv.SumFixedTGSMSizes = iSTD::Align(BackendInfo.getSLMSize(), 1024);
@@ -758,7 +758,9 @@ static void setGenBinary(const FINALIZER_INFO &JitterInfo,
   PO.m_InstructionCount = JitterInfo.numAsmCount;
 }
 
-static void setVISAAsm(const std::string &VISAAsm, CMKernel &Kernel) {
+static void setVISAAsm(
+    const std::vector<GenXOCLRuntimeInfo::KernelInfo::NamedVISAAsm> &VISAAsm,
+    CMKernel &Kernel) {
   Kernel.getProgramOutput().m_VISAAsm = VISAAsm;
 }
 
@@ -778,7 +780,7 @@ static void setGtpinInfo(const FINALIZER_INFO &JitterInfo,
                          CMKernel &Kernel) {
   Kernel.getProgramOutput().m_scratchSpaceUsedByGtpin =
       JitterInfo.numBytesScratchGtpin;
-  Kernel.m_kernelInfo.m_executionEnivronment.PerThreadScratchSpace +=
+  Kernel.m_kernelInfo.m_executionEnvironment.PerThreadScratchSpace +=
       JitterInfo.numBytesScratchGtpin;
 
   if (!GtpinInfo.empty()) {

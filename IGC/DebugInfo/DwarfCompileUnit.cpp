@@ -40,6 +40,7 @@ See LICENSE.TXT for details.
 #include "DIE.hpp"
 #include "DwarfCompileUnit.hpp"
 #include "DwarfDebug.hpp"
+#include "VISADebugInfo.hpp"
 #include "StreamEmitter.hpp"
 #include "VISAModule.hpp"
 
@@ -261,6 +262,7 @@ void CompileUnit::addUInt(IGC::DIEBlock *Block, dwarf::Form Form,
       "Insufficient bits in form for encoding");
   addUInt(Block, (dwarf::Attribute)0, Form, Integer);
 }
+
 void CompileUnit::addBitPiece(IGC::DIEBlock *Block, uint64_t SizeBits,
                               uint64_t OffsetBits) {
   addUInt(Block, dwarf::DW_FORM_data1, dwarf::DW_OP_bit_piece);
@@ -547,7 +549,7 @@ bool isUnsignedDIType(DwarfDebug *DD, DIType *Ty) {
 }
 
 /// If this type is derived from a base type then return base type size.
-static uint64_t getBaseTypeSize(DwarfDebug *DD, DIDerivedType *Ty) {
+static uint64_t getBaseTypeSize(DwarfDebug *DD, const DIDerivedType *Ty) {
   unsigned Tag = Ty->getTag();
 
   if (Tag != dwarf::DW_TAG_member && Tag != dwarf::DW_TAG_typedef &&
@@ -556,16 +558,11 @@ static uint64_t getBaseTypeSize(DwarfDebug *DD, DIDerivedType *Ty) {
     return Ty->getSizeInBits();
   }
 
-  DIType *BaseType = DD->resolve(Ty->getBaseType());
+  const DIType *BaseType = DD->resolve(Ty->getBaseType());
 
   // Void type is represented as null
   if (!BaseType)
     return 0;
-
-  // If this type is not derived from any type then take conservative approach.
-  if (isa<DIBasicType>(BaseType)) {
-    return Ty->getSizeInBits();
-  }
 
   // If this is a derived type, go ahead and get the base type, unless it's a
   // reference then it's just the size of the field. Pointer types have no need
@@ -653,27 +650,21 @@ void CompileUnit::addConstantValue(DIE *Die, const APInt &Val, bool Unsigned) {
 
 /// addConstantUValue - Add constant unsigned value entry in variable DIEBlock.
 void CompileUnit::addConstantUValue(DIEBlock *TheDie, uint64_t Val) {
-  dwarf::LocationAtom constOp = dwarf::DW_OP_const1u;
-  dwarf::Form constForm = DIEInteger::BestForm(false, Val);
-  switch (constForm) {
-  case dwarf::DW_FORM_data1:
-    constOp = dwarf::DW_OP_const1u;
-    break;
-  case dwarf::DW_FORM_data2:
-    constOp = dwarf::DW_OP_const2u;
-    break;
-  case dwarf::DW_FORM_data4:
-    constOp = dwarf::DW_OP_const4u;
-    break;
-  case dwarf::DW_FORM_data8:
-    constOp = dwarf::DW_OP_const8u;
-    break;
-  default:
-    IGC_ASSERT_MESSAGE(false, "Unsupported encoding");
-    break;
+  if (Val <= 31) {
+    addUInt(TheDie, dwarf::DW_FORM_data1, dwarf::DW_OP_lit0 + Val);
+  } else if (Val <= 0xff) {
+    addUInt(TheDie, dwarf::DW_FORM_data1, dwarf::DW_OP_const1u);
+    addUInt(TheDie, dwarf::DW_FORM_data1, Val);
+  } else if (Val <= 0xffff) {
+    addUInt(TheDie, dwarf::DW_FORM_data1, dwarf::DW_OP_const2u);
+    addUInt(TheDie, dwarf::DW_FORM_data2, Val);
+  } else if (Val <= 0xffffffff) {
+    addUInt(TheDie, dwarf::DW_FORM_data1, dwarf::DW_OP_const4u);
+    addUInt(TheDie, dwarf::DW_FORM_data4, Val);
+  } else {
+    addUInt(TheDie, dwarf::DW_FORM_data1, dwarf::DW_OP_const8u);
+    addUInt(TheDie, dwarf::DW_FORM_data8, Val);
   }
-  addUInt(TheDie, dwarf::DW_FORM_data1, constOp);
-  addUInt(TheDie, constForm, Val);
 }
 
 /// addConstantData - Add constant data entry in variable DIE.
@@ -926,7 +917,7 @@ void CompileUnit::addBindlessOrStatelessLocation(
     uint32_t regNum = Loc.GetRegister();
     const auto *VISAMod = Loc.GetVISAModule();
 
-    const auto *VarInfo = VISAMod->getVarInfo(*DD->getDecodedDbg(), regNum);
+    const auto *VarInfo = VISAMod->getVarInfo(DD->getVisaDebugInfo(), regNum);
     if (!VarInfo) {
       LLVM_DEBUG(dbgs() << "warning: register is not available "
                         << "for bindless surface offset of a V" << regNum);
@@ -1044,7 +1035,7 @@ void CompileUnit::addBindlessSurfaceLocation(IGC::DIEBlock *Block,
     auto regNum = Loc.GetRegister();
     const auto *VISAMod = Loc.GetVISAModule();
 
-    const auto *VarInfo = VISAMod->getVarInfo(*DD->getDecodedDbg(), regNum);
+    const auto *VarInfo = VISAMod->getVarInfo(DD->getVisaDebugInfo(), regNum);
     if (!VarInfo) {
       LLVM_DEBUG(dbgs() << "warning: register is not available "
                         << "for bindless surface offset of a V" << regNum);
@@ -1136,7 +1127,7 @@ void CompileUnit::addBindlessScratchSpaceLocation(
     auto regNum = Loc.GetRegister();
     const auto *VISAMod = Loc.GetVISAModule();
 
-    const auto *VarInfo = VISAMod->getVarInfo(*DD->getDecodedDbg(), regNum);
+    const auto *VarInfo = VISAMod->getVarInfo(DD->getVisaDebugInfo(), regNum);
     if (!VarInfo) {
       LLVM_DEBUG(dbgs() << "warning: could not build bindless scratch offset (V"
                         << regNum << ")");
@@ -1192,9 +1183,10 @@ void CompileUnit::addBE_FP(IGC::DIEBlock *Block) {
   // DW_OP_const2u <32>
   // DW_OP_plus
   uint32_t BE_FP_RegNum = 0, BE_FP_SubRegNum = 0;
-  const auto *vMod = DD->GetVISAModule();
-  const auto *CU = vMod->getCompileUnit(*DD->getDecodedDbg());
-  bool hasValidBEFP = CU->cfi.getBEFPRegNum(BE_FP_RegNum, BE_FP_SubRegNum);
+  const auto &VisaDbgInfo = DD->getVisaDebugInfo();
+
+  bool hasValidBEFP =
+      VisaDbgInfo.getCFI().getBEFPRegNum(BE_FP_RegNum, BE_FP_SubRegNum);
   if (!hasValidBEFP)
     return;
 
@@ -1279,7 +1271,8 @@ void CompileUnit::addSLMLocation(IGC::DIEBlock *Block, const DbgVariable &DV,
     auto regNumFP = VISAMod->getFPReg();
 
     // Rely on getVarInfo result here.
-    const auto *VarInfoFP = VISAMod->getVarInfo(*DD->getDecodedDbg(), regNumFP);
+    const auto *VarInfoFP =
+        VISAMod->getVarInfo(DD->getVisaDebugInfo(), regNumFP);
     if (!VarInfoFP) {
       LLVM_DEBUG(dbgs() << "warning: SLM - no gen loc info for FP (V"
                         << regNumFP << ")");
@@ -1517,48 +1510,21 @@ void CompileUnit::addSimdLane(IGC::DIEBlock *Block, const DbgVariable &DV,
     uint32_t regNum = lr->getGRF().regNum + regNumOffset;
     auto DWRegEncoded = GetEncodedRegNum<RegisterNumbering::GRFBase>(regNum);
 
-    // 1 var fits the whole GRF then set litForSubReg=dwarf::DW_OP_lit0 and
-    // litForSIMDlane=dwarf::DW_OP_lit0, 2 vars   - dwarf::DW_OP_lit1 and
-    // dwarf::DW_OP_lit1, 4 vars   - dwarf::DW_OP_lit2 and dwarf::DW_OP_lit3, 8
-    // vars   - dwarf::DW_OP_lit3 and dwarf::DW_OP_lit7, 16 vars  -
-    // dwarf::DW_OP_lit4 and dwarf::DW_OP_lit15, 32 vars  - dwarf::DW_OP_lit5
-    // and dwarf::DW_OP_lit31, 64 vars  - dwarf::DW_OP_lit6 and
-    // dwarf::DW_OP_const1u 63, 128 vars - dwarf::DW_OP_lit7 and
-    // dwarf::DW_OP_const1u 127, 256 vars - dwarf::DW_OP_lit8 and
-    // dwarf::DW_OP_const1u 255, 512 vars - dwarf::DW_OP_lit9 and
-    // dwarf::DW_OP_const2u 511, etc.
-    dwarf::LocationAtom litForSubReg =
-        (dwarf::LocationAtom)(dwarf::DW_OP_lit0 + valForSubRegLit);
-    dwarf::LocationAtom litForSIMDlane = dwarf::DW_OP_const2u;
-    if (variablesInSingleGRF <= 32) {
-      litForSIMDlane =
-          (dwarf::LocationAtom)(dwarf::DW_OP_lit0 + variablesInSingleGRF - 1);
-    } else if (variablesInSingleGRF <= 256) {
-      litForSIMDlane = dwarf::DW_OP_const1u;
-    }
-
     EmitPushSimdLane(Block, isSecondHalf);
 
-    addUInt(Block, dwarf::DW_FORM_data1, litForSubReg);
+    addUInt(Block, dwarf::DW_FORM_data1, dwarf::DW_OP_lit0 + valForSubRegLit);
     addUInt(Block, dwarf::DW_FORM_data1, dwarf::DW_OP_shr);
     addUInt(Block, dwarf::DW_FORM_data1, dwarf::DW_OP_plus_uconst);
     addUInt(Block, dwarf::DW_FORM_udata,
             DWRegEncoded); // Register ID is shifted by offset
     addUInt(Block, dwarf::DW_FORM_data1, DW_OP_INTEL_regs);
     EmitPushSimdLane(Block, false);
-    addUInt(Block, dwarf::DW_FORM_data1, litForSIMDlane);
-    if (variablesInSingleGRF > 256) {
-      addUInt(Block, dwarf::DW_FORM_data2, variablesInSingleGRF - 1);
-    } else if (variablesInSingleGRF > 32) {
-      addUInt(Block, dwarf::DW_FORM_data1, variablesInSingleGRF - 1);
-    }
 
+    addConstantUValue(Block, variablesInSingleGRF - 1);
     addUInt(Block, dwarf::DW_FORM_data1, dwarf::DW_OP_and);
-    addUInt(Block, dwarf::DW_FORM_data1, dwarf::DW_OP_const2u);
-    addUInt(Block, dwarf::DW_FORM_data2, bitsUsedByVar);
+    addConstantUValue(Block, bitsUsedByVar);
     addUInt(Block, dwarf::DW_FORM_data1, dwarf::DW_OP_mul);
-    addUInt(Block, dwarf::DW_FORM_data1, dwarf::DW_OP_const2u);
-    addUInt(Block, dwarf::DW_FORM_data2, varSizeInBits);
+    addConstantUValue(Block, varSizeInBits);
 
     if (isa<llvm::DbgDeclareInst>(DV.getDbgInst())) {
       // Pointer
@@ -1592,6 +1558,7 @@ bool CompileUnit::emitBitPiecesForRegVal(
   }
   return true;
 }
+
 // addSimdLaneScalar - add a sequence of attributes to calculate location of
 // scalar variable e.g. a GRF subregister.
 void CompileUnit::addSimdLaneScalar(IGC::DIEBlock *Block, const DbgVariable &DV,
@@ -2276,7 +2243,7 @@ void CompileUnit::constructSubrangeDIE(DIE &Buffer, DISubrange *SR,
   int64_t LowerBound = SR->getLowerBound();
 #endif
   int64_t DefaultLowerBound = getDefaultLowerBound();
-  int64_t Count = SR->getCount().dyn_cast<ConstantInt *>()->getSExtValue();
+  auto *CI = SR->getCount().dyn_cast<ConstantInt *>();
 
 #if LLVM_VERSION_MAJOR >= 11
   auto addBoundTypeEntry = [&](dwarf::Attribute Attr,
@@ -2307,8 +2274,8 @@ void CompileUnit::constructSubrangeDIE(DIE &Buffer, DISubrange *SR,
   if (auto *CV = SR->getCount().dyn_cast<DIVariable *>()) {
     if (auto *CountVarDIE = getDIE(CV))
       addDIEEntry(DW_Subrange, dwarf::DW_AT_count, CountVarDIE);
-  } else if (Count != -1)
-    addUInt(DW_Subrange, dwarf::DW_AT_count, None, Count);
+  } else if (CI && CI->getSExtValue() != -1)
+    addUInt(DW_Subrange, dwarf::DW_AT_count, None, CI->getSExtValue());
 
   addBoundTypeEntry(dwarf::DW_AT_upper_bound, SR->getUpperBound());
 
@@ -2318,11 +2285,14 @@ void CompileUnit::constructSubrangeDIE(DIE &Buffer, DISubrange *SR,
     addUInt(DW_Subrange, dwarf::DW_AT_lower_bound, None, LowerBound);
   }
 
-  if (Count != -1 && Count != 0) {
-    // FIXME: An unbounded array should reference the expression that defines
-    // the array.
-    addUInt(DW_Subrange, dwarf::DW_AT_upper_bound, None,
-            LowerBound + Count - 1);
+  if (CI) {
+    int64_t Count = CI->getSExtValue();
+    if (Count != -1 && Count != 0) {
+      // FIXME: An unbounded array should reference the expression that defines
+      // the array.
+      addUInt(DW_Subrange, dwarf::DW_AT_upper_bound, None,
+              LowerBound + Count - 1);
+    }
   }
 #endif
 }
@@ -2596,7 +2566,7 @@ IGC::DIEBlock *CompileUnit::buildSLM(const DbgVariable &var,
   IGC::DIEBlock *Block = new (DIEValueAllocator) IGC::DIEBlock();
 
   if (loc.IsRegister()) {
-    const auto *VarInfo = VISAMod->getVarInfo(*DD->getDecodedDbg(), regNum);
+    const auto *VarInfo = VISAMod->getVarInfo(DD->getVisaDebugInfo(), regNum);
     if (!VarInfo) {
       LLVM_DEBUG(dbgs() << "warning: could not build SLM location for V"
                         << regNum);
@@ -2675,7 +2645,7 @@ bool CompileUnit::buildPrivateBaseRegBased(const DbgVariable &var,
 
   // Rely on getVarInfo result here.
   const auto *VarInfoPrivBase =
-      VISAMod->getVarInfo(*DD->getDecodedDbg(), privateBaseRegNum);
+      VISAMod->getVarInfo(DD->getVisaDebugInfo(), privateBaseRegNum);
   if (!VarInfoPrivBase) {
     LLVM_DEBUG(dbgs() << "warning: could not get PrivateBase LR (V"
                       << privateBaseRegNum << ")");
@@ -2721,7 +2691,7 @@ bool CompileUnit::buildPrivateBaseRegBased(const DbgVariable &var,
 
   // Rely on getVarInfo result here.
   const auto *VarInfoPerThOff =
-      VISAMod->getVarInfo(*DD->getDecodedDbg(), regNumPerThOff);
+      VISAMod->getVarInfo(DD->getVisaDebugInfo(), regNumPerThOff);
   if (!VarInfoPerThOff) {
     LLVM_DEBUG(dbgs() << "warning: could not get PTO LR (V" << regNumPerThOff
                       << ")");
@@ -2827,7 +2797,7 @@ bool CompileUnit::buildFpBasedLoc(const DbgVariable &var, IGC::DIEBlock *Block,
   auto regNumFP = VISAMod->getFPReg();
 
   // Rely on getVarInfo result here.
-  const auto *VarInfoFP = VISAMod->getVarInfo(*DD->getDecodedDbg(), regNumFP);
+  const auto *VarInfoFP = VISAMod->getVarInfo(DD->getVisaDebugInfo(), regNumFP);
   if (!VarInfoFP) {
     LLVM_DEBUG(dbgs() << "warning: no gen loc info for FP (V" << regNumFP
                       << ")");
@@ -2931,7 +2901,7 @@ bool CompileUnit::buildValidVar(
   // rely on getVarInfo result here.
   if (!vars) {
     auto regNum = loc.GetRegister();
-    VarInfo = VISAMod->getVarInfo(*DD->getDecodedDbg(), regNum);
+    VarInfo = VISAMod->getVarInfo(DD->getVisaDebugInfo(), regNum);
 
     if (VarInfo)
       LLVM_DEBUG(dbgs() << "  general vISA Variable info: ";
@@ -3021,7 +2991,7 @@ bool CompileUnit::buildValidVar(
       }
     } else {
       LLVM_DEBUG(
-          dbgs() << "  <warning> variable is niether in GRF nor spilled\n");
+          dbgs() << "  <warning> variable is neither in GRF nor spilled\n");
     }
     var.emitExpression(this, Block);
   }
@@ -3131,12 +3101,11 @@ void CompileUnit::constructMemberDIE(DIE &Buffer, DIDerivedType *DT) {
     uint64_t FieldSize = getBaseTypeSize(DD, DT);
     uint64_t OffsetInBytes;
 
-    bool IsBitfield = FieldSize && Size != FieldSize;
+    bool IsBitfield = Size < FieldSize;
     if (IsBitfield) {
       // Handle bitfield.
-      addUInt(MemberDie, dwarf::DW_AT_byte_size, None,
-              getBaseTypeSize(DD, DT) >> 3);
-      addUInt(MemberDie, dwarf::DW_AT_bit_size, None, DT->getSizeInBits());
+      addUInt(MemberDie, dwarf::DW_AT_byte_size, None, FieldSize >> 3);
+      addUInt(MemberDie, dwarf::DW_AT_bit_size, None, Size);
 
       uint64_t Offset = DT->getOffsetInBits();
       uint64_t AlignMask = ~(DT->getAlignInBits() - 1);
@@ -3149,7 +3118,7 @@ void CompileUnit::constructMemberDIE(DIE &Buffer, DIDerivedType *DT) {
         Offset = FieldSize - (Offset + Size);
       addUInt(MemberDie, dwarf::DW_AT_bit_offset, None, Offset);
 
-      // Here WD_AT_data_member_location points to the anonymous
+      // Here DW_AT_data_member_location points to the anonymous
       // field that includes this bit field.
       OffsetInBytes = FieldOffset >> 3;
     } else {

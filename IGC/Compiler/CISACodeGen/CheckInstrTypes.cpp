@@ -95,6 +95,7 @@ CheckInstrTypes::CheckInstrTypes(IGC::SInstrTypes* instrList, IGCMetrics::IGCMet
     instrList->hasPullBary = false;
     instrList->hasDynamicGenericLoadStore = false;  /* may use hasGenericAddressSpacePointers instead */
     instrList->hasUnmaskedRegion = false;
+    instrList->hasRuntimeValueVector = false;
 }
 
 void CheckInstrTypes::SetLoopFlags(Function& F)
@@ -124,10 +125,10 @@ bool CheckInstrTypes::runOnFunction(Function& F)
 
     // check if module has debug info
     g_InstrTypes->hasDebugInfo = F.getParent()->getNamedMetadata("llvm.dbg.cu") != nullptr;
+    g_InstrTypes->numBB = F.getBasicBlockList().size();
 
     for (auto BI = F.begin(), BE = F.end(); BI != BE; BI++)
     {
-        g_InstrTypes->numBB++;
         g_InstrTypes->numAllInsts += BI->size();
     }
 
@@ -185,7 +186,7 @@ void CheckInstrTypes::visitCallInst(CallInst& C)
         if (C.isInlineAsm())
         {
             g_InstrTypes->hasInlineAsm = true;
-            for (unsigned i = 0; i < C.getNumArgOperands(); i++)
+            for (unsigned i = 0; i < IGCLLVM::getNumArgOperands(&C); i++)
             {
                 Type* opndTy = C.getArgOperand(i)->getType();
                 if (opndTy->isPointerTy() &&
@@ -307,6 +308,14 @@ void CheckInstrTypes::visitCallInst(CallInst& C)
             if (bufferType == UAV || bufferType == BINDLESS)
             {
                 g_InstrTypes->hasStorageBufferStore = true;
+            }
+            break;
+        }
+        case GenISAIntrinsic::GenISA_RuntimeValue:
+        {
+            if (CI->getType()->isVectorTy())
+            {
+                g_InstrTypes->hasRuntimeValueVector = true;
             }
             break;
         }

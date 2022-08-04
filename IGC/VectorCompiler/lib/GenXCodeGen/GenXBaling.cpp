@@ -32,7 +32,6 @@ SPDX-License-Identifier: MIT
 #include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/InstIterator.h"
-#include "llvm/IR/Instructions.h"
 #include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/PatternMatch.h"
@@ -41,6 +40,7 @@ SPDX-License-Identifier: MIT
 #include "llvm/Support/Debug.h"
 #include "llvm/Transforms/Utils/Local.h"
 
+#include "llvmWrapper/IR/Instructions.h"
 #include "llvmWrapper/IR/DerivedTypes.h"
 
 #include "Probe/Assertion.h"
@@ -309,6 +309,11 @@ bool GenXBaling::isRegionOKForIntrinsic(unsigned ArgInfoBits, const Region &R,
     if (R.Stride != 1 || R.Width < 4)
       return false;
     break;
+  case GenXIntrinsicInfo::ONLY_LEGAL_REGION:
+    // Some instructions like umadw and smadw can't be splitted. It leads
+    // to problem in legalization. We have to not bale incorrect region with
+    // such instructions in order to split region independently.
+    return R.Width == R.NumElements && R.Stride == 1;
   default:
     break;
   }
@@ -367,12 +372,14 @@ bool GenXBaling::isSafeToMove(Instruction *Op, Instruction *From, Instruction *T
 /***********************************************************************
  * canSplitBale : check if instruction can be splitted
  */
-static bool canSplitBale(Instruction *Inst) {
+bool GenXBaling::canSplitBale(Instruction *Inst) const {
   auto IID = GenXIntrinsic::getGenXIntrinsicID(Inst);
   if ((IID == GenXIntrinsic::genx_dpas) || (IID == GenXIntrinsic::genx_dpas2) ||
       (IID == GenXIntrinsic::genx_dpasw) ||
       (IID == GenXIntrinsic::genx_dpas_nosrc0) ||
-      (IID == GenXIntrinsic::genx_dpasw_nosrc0))
+      (IID == GenXIntrinsic::genx_dpasw_nosrc0) ||
+      (IID == GenXIntrinsic::genx_umadw) ||
+      (IID == GenXIntrinsic::genx_smadw))
     return false;
   return true;
 }
@@ -966,7 +973,7 @@ void GenXBaling::processInlineAsm(Instruction *Inst) {
   IGC_ASSERT_MESSAGE(CI->isInlineAsm(), "Inline Asm expected");
 
   BaleInfo BI(BaleInfo::MAININST);
-  for (unsigned I = 0; I < CI->getNumArgOperands(); I++)
+  for (unsigned I = 0; I < IGCLLVM::getNumArgOperands(CI); I++)
     if (auto RdR = dyn_cast<Instruction>(CI->getArgOperand(I)))
       if (GenXIntrinsic::isRdRegion(RdR)) {
         switch (GenXIntrinsic::getGenXIntrinsicID(RdR->getOperand(0))) {
@@ -1619,7 +1626,7 @@ void GenXBaling::processBranch(BranchInst *Branch)
  */
 void GenXBaling::processTwoAddrSend(CallInst *CI)
 {
-  unsigned TwoAddrOperandNum = CI->getNumArgOperands() - 1;
+  unsigned TwoAddrOperandNum = IGCLLVM::getNumArgOperands(CI) - 1;
   IGC_ASSERT(GenXIntrinsicInfo(vc::getAnyIntrinsicID(CI))
       .getArgInfo(TwoAddrOperandNum)
       .getCategory() == GenXIntrinsicInfo::TWOADDR);

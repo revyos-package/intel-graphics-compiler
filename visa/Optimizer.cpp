@@ -1,6 +1,6 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (C) 2017-2021 Intel Corporation
+Copyright (C) 2017-2022 Intel Corporation
 
 SPDX-License-Identifier: MIT
 
@@ -173,9 +173,10 @@ void Optimizer::regAlloc()
     }
 }
 
-// This could be done in applyFusedCallWA().
-// Here, we add or inst to modify dmask. Doing so here has minimum impact to visa.
-void Optimizer::setDMaskFusedCallWA()
+// 1. set DMask so that upper 16bits are ones.
+//    This may be done in applyFusedCallWA(). Doing so here has minimum impact to visa.
+// 2. Perform IP WA if needed.
+void Optimizer::finishFusedCallWA_preSWSB()
 {
     if (builder.getIsKernel())
     {
@@ -217,16 +218,177 @@ void Optimizer::setDMaskFusedCallWA()
             entryBB->insertBefore(entryBB->getFirstInsertPos(), I0);
         }
     }
+
+    if (kernel.m_indirectCallWAInfo.empty() && kernel.m_maskOffWAInsts.empty())
+        return;
+
+#if defined(_DEBUG)
+    // Expect all BBs and insts related to call wa are present and the insts are
+    // still in their BBs (they could be reordered, but are required to be in the
+    // original BB).
+    //
+    // Don't expect any violation, but do the sanity check here to make sure.
+    for (auto& II : kernel.m_indirectCallWAInfo)
+    {
+        G4_BB* BB = II.first;
+        IndirectCallWAInfo& callWAInfo = II.second;
+        G4_BB* BigBB = callWAInfo.Big_BB;
+        G4_BB* SmallBB = callWAInfo.Small_BB;
+        if (std::find(kernel.fg.begin(), kernel.fg.end(), BB) == kernel.fg.end() ||
+            std::find(kernel.fg.begin(), kernel.fg.end(), BigBB) == kernel.fg.end() ||
+            std::find(kernel.fg.begin(), kernel.fg.end(), SmallBB) == kernel.fg.end())
+        {
+            assert(false && "ICE: BB not found in indirect call WA info!");
+            break;
+        }
+
+        G4_INST* ip_wa = callWAInfo.IP_WA_placeholder;
+        G4_INST* bigStart = callWAInfo.Big_start;
+        G4_INST* bigPatch = callWAInfo.Big_patch;
+        G4_INST* smallStart = callWAInfo.Small_start;
+        G4_INST* smallPatch = callWAInfo.Small_patch;
+        G4_INST* bigCall = callWAInfo.Big_call;
+        G4_INST* smallCall = callWAInfo.Small_call;
+        if ((ip_wa && std::find(BB->begin(), BB->end(), ip_wa) == BB->end()) ||
+            (bigStart && std::find(BB->begin(), BB->end(), bigStart) == BB->end()) ||
+            (bigPatch && std::find(BB->begin(), BB->end(), bigPatch) == BB->end()) ||
+            (smallStart && std::find(BB->begin(), BB->end(), smallStart) == BB->end()) ||
+            (smallPatch && std::find(BB->begin(), BB->end(), smallPatch) == BB->end()) ||
+            (bigCall && std::find(BigBB->begin(), BigBB->end(), bigCall) == BigBB->end()) ||
+            (smallCall && std::find(SmallBB->begin(), SmallBB->end(), smallCall) == SmallBB->end()))
+        {
+            assert(false && "ICE: inst not found in its original BB!");
+            break;
+        }
+    }
+
+    for (auto II : kernel.m_maskOffWAInsts)
+    {
+        G4_INST* tInst = II.first;
+        G4_BB* tBB = II.second;
+
+        // make sure BB and inst are still valid
+        if (std::find(kernel.fg.begin(), kernel.fg.end(), tBB) == kernel.fg.end())
+        {
+            assert(false && "ICE: BB not in m_maskOffWAInsts!");
+            continue;
+        }
+        if (std::find(tBB->begin(), tBB->end(), tInst) == tBB->end())
+        {
+            assert(false && "ICE: inst not in m_maskOffWAInsts!");
+            continue;
+        }
+    }
+#endif
+
+    if (builder.needIPWA())
+    {
+        for (auto& II : kernel.m_indirectCallWAInfo)
+        {
+            G4_BB* BB = II.first;
+            IndirectCallWAInfo& callWAInfo = II.second;
+
+            G4_INST* ip_wa = callWAInfo.IP_WA_placeholder;
+            if (ip_wa == nullptr)
+            {
+                // calla, ip wa not needed.
+                continue;
+            }
+
+            G4_INST* ip_inst = nullptr;
+            if (ip_wa)
+            {
+                //  Simplified example to show what it does:
+                //      Given
+                //          pseudo_fcall (16)    r4.0:ud
+                //
+                //      After applyFusedCallWA and RA:
+                //         (W) mov (1)              r2.0<1>:ud  sr0.0<0;1,0>:ud
+                //         (W) and (16)  (eq)f1.0   null<1>:uw  r2.0<0;1,0>:uw  0x80:uw
+                //         (W&!f1.0) mov (1)        cr0.2<1>:ud  r4.0<0;1,0>:ud
+                //         (W) mov (1)              r3.2<1>:ud  cr0.2<0;1,0>:ud
+                //         (W) mov (1)              r3.0<1>:d  0x89abcdef:d                        : ip_wa (placeholder)
+                //         (W) add (1)              r2.0<1>:d  -r3.0<0;1,0>:d  r3.2<0;1,0>:d       : small_start
+                //         (W) add (1)              r70.0<1>:d  r2.0<0;1,0>:d  0x33333333:d        : small_patch
+                //         (W) add (1)              r2.0<1>:d  -r3.0<0;1,0>:d  r4.0<0;1,0>:d       : big_start
+                //         (W) add (1)              r2.0<1>:d  r2.0<0;1,0>:d  0x33333333:d         : big_patch
+                //         if (BigEU)
+                //             (W) mov (1)             r125.0<1>:f  r2.0<0;1,0>:f // $53:&87:
+                //                 pseudo_fcall (16)   r125.0<1>:ud  r125.0<0;1,0>:ud              : big_call
+                //         else
+                //             (W) mov (1)              r125.0<1>:f  r70.0<0;1,0>:f
+                //                 pseudo_fcall (16)    r125.0<1>:ud  r125.0<0;1,0>:ud             : small_call
+                //
+                //
+                //     After finishFusedCallWA()
+                //         (W) mov (1)              r2.0<1>:ud  sr0.0<0;1,0>:ud
+                //         (W) and (16)  (eq)f1.0   null<1>:uw  r2.0<0;1,0>:uw  0x80:uw
+                //         (W&!f1.0) mov (1)        cr0.2<1>:ud  r4.0<0;1,0>:ud
+                //         (W) mov (1)              r3.2<1>:ud  cr0.2<0;1,0>:ud
+                //
+                //         (W) call (1)             r3.0<1>:d  _label_ip_wa
+                //      _label_ip_wa:
+                //         (W) add (1|M16)          r3.0<1>:d  r3.0<0;1,0>:d  0x20:d {NoCompact}
+                //          (W) return (1)          r3.0<0;1,0>:d {NoCompact}
+                //
+                //         (W) add (1)              r2.0<1>:d  -r3.0<0;1,0>:d  r3.2<0;1,0>:d        : IP
+                //         (W) add (1)              r70.0<1>:d  r2.0<0;1,0>:d  144
+                //         (W) add (1)              r2.0<1>:d  -r3.0<0;1,0>:d  r4.0<0;1,0>:d
+                //         (W) add (1)              r2.0<1>:d  r2.0<0;1,0>:d   96
+                //         if (BigEU)
+                //             (W) mov (1)             r125.0<1>:f  r2.0<0;1,0>:f // $53:&87:
+                //                pseudo_fcall (16)   r125.0<1>:ud  r125.0<0;1,0>:ud                : IP+96
+                //         else
+                //             (W) mov (1)              r125.0<1>:f  r70.0<0;1,0>:f
+                //                pseudo_fcall (16)    r125.0<1>:ud  r70.0<0;1,0>:f                 : IP+144
+                //
+                BB->resetLocalIds();
+                G4_INST* sI = callWAInfo.Small_start;
+                G4_INST* bI = callWAInfo.Big_start;
+                ip_inst = (sI->getLocalId() < bI->getLocalId() ? sI : bI);
+
+                // Get IP to ip_inst.
+                //   IP-WA's call sequence must be inserted right before ip_inst and
+                //   IP must be stored in ip_wa's dst, not ip_inst's dst.
+                InstListType waInsts;
+                replaceIPWithCall(waInsts, ip_wa);
+
+                // find IP adjustment add and set mask offset to M16!
+                // (it is the 3rd inst!)
+                G4_INST* adjust_ip_add = nullptr;
+                for (auto tI : waInsts)
+                {
+                    if (tI->opcode() == G4_add) {
+                        adjust_ip_add = tI;
+                        break;
+                    }
+                }
+                assert(adjust_ip_add);
+                kernel.setMaskOffset(adjust_ip_add, InstOpt_M16);
+
+                auto ip_inst_ii = std::find(BB->begin(), BB->end(), ip_inst);
+                BB->insert(ip_inst_ii, waInsts.begin(), waInsts.end());
+
+                // Remove placeholder
+                BB->remove(ip_wa);
+
+                // finishFusedCallWA() will use this to calculate the offset.
+                callWAInfo.IP_WA_placeholder = ip_inst;
+            }
+        }
+    }
 }
 
 // Need to be done after SWSB so we can set call relative IP correctly.
 void Optimizer::finishFusedCallWA()
 {
+    // Regarding using M16 as maskOff to force running some instructions
+    //
     // For each nested stack call like the following:
     //   (1) (W)  mov  (4|M0)    r59.4<1>:ud     r125.0<4;4,1>:ud     // save code in prolog
-    //   (2)     call (8|M0)    r125.0          inner
+    //   (2)     call (16|M0)    r125.0          inner
     //   (3) (W)  mov  (4|M0)    r125.0<1>:ud    r59.4<4;4,1>:ud      // restore code in ret.
-    //   (4)      ret  (8|M0)    r125.0
+    //   (4)      ret  (16|M0)    r125.0
     // If no active channels,  call inst will always execute due to the hw bug, therefore
     // r125 will be modified by this call inst at (2). As no active channels, r125 restore
     // code at (3) is not going to be run. Therefore, r125 returned at (4) is not the
@@ -234,63 +396,20 @@ void Optimizer::finishFusedCallWA()
     //
     // The fix is to make save/restore mov instructions run always even though there
     // are no active channels.  They run if their quarter control is outside the current
-    // JEU size (8 in this case), but still active (dmask still show it is active).
-    // We will set dmask to simd16 in this case, quarter control to M8 instead M0:
-    //   (1) (W)  mov  (4|M8)    r59.4<1>:ud     r125.0<4;4,1>:ud
-    //   (2)      call (8|M0)    r125.0          inner
-    //   (3) (W)  mov  (4|M8)    r125.0<1>:ud    r59.4<4;4,1>:ud
+    // JEU size (16 in this case), but still active (dmask still show it is active).
+    // We will set dmask to simd32 in this case, quarter control to M16 instead M0:
+    //   (1) (W)  mov  (4|M16)    r59.4<1>:ud     r125.0<4;4,1>:ud
+    //   (2)      call (16|M0)     r125.0          inner
+    //   (3) (W)  mov  (4|M16)    r125.0<1>:ud    r59.4<4;4,1>:ud
     //
     // Note:
     //    r59.4 needs to write on stack frame before call and read back after call and
     //    its address payload needs to be correct. For this purpose, all call stack-related
     //    WA is done in RA, not here.
     //
-    if (kernel.m_labelPatchInsts.empty() && kernel.m_waCallInsts.empty() && kernel.m_maskOffWAInsts.empty())
+
+    if (kernel.m_indirectCallWAInfo.empty() && kernel.m_maskOffWAInsts.empty())
         return;
-
-    // patch ip for fused call WA
-#if defined(_DEBUG)
-    // Verify m_labelPatchInsts/m_instToBBs are still valid
-    bool found = true;
-    for (auto II : kernel.m_instToBBs)
-    {
-        G4_BB* BB = II.second;
-        if (std::find(kernel.fg.begin(), kernel.fg.end(), BB) == kernel.fg.end())
-        {
-            assert(false && "ICE: BB not found in IP patch info!");
-            found = false;
-            break;
-        }
-
-        G4_INST* Inst = II.first;
-        if (std::find(BB->begin(), BB->end(), Inst) == BB->end())
-        {
-            assert(false && "ICE: inst not found in IP patch info!");
-            found = false;
-            break;
-        }
-    }
-
-    if (found)
-    {
-        for (auto II : kernel.m_labelPatchInsts)
-        {
-            found = false;
-            G4_INST* patch_add = II.first;
-            G4_INST* ip_start = II.second.first;
-            G4_INST* ip_end = II.second.second;
-            if (kernel.m_instToBBs.find(patch_add) != kernel.m_instToBBs.end()
-                && kernel.m_instToBBs.find(ip_start) != kernel.m_instToBBs.end()
-                && kernel.m_instToBBs.find(ip_end) != kernel.m_instToBBs.end())
-            {
-                found = true;
-                continue;
-            }
-            break;
-        }
-        assert(found && "ICE: inst not in m_instToBBs!");
-    }
-#endif
 
     auto update_ip_distance = [](G4_INST* inst, int32_t& ip_dist) {
         G4_opcode op = inst->opcode();
@@ -310,72 +429,84 @@ void Optimizer::finishFusedCallWA()
     //    1. (W) mov (1|M0)            r2.0<1>:ud  sr0.0<0;1,0>:ud
     //    2. (W) and (16|M0) (eq)f1.0  null<1>:uw  r2.0<0;1,0>:uw    0x80:uw
     //    3. (W & ~f1.0) mov (1|M0)    cr0.2<1>:ud r3.0<0;1,0>:ud
-    //    4. (W)mov (1|M0)            r64.2<1>:ud cr0.2<0;1,0>:ud
-    // WA requires the mov at 4 to be in M8, not M0 in case the BigEU has all channesl off.
-    // Here set quarter control of that mov to M8 (simd8 kernel).
+    //    4. (W)mov (1|M0)             r64.0<1>:ud cr0.2<0;1,0>:ud
+    // WA requires the mov at 4 to be in M16, not M0 in case the BigEU is off.
+    // Here set quarter control of that mov to M16 (When stackcall is used,
+    // only simd8/simd16 is allowed. Thus, we will set M16 always no matter
+    // the kernel is simd8 or simd16).
     for (auto II : kernel.m_maskOffWAInsts)
     {
         G4_INST* tInst = II.first;
-        G4_BB*  tBB = II.second;
-
-        // make sure inst are still valid
-        if (std::find(kernel.fg.begin(), kernel.fg.end(), tBB) == kernel.fg.end())
-        {
-            assert(false && "ICE: BB not in m_maskOffWAInsts!");
-            continue;
-        }
-        if (std::find(tBB->begin(), tBB->end(), tInst) == tBB->end())
-        {
-            assert(false && "ICE: inst not in m_maskOffWAInsts!");
-            continue;
-        }
         kernel.setMaskOffset(tInst, InstOpt_M16);
     }
 
-    for (auto II : kernel.m_labelPatchInsts)
+    // indirect relative call
+    for (auto II : kernel.m_indirectCallWAInfo)
     {
-        G4_INST* patch_add = II.first;
-        G4_INST* ip_start = II.second.first;
-        G4_INST* ip_end = II.second.second;
+        G4_BB* BB = II.first;
+        IndirectCallWAInfo& callWAInfo = II.second;
 
-        G4_BB* start_bb = kernel.m_instToBBs[ip_start];
-        G4_BB* end_bb = kernel.m_instToBBs[ip_end];
+        if (callWAInfo.Small_start == nullptr)
+        {   // calla, skip
+            continue;
+        }
 
-        int32_t dist = 0;
-        G4_BB* b;
-        G4_BB* next_b = start_bb;
-        INST_LIST_ITER it_start = std::find(start_bb->begin(), start_bb->end(), ip_start);
-        INST_LIST_ITER it_end = std::find(end_bb->begin(), end_bb->end(), ip_end);
-        do {
-            b = next_b;
-            INST_LIST_ITER iter = (b == start_bb ? it_start : b->begin());
-            INST_LIST_ITER iterEnd = (b == end_bb ? it_end : b->end());
-            for (; iter != iterEnd; ++iter)
-            {
-                G4_INST* tI = *iter;
-                update_ip_distance(tI, dist);
+        // finishFusedCallWA_preSWSB() sets this placeholder.
+        G4_INST* ip_inst = callWAInfo.IP_WA_placeholder;
+
+        // IP WA is applied if ip_inst isn't null.
+        for (int i = 0; i < 2; ++i)
+        {
+            G4_INST* patch_add = (i == 0 ? callWAInfo.Small_patch : callWAInfo.Big_patch);
+            G4_INST* ip_start = (i == 0 ? callWAInfo.Small_start : callWAInfo.Big_start);
+            if (ip_inst) {
+                // IP WA: ip is taken at ip_inst for both small and big targets.
+                ip_start = ip_inst;
             }
-            next_b = b->getPhysicalSucc();
-        } while (b != end_bb && next_b != nullptr);
-        assert(b == end_bb);
+            G4_INST* ip_end = (i == 0 ? callWAInfo.Small_call : callWAInfo.Big_call);
+            G4_BB* start_bb = BB;
+            G4_BB* end_bb = (i == 0 ? callWAInfo.Small_BB : callWAInfo.Big_BB);
 
-        G4_Imm* distOprd = builder.createImm(-dist, Type_D);
-        patch_add->setSrc(distOprd, 1);
+            int32_t dist = 0;
+            G4_BB* b;
+            G4_BB* next_b = start_bb;
+            INST_LIST_ITER it_start = std::find(start_bb->begin(), start_bb->end(), ip_start);
+            INST_LIST_ITER it_end = std::find(end_bb->begin(), end_bb->end(), ip_end);
+            do {
+                b = next_b;
+                INST_LIST_ITER iter = (b == start_bb ? it_start : b->begin());
+                INST_LIST_ITER iterEnd = (b == end_bb ? it_end : b->end());
+                for (; iter != iterEnd; ++iter)
+                {
+                    G4_INST* tI = *iter;
+                    update_ip_distance(tI, dist);
+                }
+                next_b = b->getPhysicalSucc();
+            } while (b != end_bb && next_b != nullptr);
+            assert(b == end_bb);
+
+            G4_Imm* distOprd = builder.createImm(-dist, Type_D);
+            patch_add->setSrc(distOprd, 1);
+        }
     }
 
     // RA does the following
-    //   (W) mov(1|M0)  r125.0<1>:f   r60.2<0;1,0>:f
+    //   (W) mov(1|M0)  r125.0<1>:f   r60.0<0;1,0>:f
     //   (W) send.dc0(16|M0)   null r126  r5    0x80      0x020A03FF   // stack spill
     //       sync.nop        null{ Compacted,$4.src }
     //       call (8|M0)      r125.0   r125.0
     //
-    // To make this WA work,  call has to be:
-    //   call (8|M0)  r125.0 r60.2
-    // Here propogate r60.2 down to call instruction
-    for (auto LI : kernel.m_waCallInsts)
+    // To make call WA work,  call for SmallEU has to use r60, not r125, as below:
+    //   call (8|M0)  r125.0 r60.0
+    // Here propogate r60.0 down to call instruction
+    // (For call, can just copy patch's dst to call's target. Here the code works
+    //  for both call and calla.)
+    for (auto II : kernel.m_indirectCallWAInfo)
     {
-        G4_INST* iCallInst = LI;
-        G4_BB* B = kernel.m_instToBBs[iCallInst];
+        IndirectCallWAInfo& callWAInfo = II.second;
+
+        G4_INST* iCallInst = callWAInfo.Small_call;
+        G4_BB* B = callWAInfo.Small_BB;
         assert(iCallInst->isFCall() && iCallInst->getSrc(0)->isGreg());
 
         bool isValid;
@@ -385,14 +516,14 @@ void Optimizer::finishFusedCallWA()
 
         // Search backward to find the the 1st mov that defined this reg
         // This works for ifcall that has been put into a separate BB, in
-        // which only insts related call sequence are present.
+        // which only insts related to call sequence are present in the BB.
         // If not found, do nothing.
         INST_LIST_ITER it_end = std::find(B->begin(), B->end(), iCallInst);
         assert(it_end != B->end());
-        it_end = std::prev(it_end);
         for (auto II = it_end, IB = B->begin(); II != IB; --II)
         {
-            G4_INST* tInst = *II;
+            auto prevII = std::prev(II);
+            G4_INST* tInst = *prevII;
             if (tInst->opcode() == G4_mov
                 && tInst->getExecSize() == g4::SIMD1
                 && tInst->isWriteEnableInst()
@@ -415,10 +546,8 @@ void Optimizer::finishFusedCallWA()
         }
     }
 
-    kernel.m_instToBBs.clear();
-    kernel.m_labelPatchInsts.clear();
-    kernel.m_waCallInsts.clear();
     kernel.m_maskOffWAInsts.clear();
+    kernel.m_indirectCallWAInfo.clear();
 }
 
 void Optimizer::adjustIndirectCallOffsetAfterSWSBSet()
@@ -577,6 +706,16 @@ void Optimizer::zeroSomeARF()
         G4_INST* zeroAcc1 = builder.createMov(
             builder.getNativeExecSize(), Acc1Dst, builder.createImm(0, Type_UD), InstOpt_WriteEnable, false);
         (void)mainBB->insertBefore(insertBeforePos, zeroAcc1);
+
+        // Zero flags
+        int num32bitFlags = (int)(builder.getNumFlagRegisters()/2);
+        for (int i = 0; i < num32bitFlags; ++i)
+        {
+            G4_DstRegRegion* flagDst = builder.createDst(builder.phyregpool.getFlagAreg(i), 0, 0, 1, Type_UD);
+            G4_INST* zeroFlag = builder.createMov(
+                g4::SIMD1, flagDst, builder.createImm(0, Type_UD), InstOpt_WriteEnable, false);
+            (void)mainBB->insertBefore(insertBeforePos, zeroFlag);
+        }
     }
 }
 
@@ -589,7 +728,7 @@ void Optimizer::addSWSBInfo()
     if (do_fcall_wa)
     {
         // Need to be done before SWSB
-        setDMaskFusedCallWA();
+        finishFusedCallWA_preSWSB();
     }
 
     if (!builder.hasSWSB())
@@ -1044,7 +1183,7 @@ void Optimizer::insertDummyMovForHWRSWA()
                         }
                     }
                     G4_BB* wa_bb = hasJmpIPred ?
-                        kernel.fg.createNewBBWithLabel("WA_", preInst->getLineNo(), preInst->getCISAOff()) :
+                        kernel.fg.createNewBBWithLabel("RSWA", preInst->getLineNo(), preInst->getCISAOff()) :
                         kernel.fg.createNewBB();
                     kernel.fg.insert(bb_it, wa_bb);
                     G4_Label* newLabel = hasJmpIPred ? wa_bb->getLabel() : NULL;
@@ -1431,6 +1570,7 @@ void Optimizer::initOptimizations()
     INITIALIZE_PASS(zeroSomeARF,             vISA_zeroSomeARF,             TimerID::MISC_OPTS);
     INITIALIZE_PASS(addSWSBInfo,             vISA_addSWSBInfo,             TimerID::MISC_OPTS);
     INITIALIZE_PASS(expandMadwPostSchedule,  vISA_expandMadwPostSchedule,  TimerID::MISC_OPTS);
+    INITIALIZE_PASS(ACCSchedule,          vISA_PreSchedForAcc,          TimerID::PRERA_SCHEDULING);
 
     // Verify all passes are initialized.
 #ifdef _DEBUG
@@ -1730,6 +1870,7 @@ void Optimizer::reRAPostSchedule()
     if (builder.getIsPayload())
         return;
     auto freeGRFsBeforeReRA = gtpin->getNumFreeGlobalRegs();
+    auto nextScratchFreeBeforeReRA = gtpin->getScratchNextFree();
 
     storeGRFAssignments(kernel.Declares, assignments);
     // This pass is run for gtpin since they need re-allocation after
@@ -1804,6 +1945,7 @@ void Optimizer::reRAPostSchedule()
         computeGlobalFreeGRFs(kernel);
     }
 
+    gtpin->setScratchNextFree(nextScratchFreeBeforeReRA);
     *builder.getJitInfo() = finalizerInfo;
 }
 
@@ -1831,6 +1973,11 @@ void Optimizer::accSubPostSchedule()
 
     AccSubPass accSub(builder, kernel);
     accSub.run();
+    kernel.fg.XeBCStats.setAccSubDef(accSub.getNumAccSubDef());
+    kernel.fg.XeBCStats.setAccSubUse(accSub.getNumAccSubUse());
+    kernel.fg.XeBCStats.setAccSubCandidateDef(accSub.getNumAccSubCandidateDef());
+    kernel.fg.XeBCStats.setAccSubCandidateUse(accSub.getNumAccSubCandidateUse());
+
 }
 
 
@@ -1856,8 +2003,13 @@ void Optimizer::accSubBeforeRA()
         kernel.fg.localDataFlowAnalysis();
     }
 
+
     AccSubPass accSub(builder, kernel);
     accSub.run();
+    kernel.fg.XeBCStats.setAccSubDef(accSub.getNumAccSubDef());
+    kernel.fg.XeBCStats.setAccSubUse(accSub.getNumAccSubUse());
+    kernel.fg.XeBCStats.setAccSubCandidateDef(accSub.getNumAccSubCandidateDef());
+    kernel.fg.XeBCStats.setAccSubCandidateUse(accSub.getNumAccSubCandidateUse());
 }
 
 bool Optimizer::R0CopyNeeded()
@@ -1865,6 +2017,11 @@ bool Optimizer::R0CopyNeeded()
     if (kernel.getOption(vISA_enablePreemption))
     {
         return true;
+    }
+
+    if (kernel.getOption(vISA_PreserveR0InR0))
+    {
+        return false;
     }
 
     if (builder.getIsKernel() && kernel.fg.getHasStackCalls())
@@ -1934,12 +2091,13 @@ int Optimizer::optimization()
     // HW workaround before RA
     runPass(PI_preRA_HWWorkaround);
 
-    if (builder.enableACCBeforRA())
+    if (builder.enableACCBeforRA() && builder.enablePreSchedACC())
     {
-        runPass(PI_expandMulPostSchedule);
+        runPass(PI_ACCSchedule);
+    }
 
-        runPass(PI_expandMadwPostSchedule);
-
+    if (builder.enableACCBeforRA() && !builder.enablePreSchedACC())
+    {
         runPass(PI_accSubBeforeRA);
     }
 
@@ -1981,7 +2139,7 @@ int Optimizer::optimization()
         runPass(PI_localSchedule);
     }
 
-    if (!builder.enableACCBeforRA())
+    if (!builder.enableACCBeforRA() && !builder.enablePreSchedACC())
     {
         runPass(PI_expandMulPostSchedule);
 
@@ -2698,6 +2856,18 @@ static bool canHoist(FlowGraph &fg, G4_BB *bb, INST_LIST_RITER revIter)
         G4_Declare *Dcl = Dst->getTopDcl();
         if (Dcl && Dcl->getRegFile() == G4_RegFileKind::G4_FLAG)
         {
+            return false;
+        }
+
+        if (Dcl && Dcl->getRegFile() == G4_RegFileKind::G4_ADDRESS &&
+            Dcl->getRegVar() &&
+            Dcl->getRegVar()->getPhyReg())
+        {
+            // Dont def-hoist if dst is hardwired to address register.
+            // Doing so extends live-range of assigned register a0.
+            // Given that the machine has single addr register, a0,
+            // it may even cause address RA to fail due to uncolorable
+            // graph.
             return false;
         }
 
@@ -7405,11 +7575,19 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
     // HW WAs that are done before RA.
     void Optimizer::preRA_HWWorkaround()
     {
+        // 3 versions: will keep one after the driver is stable
         if (builder.useNewNoMaskWA())
         {
             if (builder.hasFusedEUNoMaskWA())
             {
-                newDoNoMaskWA();
+                if (allPostRANoMaskWA())
+                {
+                    prepareNoMaskWA();
+                }
+                else
+                {
+                    newDoNoMaskWA();
+                }
             }
         }
         else
@@ -7445,11 +7623,19 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
     //
     void Optimizer::postRA_HWWorkaround()
     {
+        // 3 versions: will keep one after the driver is stable
         if (builder.useNewNoMaskWA())
         {
             if (builder.hasFusedEUNoMaskWA())
             {
-                newDoNoMaskWA_postRA();
+                if (allPostRANoMaskWA())
+                {
+                    applyNoMaskWA();
+                }
+                else
+                {
+                    newDoNoMaskWA_postRA();
+                }
             }
         }
         else
@@ -8196,11 +8382,10 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
         }
     }
 
-    // perform simple stat collection (e.g., numBarriers, numSends)
+    // perform simple stat collection (e.g., numSends)
     // IR is not modified
     void Optimizer::collectStats()
     {
-        builder.getJitInfo()->usesBarrier = 0;
         uint32_t numSends = 0;
         for (auto bb : fg)
         {
@@ -8209,14 +8394,6 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
                 if (inst->isSend())
                 {
                     numSends++;
-                    if (inst->asSendInst()->getMsgDesc()->isBarrier())
-                    {
-                        // Propagate information about barriers presence back to IGC. It's safer to
-                        // depend on vISA statistics as IGC is not able to detect barriers if they are
-                        // used as a part of Inline vISA code.
-                        // This information is used by legacy CMRT as well as OpenCL/L0 runtime.
-                        builder.getJitInfo()->usesBarrier += 1;
-                    }
                 }
             }
         }
@@ -8453,8 +8630,7 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
             }
             else
             {
-                std::string label_name("ffid_prolog_end");
-                jmp_label = builder.createLabel(label_name, LABEL_BLOCK);
+                jmp_label = builder.createLocalBlockLabel("ffid_prolog_end");
                 next_bb->insertBefore(next_bb->begin(), createLabelInst(jmp_label));
             }
             entry_0_bb->push_back(createJmpi(jmp_label));
@@ -8624,7 +8800,9 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
             {
                 // first GRF of cross-thread data is already loaded
                 crossThreadLoadStartGRF++;
-                numCrossThreadDW -= builder.getInlineDataSize() / TypeSize(Type_UD);
+                // FIXME: reduce "numCrossThreadDW" for grf size instead of inline data size (builder.getInlineDataSize())
+                // to workaround ogl behavior that it sets ATTR_CrossThreadInputSize larger than acutal input size.
+                numCrossThreadDW = numCrossThreadDW > kernel.numEltPerGRF<Type_UD>() ? numCrossThreadDW - kernel.numEltPerGRF<Type_UD>() : 0;
             }
         }
 
@@ -8754,7 +8932,10 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
                 auto dstRead = builder.createDstRegRegion(sendDstDcl, 1);
                 auto src0Addr = builder.createSrcRegRegion(loadAddress, builder.getRegionStride1()); // address base
 
-                G4_SendDescRaw *desc = builder.createLscMsgDesc(
+                G4_SendDesc* desc = nullptr;
+                G4_InstSend* sendInst = nullptr;
+                {
+                desc = builder.createLscMsgDesc(
                     op,
                     lscSfid,
                     EXEC_SIZE_1,
@@ -8765,17 +8946,17 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
                     numDWToLoad < builder.numEltPerGRF<Type_UD>() ? 1 : numDWToLoad / builder.numEltPerGRF<Type_UD>(),
                     1);
 
-                G4_InstSend *sendInst = builder.createLscSendInst(
+                sendInst = builder.createLscSendInst(
                     nullptr,
                     dstRead,
                     src0Addr,
                     nullptr,
                     g4::SIMD1,
-                    desc,
+                    (G4_SendDescRaw*)desc,
                     InstOpt_NoOpt,
                     ADDR_TYPE,
                     true);
-
+                }
                 instBuffer.push_back(sendInst);
                 // we pick to load all data within one send in getMaxNumDWforLscElementRequirement if
                 // numRemainingDW is less than one grf. All should be loaded at this point.
@@ -8808,7 +8989,7 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
             auto addInst = builder.createBinOp(G4_add, g4::SIMD1, dst, src0, src1,
                 InstOpt_WriteEnable | InstOpt_NoCompact, false);
             RelocationEntry::createRelocation(builder.kernel, *addInst,
-                1, "INTEL_PATCH_CROSS_THREAD_OFFSET_OFF_R0", GenRelocType::R_SYM_ADDR_32);
+                1, "__INTEL_PATCH_CROSS_THREAD_OFFSET_OFF_R0", GenRelocType::R_SYM_ADDR_32);
             instBuffer.push_back(addInst);
         };
 
@@ -9121,7 +9302,6 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
                                 {
                                     if ((msgDesc->isAtomic() && !msgDesc->isRead())      // case 1
                                         || (!(msgDesc->getCachingL1() == Caching::WB ||  // case 2
-                                              msgDesc->getCachingL1() == Caching::WT ||
                                               msgDesc->getCachingL1() == Caching::ST) && !msgDesc->isScratchWrite()))
                                     {
                                         needLscUgmFence = true;
@@ -9455,7 +9635,7 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
         return add_dst_decl;
     }
 
-    void Optimizer::replaceIPWithCall(InstListType& insts, G4_INST* add_with_ip)
+    void Optimizer::replaceIPWithCall(InstListType& insts, G4_INST* inst_with_ip)
     {
         // Expand
         //    add    dst      -IP   call_target
@@ -9464,21 +9644,21 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
         //  _label_ip_wa:
         //    add    dst     dst     32            // adjust dst to the next 2 instruction's ip
         //    ret    dst                           // jump to the next instruction
-        //    add    dst     -dst    call_target   // at this intruction dst is the ip value
+        //    add    dst     -dst    call_target   // at this instruction dst is the ip value
 
-        uint32_t reg_num = add_with_ip->getDst()->getLinearizedStart() / kernel.numEltPerGRF<Type_UB>();
-        uint32_t reg_off = add_with_ip->getDst()->getLinearizedStart() % kernel.numEltPerGRF<Type_UB>()
-            / add_with_ip->getDst()->getTypeSize();
+        uint32_t reg_num = inst_with_ip->getDst()->getLinearizedStart() / kernel.numEltPerGRF<Type_UB>();
+        uint32_t reg_off = inst_with_ip->getDst()->getLinearizedStart() % kernel.numEltPerGRF<Type_UB>()
+            / inst_with_ip->getDst()->getTypeSize();
         // call's dst must have sub-reg num 0 (HW restriction)
         assert(reg_off == 0);
         G4_Declare* dst_decl =
-            builder.createHardwiredDeclare(1, add_with_ip->getDst()->getType(), reg_num, reg_off);
+            builder.createHardwiredDeclare(1, inst_with_ip->getDst()->getType(), reg_num, reg_off);
 
         // call   dst     _label_ip_wa
         // NOTE: create the call and label instructions directly without forming a BB to skip the
         // BB end with call checking (e.g. in SWSB setting) that this is just a fall-throug call and
         // is a temporarily WA
-        G4_Label *label = builder.createLabel(std::string("_label_ip_wa"), LABEL_BLOCK);
+        G4_Label *label = builder.createLocalBlockLabel("ip_wa");
         insts.push_back(builder.createInternalInst(
             nullptr, G4_call, nullptr, g4::NOSAT, g4::SIMD1,
             builder.createDstRegRegion(dst_decl, 1),
@@ -9502,11 +9682,14 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
             builder.createSrcRegRegion(dst_decl, builder.getRegionScalar()),
             nullptr, InstOpt_WriteEnable | InstOpt_NoCompact));
 
-        // update given add instruction's src0
-        G4_SrcRegRegion* new_src = builder.createSrcRegRegion(
-            dst_decl, builder.getRegionScalar());
-        new_src->setModifier(Mod_Minus);
-        add_with_ip->setSrc(new_src, 0);
+        // update given add instruction's src0 if needed
+        if (inst_with_ip->opcode() == G4_add)
+        {
+            G4_SrcRegRegion* new_src = builder.createSrcRegRegion(
+                dst_decl, builder.getRegionScalar());
+            new_src->setModifier(Mod_Minus);
+            inst_with_ip->setSrc(new_src, 0);
+        }
     }
 
     void Optimizer::createInstForJmpiSequence(InstListType& insts, G4_INST* fcall)
@@ -10345,7 +10528,8 @@ private:
         else
             T = getLastUser()->getDst()->getType();
 
-        return IS_FTYPE(T) ? Type_F : (IS_SIGNED_INT(T) ? Type_W : Type_UW);
+        assert((IS_FTYPE(T) || IS_HFTYPE(T) || IS_INT(T)) && "Only F/HF/W/B types are expected here");
+        return (IS_FTYPE(T) || IS_HFTYPE(T)) ? T : (IS_SIGNED_INT(T) ? Type_W : Type_UW);
     }
 };
 
@@ -12385,6 +12569,25 @@ void Optimizer::newDoNoMaskWA()
     fg.reassignBlockIDs();
     fg.findNestedDivergentBBs(nestedDivergentBBs);
 
+    // Make sure the flag spill/fill inside a WA sequence do not need postRA WA.
+    // [doc will be added for this later]
+    // Given:
+    //     (W) cmp (16)  (ge)PTemp.0 V0249_f(0,0)<1>:f  V0217(0,0)<1;1,0>:f  V0247(0,0)<1;1,0>:f
+    // After postRA WA:
+    //  (B)  (W) mov (1)              r115.0<1>:ud  r14.7<0;1,0>:ud
+    //       (W) or (1)               r14.7<1>:ud  r14.7<0;1,0>:ud  0xffff0000:ud
+    //       (W&!f0.0) and (1)        r14.7<1>: ud  r14.7<0;1,0>:ud  0xffff:ud
+    //  (1)  (W&f0.0) mov (1)         f1.0<1>:uw  r14.14<0;1,0>:uw                  // flag fill,  postWA applied!
+    //  (F)  (W&f1.0) cmp(16|M16)  (ge)f1.0  r79.0<1>:f  r44.0<1;1,0>:f  r75.0<1;1,0>:f
+    //  (2)  (W) mov(1)              r14.14<1>:uw  f1.0<0; ,0>:uw                   // flag spill
+    //  (E)  (W&!f0.0) mov(1)        r14.7<1>:ud  r115.0<0;1,0>:ud
+    // In this case, (1) should not have WA applied, as doing WA makes f1.0 undefined for case f0.0 = 'all 0'
+    // (hitting HW bug case). To avoid this, save (B, E, F) and let postRA to exclude (1) and (2) from having WA.
+    //
+    // Note that for this to work,  (E)'s dst must be replaced with the flag's spill grf!
+    //
+    // WASequenceInfo : keep (B, E, F) and it will be passed into postRA.
+    std::list<std::tuple<G4_INST*, G4_INST*, G4_INST*> > WASequenceInfo;
     std::vector<INST_LIST_ITER> NoMaskCandidates;
     const G4_ExecSize simdsize = fg.getKernel()->getSimdSize();
 
@@ -12425,7 +12628,7 @@ void Optimizer::newDoNoMaskWA()
             // Make sure this temp is reserved just for WA and is not spilled.
             WATemp->setLiveIn();
             WATemp->setLiveOut();
-            WATemp->isDoNotSpill();
+            WATemp->setDoNotSpill();
         }
         else
         {
@@ -12553,6 +12756,42 @@ void Optimizer::newDoNoMaskWA()
         return flagVar;
     };
 
+    auto addPseudoKillIfFullCondMod = [&](G4_BB* aBB, INST_LIST_ITER aII)
+    {
+        // Only NoMask Inst without predicate will call this function!
+        G4_INST* I = *aII;
+        G4_CondMod* aCondMod = I->getCondMod();
+        if (I->getImplAccSrc() != nullptr || I->isSend() || !aCondMod ||
+            aCondMod->getBase()->asRegVar()->getPhyReg())
+        {
+            return;
+        }
+
+        // Make sure condMod is not used in this inst
+        {
+            G4_Operand* src0_0 = I->getSrc(0);
+            G4_Operand* src0_1 = I->getSrc(1);
+            G4_Operand* src0_2 = I->getSrc(2);
+            G4_Operand* src0_3 = I->getSrc(3);
+
+            if ((src0_0 && src0_0->compareOperand(aCondMod, builder) != Rel_disjoint) ||
+                (src0_1 && src0_1->compareOperand(aCondMod, builder) != Rel_disjoint) ||
+                (src0_2 && src0_2->compareOperand(aCondMod, builder) != Rel_disjoint) ||
+                (src0_3 && src0_3->compareOperand(aCondMod, builder) != Rel_disjoint))
+            {
+                return;
+            }
+        }
+
+        const G4_Declare* decl = ((const G4_RegVar*)aCondMod->getBase())->getDeclare();
+        const G4_Declare* rDcl = decl->getRootDeclare();
+        if ((aCondMod->getRightBound() - aCondMod->getLeftBound() + 1) >= rDcl->getNumberFlagElements())
+        {
+            auto pseudoKill = builder.createPseudoKill(const_cast<G4_Declare*>(rDcl), PseudoKillType::Other);
+            aBB->insertBefore(aII, pseudoKill);
+        }
+    };
+
     auto addPseudoKillIfFullDstWrite = [&](G4_BB* aBB, INST_LIST_ITER aII)
     {
         // Only NoMask Inst without predicate will call this function!
@@ -12650,7 +12889,7 @@ void Optimizer::newDoNoMaskWA()
         G4_Predicate* P = I->getPredicate();
         assert((P && !I->getCondMod()) && "ICE: expect predicate and no flagModifier!");
 
-        uint32_t flagBits = P->getRightBound() - P->getLeftBound() + 1;
+        uint32_t flagBits = (P->getRightBound() - P->getLeftBound() + 1) + I->getMaskOffset();
         assert((16 * aFlagVar->getDeclare()->getRootDeclare()->getWordSize()) >= flagBits &&
             "ICE[vISA]: WA's flagVar should not be smaller!");
 
@@ -12705,6 +12944,8 @@ void Optimizer::newDoNoMaskWA()
 
         // update defUse
         I0->addDefUse(I, Opnd_pred);
+
+        WASequenceInfo.push_back(std::make_tuple(pseudoMov, restoreMov, I));
     };
 
     // flagVar : WA flag for this BB
@@ -12825,6 +13066,7 @@ void Optimizer::newDoNoMaskWA()
 
         // Add pseudo kill for dst
         addPseudoKillIfFullDstWrite(aBB, aII);
+        addPseudoKillIfFullCondMod(aBB, aII);
 
         const bool condModGlb = fg.globalOpndHT.isOpndGlobal(P);
         G4_Declare* modDcl = P->getTopDcl();
@@ -12919,6 +13161,8 @@ void Optimizer::newDoNoMaskWA()
                 // copyUsesTo() to achieve that, which is conservative.
                 I->copyUsesTo(I2, false);
             }
+
+            WASequenceInfo.push_back(std::make_tuple(I0, I2, I));
             return;
         }
 
@@ -12978,6 +13222,8 @@ void Optimizer::newDoNoMaskWA()
             // copyUsesTo() to achieve that, which is conservative.
             I->copyUsesTo(I3, false);
         }
+
+        WASequenceInfo.push_back(std::make_tuple(I0, I3, I));
     };
 
     //  Predicated inst with flagModifier.
@@ -13096,6 +13342,8 @@ void Optimizer::newDoNoMaskWA()
             // conservatively use copyUsesTo().
             I->copyUsesTo(I2, false);
         }
+
+        WASequenceInfo.push_back(std::make_tuple(I0, I2, I));
     };
 
     // Scan all insts and apply WA on NoMask candidate insts
@@ -13244,7 +13492,9 @@ void Optimizer::newDoNoMaskWA()
 
             // save WA info for postRA
             kernel.addNoMaskWAInfo(BB,
-                InstKill, InstSave, InstRestore, InstMov0, InstCmp, InstAllOne);
+                InstKill, InstSave, InstRestore, InstMov0, InstCmp, InstAllOne,
+                WASequenceInfo);
+            WASequenceInfo.clear();
         }
     }
 
@@ -13259,6 +13509,1123 @@ void Optimizer::newDoNoMaskWA()
             I->setSkipPostRA(true);
         }
     }
+}
+
+// The NoMask WA has two parts:
+//        preRA part: prepare for applying WA in postRA
+//       postRA part: apply WAs
+//
+// prepareNoMaskWA is preRA part. It does:
+//    1. Determines if NoMask WA needs to be applied for any BB
+//       This is done by using nested divergence to decide whether a BB needs WA.
+//    2. If WA is needed,  reserve dedicated GRFs
+//       Check all insts that need WA and decide how much GRF to be reserved.
+//       At most 2GRF + 2DW is needed.
+//    This info, reserved GRFs and whether there are insts that need WA, is passed
+//    into postRA.  Note that even though there is no inst that need WA preRA, it is
+//    still possible that spill/fill needs WA. Thus, at least 2DW will be reserved.
+void Optimizer::prepareNoMaskWA()
+{
+    std::unordered_map<G4_BB*, int> nestedDivergentBBs;
+    const G4_ExecSize simdsize = fg.getKernel()->getSimdSize();
+
+    // Identify BBs that need WA
+    fg.reassignBlockIDs();
+    fg.findNestedDivergentBBs(nestedDivergentBBs);
+
+    // Return true if a NoMask inst is either send or global
+    auto isCandidateInst = [&](G4_INST* Inst, FlowGraph& cfg) -> bool {
+        // pseudo should be gone at this time [skip all pseudo].
+        if (!Inst->isWriteEnableInst() ||
+            Inst->isCFInst() ||
+            Inst->isPseudoLogic() ||
+            Inst->isPseudoKill() ||
+            Inst->isWait() ||          // predicate not supported
+            Inst->opcode() == G4_nop)  // predicate not supported
+        {
+            return false;
+        }
+        if (Inst->isSend() && Inst->getPredicate() && Inst->getExecSize() > simdsize)
+        {
+            // fused send, already correctly predicated, skip
+            return false;
+        }
+        if (Inst->isEOT())
+        {
+            // Algo assumes no WA needed for entry and exit, skip EOT for now.
+            return false;
+        }
+        return true;
+    };
+
+    // If true, there exist NoMask insts that need WA.
+    bool hasWAInst = false;
+    bool reserveWAFlag = false;
+    uint32_t numTempInUD = 0;        // size of temp in UD
+    G4_SubReg_Align tempAlign = Even_Word;
+
+    auto updateTempReserve = [&](uint32_t aNumElts, G4_Type aEltTy, G4_SubReg_Align aAlign)
+    {
+        uint32_t newBytes = aNumElts * TypeSize(aEltTy);
+        uint32_t newDWs = (newBytes + 3) / 4;
+        if (newDWs > numTempInUD)
+        {
+            numTempInUD = newDWs;
+        }
+        if (tempAlign < aAlign)
+        {
+            tempAlign = aAlign;
+        }
+    };
+
+    // Scan all insts and mark then if WAs are needed
+    for (auto BI : fg)
+    {
+        G4_BB* BB = BI;
+        if ((BB->getBBType() & G4_BB_NM_WA_TYPE) == 0)
+        {
+            continue;
+        }
+
+        // This BB might need WA, thus reserved GRF for WA flags.
+        // (Even though there is no NoMask inst in this BB now, later RA might generate
+        //  spill/fill in this BB. Thus WAFlagReserve shoud be set here.)
+        reserveWAFlag = true;
+        for (auto II = BB->begin(), IE = BB->end(); II != IE; ++II)
+        {
+            G4_INST* I = *II;
+            if (isCandidateInst(I, fg))
+            {
+                I->setNeedPostRA(true);
+                hasWAInst = true;
+
+                // Check if any temps are needed.
+                G4_CondMod* condmod = I->getCondMod();
+                G4_Predicate* pred = I->getPredicate();
+                if (pred && !condmod)
+                {
+                    // doPredicateInstWA(): need 1 DW
+                    updateTempReserve(1, Type_UD, Even_Word);
+                }
+                else if (!pred && condmod)
+                {
+                    if (I->opcode() == G4_sel || I->opcode() == G4_csel)
+                    {
+                        // doFlagModifierSelInstWA : temp for saving dst (could be 2GRF)
+                        G4_DstRegRegion* dst = I->getDst();
+                        assert((dst && !dst->isNullReg()) && "ICE: expect dst to be non-null!");
+                        (void)updateTempReserve(I->getExecSize() * dst->getHorzStride(),
+                            dst->getType(), dst->getTopDcl()->getSubRegAlign());
+                    }
+                    else
+                    {
+                        //doFlagModifierInstWA : temp for saving condmod
+                        updateTempReserve(1, Type_UD, Even_Word);
+                    }
+                }
+                else if (pred && condmod)
+                {
+                    //doPredicateAndFlagModifierInstWA : temp for saving predicate
+                    updateTempReserve(1, Type_UD, Even_Word);
+                }
+            }
+        }
+    }
+
+    G4_BB* entryBB = fg.getEntryBB();
+    assert(entryBB);
+    G4_Declare* WATemp = nullptr;
+    if (numTempInUD > 0)
+    {
+        // For temps other than WA flags. Its size will be the largest of all temps
+        // It is at most 2 GRF (dst that uses maximum 2 GRF).
+        WATemp = builder.createTempVar(numTempInUD, Type_UD, tempAlign, "WATemp");
+        WATemp->setLiveIn();
+        WATemp->setLiveOut();
+        WATemp->setDoNotSpill();
+
+        // Add a pseudo use inst so that RA will include this temp for reg allocation.
+        G4_ExecSize sz = builder.toExecSize(Get_VISA_Exec_Size_From_Raw_Size(numTempInUD));
+        G4_SrcRegRegion* use = builder.createSrc(WATemp->getRegVar(), 0, 0,
+            (sz == g4::SIMD1 ? builder.getRegionScalar() : builder.getRegionStride1()), Type_UD);
+        G4_INST* pseudoUseInst = builder.createIntrinsicInst(
+            nullptr, Intrinsic::FlagSpill, sz,  nullptr, use, nullptr, nullptr, InstOpt_NoOpt, false);
+
+        INST_LIST_ITER inst_it = entryBB->getFirstInsertPos();
+        entryBB->insertBefore(inst_it, pseudoUseInst);
+    }
+
+    // WA flag temp:  2 DW.
+    //    The First for saving the existing flag so that WA flag can use it.
+    //    The second one is a temp for saving WA flag to avoid recalculating it.
+    G4_Declare* WAFlagReserve = nullptr;
+    if (reserveWAFlag)
+    {
+        WAFlagReserve = builder.createTempVar(2, Type_UD, Even_Word, "WAFlag");
+        WAFlagReserve->setLiveIn();
+        WAFlagReserve->setLiveOut();
+        WAFlagReserve->setDoNotSpill();
+
+        G4_SrcRegRegion* src = builder.createSrc(
+            WAFlagReserve->getRegVar(), 0, 0, builder.getRegionStride1(), Type_UD);
+        G4_INST* pseudoUseInst = builder.createIntrinsicInst(
+            nullptr, Intrinsic::FlagSpill, g4::SIMD2,
+            nullptr, src, nullptr, nullptr, InstOpt_NoOpt, false);
+
+        INST_LIST_ITER inst_it = entryBB->getFirstInsertPos();
+        entryBB->insertBefore(inst_it, pseudoUseInst);
+    };
+
+    // Save info for applyNoMaskWA() to use after RA.
+    // If reserveWAFlag is false, there is no need to apply WA at all (including postRA).
+    if (reserveWAFlag)
+    {
+        kernel.createNoMaskWAInfo(WAFlagReserve, WATemp, hasWAInst);
+    }
+}
+
+void Optimizer::applyNoMaskWA()
+{
+    // Utility class to get flag def/use info for a BB
+    //    Each of 16-bit flag has one bit to track whether it is used or defined.
+    //    We have 4 flags, thus 4 bits for use and 4 bits for def.
+    //
+    //    DefUse info is encoded as uint32_t, in which the first 4 bits of 1st half
+    //    and the 2nd half are for use and def, respectively, that is,
+    //        [3:0] : use (f1.1, f1.0, f0.1, f0.0)
+    //      [19:16] : def (f1.1, f1.0, f0.1, f0.0)
+    //
+    // For example,  0xA0001 (1010b, 0001b) -> f1.1 & f0.1 are defined, f0.0 is used
+    //
+    // Convention:
+    //    Inst iterator range is represented as [a, b], or [a, b), in which '[' and ']'
+    //    means inclusive, where '(' and ')' means exclusive.  For example, [1, 10) means
+    //    1 to 9, where [1, 10] means 1 to 10.
+    class FlagDefUse
+    {
+        G4_BB* m_BB;
+        // Keep track DefUse info for each inst.
+        std::unordered_map<G4_INST*, uint32_t> m_flagDefUse;
+    public:
+        FlagDefUse(G4_BB* aBB) : m_BB(aBB) {}
+
+        // return value:
+        //   true:  if "O" is flag and has assigned a physical flag. This physical reg
+        //          is returned as (freg, fsreg):ty.
+        //   false: otherwise
+        //
+        // Note this code mimics the logic of printRegVarOff() in G4_IR.cpp.
+        //
+        // For pred/condMod, "ty" is the actual size that this "O" accesses,
+        // not the decl size of "O". For example,
+        //    cmp  (16|M16)  (eq)f0.0  ...
+        // this func returns with f(0,0):UW, but "O" is of UD!
+        static bool getFlagRegAndSubreg(G4_Operand* O, uint32_t& freg, uint32_t& fsreg, G4_Type& ty)
+        {
+            // flag:
+            //        reg no = base's ExRegNum()
+            //     subregoff = base's subregoff + Operand's subregoff  (in UW)
+            //
+            // Type difference b/w base and operand is not considered here for flag as
+            // the base's type is always UW. Operand's type can be UW/UD. If operand's type is UD,
+            // its subregoff in UD must be 0, which is the same as one in UW. Therefore, simply
+            // treat operand's subRegOff as in UW.
+            uint32_t nSubFlag = (O->getRightBound() - O->getLeftBound() + 16) / 16;
+            uint32_t subregoff = 0;
+            if (O->isSrcRegRegion())
+            {
+                subregoff = O->asSrcRegRegion()->getSubRegOff();
+            }
+            else if (O->isDstRegRegion())
+            {
+                subregoff = O->asDstRegRegion()->getSubRegOff();
+            }
+            else if (O->isPredicate())
+            {
+                subregoff = O->asPredicate()->getSubRegOff();
+            }
+            else if (O->isCondMod())
+            {
+                subregoff = O->asCondMod()->getSubRegOff();
+            }
+
+            G4_VarBase* BVar = O->getBase();
+            ty = (nSubFlag == 1 ? Type_UW : Type_UD);
+            bool isValid = false;
+            if (BVar)
+            {
+                freg = BVar->ExRegNum(isValid);
+                fsreg = BVar->asRegVar()->getPhyRegOff() + subregoff;
+            }
+            return isValid;
+        }
+
+    private:
+        uint16_t getFlagBits(G4_Operand* O)
+        {
+            uint32_t r, sr;
+            G4_Type t;
+            if (getFlagRegAndSubreg(O, r, sr, t))
+            {
+                // For the following cases, getFlagRegAndSubreg() returns with r=1, sr=0, ty=UW.
+                // But they really access f1.1. Thus, do adjustment to get the right flag bits!
+                //          cmp (16|M16) (eq)f1.0 ...
+                //   (f1.0) mov (16|M16) ....
+                if ((O->isPredicate() || O->isCondMod()) && t == Type_UW)
+                {
+                    // sanity check: subreg could be 1 only if rightBound < 16
+                    assert(sr == 0 || O->getRightBound() < 16);
+
+                    if (O->getLeftBound() >= 16)
+                    {
+                        // typical cases like ones in comments above
+                        sr = 1;
+                    }
+                    else if (O->getRightBound() >= 16)
+                    {
+                        // cross two sub-flags (f1.0 and f1.1). Reset t to UD
+                        t = Type_UD;
+                    }
+                }
+
+                uint16_t bits = (t == Type_UD ? 0x3 : 0x1);
+                return (bits << (r * 2 + sr));
+            }
+            assert(false && "Flag: not allocated to physical register!");
+            return 0;
+        };
+
+        uint32_t getFlagDefUseBits(G4_INST* aI)
+        {
+            auto MI = m_flagDefUse.find(aI);
+            if (MI != m_flagDefUse.end())
+            {
+                return MI->second;
+            }
+
+            uint16_t flagUse = 0;
+            uint16_t flagDef = 0;
+            for (int i = 0, sz = (int)aI->getNumSrc(); i < sz; ++i)
+            {
+                G4_Operand* S = aI->getOperand(aI->getSrcOperandNum(i));
+                if (S && S->isFlag())
+                {
+                    assert(S->asSrcRegRegion()->getBase()->getAreg());
+                    flagUse |= getFlagBits(S);
+                }
+            }
+            // predicate
+            if (G4_Predicate* P = aI->getPredicate())
+            {
+                flagUse |= getFlagBits(P);
+            }
+            // defs
+            G4_Operand* D = aI->getDst();
+            if (D && !D->isNullReg() && D->isFlag())
+            {
+                assert(D->asDstRegRegion()->getBase()->getAreg());
+                flagDef |= getFlagBits(D);
+            }
+            if (aI->opcode() != G4_sel && aI->opcode() != G4_csel)
+            {   // sel does not update condMod
+                if (G4_CondMod* Mod = aI->getCondMod())
+                {
+                    flagDef |= getFlagBits(Mod);
+                }
+            }
+            uint32_t retBits = (flagDef << 16) | flagUse;
+            m_flagDefUse.insert(std::make_pair(aI, retBits));
+            return retBits;
+        }
+
+        // Return flag bits for instructions within [SI, EI).
+        uint32_t getInstsBits(INST_LIST_ITER SI, INST_LIST_ITER EI)
+        {
+            uint32_t defuse = 0;
+            for (auto II = SI; II != EI; ++II) {
+                G4_INST* tI = *II;
+                defuse |= getFlagDefUseBits(tI);
+            }
+            return defuse;
+        }
+
+        // Return  true: if there is a flag that is not referenced by this duBits.
+        //               The returned flag (freg, fsreg) is a unreferenced one.
+        //        false: otherwise.
+        bool getUnreferencedFlag(uint32_t duBits, G4_Type fty, uint32_t& freg, uint32_t& fsreg)
+        {
+            uint32_t fBits = (fty == Type_UD) ? 0x3 : 0x1;
+            uint32_t duBitsD = (duBits >> 16);
+            int i = 0;
+            for (; i < 4; i += (fty == Type_UD ? 2 : 1)) {
+                if ((fBits & duBits) == 0        // Use
+                    && (fBits & duBitsD) == 0)   // Def
+                {
+                    freg = i / 2;
+                    fsreg = i % 2;
+                    return true;
+                }
+                fBits = (fBits << (fty == Type_UD ? 2 : 1));
+            }
+            return false;
+        }
+
+    public:
+        // Let BI = aWaInsts[aStartIx], EI = ++(aWaInsts.back()).
+        // Note that aWaInsts's element is of INST_LIST_ITER.
+        //
+        // getBestFlagIfAvailable() searches [BI, EI), and it searches in order until no available flag can
+        // be used. (In doing so, we have the maximum number of WA insts that can use the same WA flag.)
+        // The argument 'aEndIx' is the index it stops when no flag can be used.
+        //   Return value:
+        //     false:  If aEndIx == aStartIx,  no flag can be used. This means that the inst at aStartIx takes
+        //             all two flags.
+        //      true:  otherwise, (retFreg, retFsreg):FTy is not used in [ aWaInsts[aStartIx], aWaInsts[aEndIx] ).
+        //             If aEndIx = aWaInsts.size(), it means (retFreg, retFsreg):FTy can be used for all insts
+        //             of aWaInsts, starting from aStartIx.
+        bool getBestFlagIfAvailable(const std::vector<INST_LIST_ITER>& aWaInsts,
+            const int32_t aStartIx, int32_t& aEndIx, G4_Type FTy, uint32_t& retFreg, uint32_t& retFsreg)
+        {
+            // initialize flag to be invalid
+            retFreg = 0xff;
+            retFsreg = 0xff;
+
+            int SIx = aStartIx;
+            INST_LIST_ITER BI = aWaInsts[SIx];
+            uint32_t DUBits = 0;
+            for (const int EIx = (int)aWaInsts.size(); SIx < EIx; ++SIx)
+            {
+                uint32_t r, s;
+                INST_LIST_ITER NI = std::next(aWaInsts[SIx]);
+                DUBits |= getInstsBits(BI, NI);
+                if (!getUnreferencedFlag(DUBits, FTy, r, s))
+                {
+                    // no flag is available at ix
+                    break;
+                }
+                retFreg = r;
+                retFsreg = s;
+                BI = NI;  // set the next starting iterator
+            }
+
+            aEndIx = SIx;
+            return SIx != aStartIx;
+        }
+    };
+
+    // Only need to create at most 6 WAFlag temps.
+    G4_Declare* FlagUD[2] = { nullptr, nullptr };
+    G4_Declare* FlagUW[4] = { nullptr, nullptr, nullptr, nullptr };
+    auto getFlagDcl = [&](uint32_t aFreg, uint32_t aFsreg, G4_Type aFTy)
+    {
+        G4_Declare* retDcl;
+        if (aFTy == Type_UD)
+        {
+            int ix = aFreg;
+            if (FlagUD[ix] == nullptr)
+            {
+                FlagUD[ix] = builder.createTempFlag(2, "WAFlagUD");
+            }
+            retDcl = FlagUD[ix];
+        }
+        else
+        {
+            int ix = 2 * aFreg + aFsreg;
+            if (FlagUW[ix] == nullptr)
+            {
+                FlagUW[ix] = builder.createTempFlag(1, "WAFlagUW");
+            }
+            retDcl = FlagUW[ix];
+        }
+        return retDcl;
+    };
+
+    // Get those GRFs reserved in prepareNoMaskWA()
+    NoMaskWAInfo* WAInfo = kernel.getEUFusionNoMaskWAInfo();
+
+    // If no spill AND no inst that needs WA, just return.
+    //   ' HasWAInsts = true' means that before RA, there are insts that need WA
+    const bool HasFlagSpill = (builder.getJitInfo()->numFlagSpillStore > 0);
+    const bool HasGRFSpill = (builder.getJitInfo()->spillMemUsed > 0);
+    if (!WAInfo ||                                                // No BB needs WA
+        (!(HasFlagSpill || HasGRFSpill) && !WAInfo->HasWAInsts))  // No Spill, no WA Insts
+    {
+        kernel.deleteEUFusionNoMaskWAInfo();
+        return;
+    }
+
+    const G4_ExecSize Simdsize = fg.getKernel()->getSimdSize();
+    const RegionDesc* ScalarReg = builder.getRegionScalar();
+    bool UseAnyh = true;  // default, adjusted for each BB.
+
+    // WAFlagReserve is 2DW GRF.
+    // An example about how to use it.
+    //     Assume WAFlag is f0.1:uw
+    //
+    //   ===========================================
+    //   |          DW0        |        DW         |
+    //   |   uw0     |   uw1   |   uw0   |   uw1   |
+    //   ===========================================
+    //   | orig f0.1 |         | WA f0.1 |         |       <-- WAFlag = f0.1:uw
+    //   ============================================
+    //   |      orig  f0.0     |    WA f0.0        |       <-- WAFlag = f0.0:ud
+    //   ===========================================
+    //
+    // If WAFlag cannot be used to all insts as it is clobbered somewhere in the
+    // middle, it must be saved in DW1.
+    //
+    G4_Declare* SaveDcl = WAInfo->WAFlagReserved; // 2DW
+    G4_RegVar* SaveVar = SaveDcl->getRegVar();
+    G4_Declare* WATempDcl = WAInfo->WATempReserved;  // 0 - 2 GRF
+    G4_RegVar* WATempVar = (WATempDcl ? WATempDcl->getRegVar() : nullptr);
+
+#if defined(_DEBUG) || defined(_INTERNAL)
+    // Check if linearStart has been done and SaveDcl/WATempDcl has been allocated.
+    // (computePReg() set GRFBaseOffset().
+    auto checkDclPReg = [&](G4_Declare* aDcl)
+    {
+        // Set lineartStar for aDcl
+        G4_RegVar* RegVar = aDcl->getRegVar();
+        assert(RegVar->isPhyRegAssigned() && RegVar->getPhyReg()->isGreg());
+        uint32_t regNum = (static_cast<G4_Greg*>(RegVar->getPhyReg()))->getRegNum();
+        uint32_t subRegNum = RegVar->getPhyRegOff();
+        uint32_t dclEltBytes = aDcl->getElemSize();
+        uint32_t linearizedStart = (regNum * builder.numEltPerGRF<Type_UB>()) + (subRegNum * dclEltBytes);
+        assert(aDcl->getGRFBaseOffset() == linearizedStart);
+    };
+
+    checkDclPReg(SaveDcl);
+    if (WATempDcl != nullptr)
+    {
+        checkDclPReg(WATempDcl);
+    }
+#endif
+
+    auto verifyRegVarSize = [&](G4_RegVar* aRegVar, uint32_t aBytes)
+    {
+#if defined(_DEBUG) || defined(_INTERNAL)
+        uint32_t var_sz = (aRegVar != nullptr ? aRegVar->getDeclare()->getByteSize() : 0);
+        if (var_sz < aBytes)
+        {
+            assert(false && "WATemp does not reserve enough space!");
+        }
+#endif
+    };
+
+    auto WAFlagSaveOff = [](G4_Type aT) { return aT == Type_UD ? 1 : 2; };
+    auto isNull = [](G4_Operand* aO) { return (aO == nullptr || aO->isNullReg()); };
+
+    auto getPredCtrl = [&Simdsize](bool aUseAnyh) -> G4_Predicate_Control
+    {
+        if (aUseAnyh)
+        {
+            return Simdsize == g4::SIMD8
+                ? PRED_ANY8H
+                : (Simdsize == g4::SIMD16 ? PRED_ANY16H : PRED_ANY32H);
+        }
+        return PRED_DEFAULT;
+    };
+
+    auto isCandidate = [](G4_INST* I)
+    {
+        return (I->getNeedPostRA() && I->isWriteEnableInst());
+    };
+
+    // Create WAFlag using mov and cmp.
+    auto createFlagFromCmp = [&](G4_BB* aBB, INST_LIST_ITER& aInsertBeforePos, G4_RegVar* aFlag, G4_Type aTy)
+    {
+        //  I0:     (W) mov (1|M0)  f0.0<1>:aTy,  0
+        //  I1:         cmp (Simdsize|M0) (eq)f0.0  r0<0;1,0>:uw  r0<0;1,0>:uw
+        //  I2      (W&f0.0.anyh) mov (1|M0) f0.0:aTy   0xffffffff:aTy             [optional]
+        G4_DstRegRegion* D = builder.createDst(aFlag, 0, 0, 1, aTy);
+        G4_INST* I0 = builder.createMov(g4::SIMD1, D, builder.createImm(0, aTy), InstOpt_WriteEnable, false);
+        aBB->insertBefore(aInsertBeforePos, I0);
+
+        G4_RegVar* r0Var = builder.getRealR0()->getRegVar();
+        G4_SrcRegRegion* r0_0 = builder.createSrc(r0Var, 0, 0, ScalarReg, Type_UW);
+        G4_SrcRegRegion* r0_1 = builder.createSrc(r0Var, 0, 0, ScalarReg, Type_UW);
+        G4_CondMod* flagCM = builder.createCondMod(Mod_e, aFlag, 0);
+        G4_DstRegRegion* nullDst = builder.createNullDst(Type_UW);
+        G4_INST* I1 = builder.createInternalInst(
+            NULL, G4_cmp, flagCM, g4::NOSAT, Simdsize, nullDst, r0_0, r0_1, InstOpt_M0);
+        aBB->insertBefore(aInsertBeforePos, I1);
+
+        if (!UseAnyh)
+        {
+            G4_Imm* allone = builder.createImm(0xFFFFFFFF, aTy);
+            G4_DstRegRegion* tF = builder.createDst(aFlag, 0, 0, 1, aTy);
+            G4_INST* I2 = builder.createMov(g4::SIMD1, tF, allone, InstOpt_WriteEnable, false);
+            G4_Predicate* I2_P = builder.createPredicate(PredState_Plus, aFlag, 0,
+                (Simdsize == g4::SIMD8 ? PRED_ANY8H : (Simdsize == g4::SIMD16 ? PRED_ANY16H : PRED_ANY32H)));
+            I2->setPredicate(I2_P);
+            aBB->insertBefore(aInsertBeforePos, I2);
+        }
+    };
+
+    auto createSIMD1Mov = [&](G4_BB* aBB, INST_LIST_ITER& aInsertBeforePos,
+        G4_RegVar* Dst, unsigned Dst_soff, G4_RegVar* Src, unsigned Src_soff, G4_Type Ty)
+    {
+        G4_DstRegRegion* D = builder.createDst(Dst, 0, Dst_soff, 1, Ty);
+        G4_SrcRegRegion* S = builder.createSrc(Src, 0, Src_soff, ScalarReg, Ty);
+        G4_INST* tI = builder.createMov(g4::SIMD1, D, S, InstOpt_WriteEnable, false);
+        aBB->insertBefore(aInsertBeforePos, tI);
+        return tI;
+    };
+
+    auto initWAFlag = [&](G4_BB* aBB, INST_LIST_ITER& aInsertBeforePos,
+        G4_RegVar* aFlag, G4_Type aTy,
+        bool& aFlagCreated, bool& aFlagSaved, const bool aSaveFlag)
+    {
+        if (aFlagCreated)
+        {
+            // Reload the already-saved WAFlag
+            assert(aFlagSaved && "WAFlag should have been saved!");
+            (void)createSIMD1Mov(aBB, aInsertBeforePos, aFlag, 0, SaveVar, WAFlagSaveOff(aTy), aTy);
+        }
+        else
+        {
+            // Create a WAFlag for this BB
+            createFlagFromCmp(aBB, aInsertBeforePos, aFlag, aTy);
+            aFlagCreated = true;
+
+            if (!aFlagSaved && aSaveFlag)
+            {
+                // save WAFlag
+                (void)createSIMD1Mov(aBB, aInsertBeforePos, SaveVar, WAFlagSaveOff(aTy), aFlag, 0, aTy);
+                aFlagSaved = true;
+            }
+        }
+    };
+
+    // doPredicateInstWA()  : WA for a predicated inst without condMod
+    //
+    // flagVar : Var for WA flag for this BB:
+    // currII:  iter to inst to which WA is applied.
+    //   Given a predicated inst 'I'
+    //        I :  (W&[+-]P) <inst> (8|M0) ...
+    //      to:
+    //        I0:  (W)           mov (1|M0) waTemp<0;1,0>    P
+    //        I1:  (W&-flagVar)  mov (1|M0)  P  0 [+] | 0xffff [-]
+    //        I :  (W&[+-]P)     <inst> (8|M0) ...                  [unchanged]
+    //        I2:  (W&-flagVar)  mov (1|M0) P   waTemp<0;1,0>
+    //
+    // where the original predCtrl of P at 'I' shall remain unchanged.
+    //
+    auto doPredicateInstWA = [&](G4_BB* aBB, INST_LIST_ITER& aII, G4_RegVar* aFlagVar)
+    {
+        G4_INST* I = *aII;
+        G4_Predicate* P = I->getPredicate();
+        assert((P && !I->getCondMod()) && "ICE: expect predicate and no flagModifier!");
+
+        uint32_t flagBits = (P->getRightBound() - P->getLeftBound() + 1) + I->getMaskOffset();
+        assert((16 * aFlagVar->getDeclare()->getRootDeclare()->getWordSize()) >= flagBits &&
+            "ICE[vISA]: WA's flagVar should not be smaller!");
+
+        G4_Type Ty = (flagBits > 16) ? Type_UD : Type_UW;
+
+        // I0:  (W) mov (1|M0) waTemp  P
+        verifyRegVarSize(WATempVar, 4);
+        (void) createSIMD1Mov(aBB, aII, WATempVar, 0, P->getTopDcl()->getRegVar(), 0, Ty);
+
+        // I1: (W&-flagVar)  mov (1|M0)  P  0 [+] | 0xffff [-]
+        int64_t imm = (P->getState() == PredState_Plus ? 0 : 0xFFFFFFFF);
+        G4_Imm* I1_s0 = builder.createImm(imm, Ty);
+        G4_DstRegRegion* I1_d = builder.createDst(P->getTopDcl()->getRegVar(), 0, 0, 1, Ty);
+        G4_Predicate* I1_flag = builder.createPredicate(
+            PredState_Minus, aFlagVar, 0, getPredCtrl(UseAnyh));
+        G4_INST* I1 = builder.createMov(g4::SIMD1, I1_d, I1_s0, InstOpt_WriteEnable, false);
+        I1->setPredicate(I1_flag);
+        aBB->insertBefore(aII, I1);
+
+        // I : unchanged
+
+        // I2: (W&-flagVar)  mov (1|M0) P   waTemp<0;1,0>
+        auto nextII = std::next(aII);
+        G4_INST* I2 = createSIMD1Mov(aBB, nextII, P->getTopDcl()->getRegVar(), 0, WATempVar, 0, Ty);
+        G4_Predicate* I2_flag = builder.createPredicate(
+            PredState_Minus, aFlagVar, 0, getPredCtrl(UseAnyh));
+        I2->setPredicate(I2_flag);
+    };
+
+    // doFlagModifierSelInstWA : WA for sel inst that has condmod without predicate
+    //   Note that sel does not update flag. Also, when condMod is used, predicate
+    //   is not allowed.
+    //
+    // flagVar : WA flag for this BB
+    // Before:
+    //     I:  (W) sel.ge.f0.0  (1|M0)   r10.0<1>:f  r20.0<0;1,0>:f  0:f
+    // After
+    //     I:  (W) sel.ge.f0.0  (1|M0)  WATemp:f  r20.0<0;1,0>:f   0:f
+    //     I0: (W&flagVar) mov  (1|M0)  r10.0<1>:f WATemp:f
+    //
+    auto doFlagModifierSelInstWA = [&](G4_BB* aBB, INST_LIST_ITER& aII, G4_RegVar* aFlagVar)
+    {
+        G4_INST* I = *aII;
+        G4_CondMod* P = I->getCondMod();
+        assert((P && !I->getPredicate()) && "ICE [sel]: expect flagModifier and no predicate!");
+
+        G4_DstRegRegion* dst = I->getDst();
+        assert( !isNull(dst) && "ICE: expect dst to be non-null!");
+
+
+        // Make sure that a temp, created in preRA, is big enough to hold data and possible gap
+        // b/w data due to alignment/hw restriction.
+        const uint16_t HS = dst->getHorzStride();
+        uint32_t dst_bytes = I->getExecSize() * HS * dst->getTypeSize();
+        verifyRegVarSize(WATempVar, dst_bytes);
+
+        // I : (W) sel.ge.f0.0  (1|M0)  WATemp:f  r20.0<0;1,0>:f   0:f
+        G4_DstRegRegion* I_d = builder.createDst(WATempVar, 0, 0, HS, dst->getType());
+        I->setDest(I_d);
+
+        // I0: (W&flagVar) mov  (1|M0)  r10.0<1>:f WATemp:f
+        const RegionDesc* regionSave = builder.createRegionDesc(I->getExecSize(), HS, 1, 0);
+        auto nextII = std::next(aII);
+        G4_SrcRegRegion* I0_src0 = builder.createSrc(WATempVar, 0, 0, regionSave, dst->getType());
+        G4_INST* I0 = builder.createMov(I->getExecSize(), dst, I0_src0, InstOpt_WriteEnable, false);
+        G4_Predicate* I0_f = builder.createPredicate(PredState_Plus, aFlagVar, 0, getPredCtrl(UseAnyh));
+        I0->setPredicate(I0_f);
+        aBB->insertBefore(nextII, I0);
+    };
+
+    // doFlagModifierInstWA : WA for an inst with flagModifier but no predicate.
+    //
+    // flagVar : WA flag for this BB.
+    //    Before:
+    //       I:  (W)  cmp (16|M16) (ne)P  D ....   // 32-bit flag
+    //         or
+    //           (W)  cmp (16|M0)  (ne)P  D ....   // 16-bit flag
+    //
+    //    After:
+    //      (1) D = null (common)
+    //           I0: (W)             mov (1|M0) WATemp   P
+    //           I:  (W)             cmp (16|M16) (ne)P  ....
+    //           I1: (W&-flagVar)    mov (1|M0)  P   WATemp
+    //      (2) I's execMask is the same as flagVar's size
+    //          (I's entire condMod is defined by I.)
+    //           I0  (W)             mov (1|M0)  WATemp  P
+    //           I1: (W)             mov (1|M0)  P   flagVar
+    //            I: (W&P)           cmp (16|M0) (ne)P .....          // add predicate
+    //           I2: (W&~flagVar)    mov (1|M0)  P  WATemp
+    //      (3) otherwise(less common)
+    //               Note that the sequence can only modify P that this cmp will change.
+    //           I0: (W)             mov (1|M0)  WATemp  P
+    //           I1: (W)             or  (1|M0)  P  P   <I's execMask>  // enable all
+    //           I2: (W&~flagVar)    and (1|M0)  P  P   ~<I's execMask> // disable all
+    //            I: (W&P)           cmp (16|M0) (ne)P .....            // add pred
+    //           I3: (W&~flagVar)    mov (1|M0)  P  WATemp
+    //
+    auto doFlagModifierInstWA = [&](G4_BB* aBB, INST_LIST_ITER& aII, G4_RegVar* aFlagVar)
+    {
+        G4_INST* I = *aII;
+        G4_CondMod* P = I->getCondMod();
+        assert((P && !I->getPredicate()) && "ICE: expect flagModifier and no predicate!");
+
+        // sel is specially handled in a different function.
+        assert(!(I->opcode() == G4_sel || I->opcode() == G4_csel));
+
+        G4_Declare* modDcl = P->getTopDcl();
+        G4_RegVar* modVar = modDcl->getRegVar();
+        G4_Type Ty = (modDcl->getWordSize() > 1) ? Type_UD : Type_UW;
+        G4_Type flagVarTy = (aFlagVar->getDeclare()->getWordSize() > 1 ? Type_UD : Type_UW);
+        if (isNull(I->getDst()))
+        {   // case 1
+
+            // I0: (W)        mov (1|M0) WATemp  P
+            verifyRegVarSize(WATempVar, 4);
+            (void)createSIMD1Mov(aBB, aII, WATempVar, 0, modVar, 0, Ty);
+
+            // I : unchanged
+
+            // I1: (W&-flagVar.anyh) mov (1|M0)  P  WATemp
+            auto nextII = std::next(aII);
+            G4_INST* I1 = createSIMD1Mov(aBB, nextII, modVar, 0, WATempVar, 0, Ty);
+            G4_Predicate* I1_f = builder.createPredicate(
+                PredState_Minus, aFlagVar, 0, getPredCtrl(UseAnyh));
+            I1->setPredicate(I1_f);
+
+            return;
+        }
+
+        const uint32_t execMask = I->getExecLaneMask();
+        assert((Ty == Type_UD || (execMask & 0xFFFF0000) == 0) &&
+            "ICE: a flag used in an inst should not be smaller than the inst's execMask!");
+        if (flagVarTy == Ty &&
+            ((execMask == 0xFFFF && Ty == Type_UW) || (execMask == 0xFFFFFFFF && Ty == Type_UD)))
+        {
+            // case 2 : entire mod is defined by 'I' !
+            //
+            // I0: (W)        mov (1|M0) WATemp  P
+            verifyRegVarSize(WATempVar, 4);
+            (void)createSIMD1Mov(aBB, aII, WATempVar, 0, modVar, 0, Ty);
+
+            // I1: (W) mov (1|M0)  P  flagVar
+            (void)createSIMD1Mov(aBB, aII, modVar, 0, aFlagVar, 0, Ty);
+
+            // I: add the new predicate (must be the same as modDcl), for example:
+            //    (W&P.anyh)       cmp (16|M0) (ne)P  ....
+            G4_Predicate* I_P = builder.createPredicate(PredState_Plus, modVar, 0, getPredCtrl(UseAnyh));
+            I->setPredicate(I_P);
+
+            // I2: (W&~flagVar.anyh)  mov (1|M0)  P  WATemp
+            auto nextII = std::next(aII);
+            G4_INST* I2 = createSIMD1Mov(aBB, nextII, modVar, 0, WATempVar, 0, Ty);
+            G4_Predicate* I2_f = builder.createPredicate(
+                PredState_Minus, aFlagVar, 0, getPredCtrl(UseAnyh));
+            I2->setPredicate(I2_f);
+
+            return;
+        }
+
+        // case 3 (less common)
+        //
+        // I0: (W)        mov (1|M0) WATemp  P<0;1,0>
+        verifyRegVarSize(WATempVar, 4);
+        (void)createSIMD1Mov(aBB, aII, WATempVar, 0, modVar, 0, Ty);
+
+        // I1: (W) or (1|M0)  P  P   ExecMask
+        G4_SrcRegRegion* I1_s0 = builder.createSrc(modVar, 0, 0, ScalarReg, Ty);
+        G4_Imm* I1_s1 = builder.createImm(execMask, Ty);
+        G4_DstRegRegion* I1_d = builder.createDst(modVar, 0, 0, 1, Ty);
+        G4_INST* I1 = builder.createBinOp(G4_or, g4::SIMD1, I1_d, I1_s0, I1_s1, InstOpt_WriteEnable, false);
+        aBB->insertBefore(aII, I1);
+
+        // I2: (W&~flagVar.anyh) and (1|M0)  P  P   ~ExecMask
+        uint32_t negExecMask = (uint32_t)(~execMask);
+        G4_SrcRegRegion* I2_s0 = builder.createSrc(modVar, 0, 0, ScalarReg, Ty);
+        G4_Imm* I2_s1 = builder.createImm(negExecMask, Ty);
+        G4_DstRegRegion* I2_d = builder.createDst(modVar, 0, 0, 1, Ty);
+        G4_INST* I2 = builder.createBinOp(G4_and, g4::SIMD1, I2_d, I2_s0, I2_s1, InstOpt_WriteEnable, false);
+        G4_Predicate* I2_f = builder.createPredicate(PredState_Minus, aFlagVar, 0, getPredCtrl(UseAnyh));
+        I2->setPredicate(I2_f);
+        aBB->insertBefore(aII, I2);
+
+        // I: add a new predicate, for example:
+        //    (W&P)            cmp (16|M0)  (ne)P .....
+        G4_Predicate* I_P = builder.createPredicate(PredState_Plus, modVar, 0, PRED_DEFAULT);
+        I->setPredicate(I_P);
+
+        // I3: (W&~flagVar.anyh)  mov (1|M0)  P  WATemp
+        auto nextII = std::next(aII);
+        G4_INST* I3 = createSIMD1Mov(aBB, nextII, modVar, 0, WATempVar, 0, Ty);
+        G4_Predicate* I3_f = builder.createPredicate(PredState_Minus, aFlagVar, 0, getPredCtrl(UseAnyh));
+        I3->setPredicate(I3_f);
+    };
+
+    //  doPredicateAndFlagModifierInstWA : WA for inst with both predicate and condMod
+    //
+    //  flagVar : emask for this BB:
+    //
+    //    Before:
+    //       I:  (W&[-]P)  and (16|M0) (ne)P  ....
+    //
+    //    After:
+    //          I0:   (W)           mov (1|M0) WATemp  P
+    //      Three cases
+    //      case 1:  'I' defines entire P
+    //          I1:   (W&-flagVar)  mov (1|M0) P  0 (for +p)| ExecMask (for -P)  // disable all lanes
+    //      case 2: +P
+    //          I1    (W&-flagVar)  and (1|M0) P   P  ~execMask   // disable all lanes
+    //      case 3: -P
+    //          I1    (W&-flagVar)   or (1|M0) P   P  execMask    // disable all lanes
+    //
+    //       I:  (W&[-]P)         and (16|M0) (ne)P  ....    // unchanged
+    //       I2: (W&-flagVar)     mov (1|M0)  P   WATemp
+    //
+    auto doPredicateAndFlagModifierInstWA = [&](G4_BB* aBB, INST_LIST_ITER& aII, G4_RegVar* aFlagVar)
+    {
+        G4_INST* I = *aII;
+        G4_Predicate* P = I->getPredicate();
+        G4_CondMod* M = I->getCondMod();
+        assert((P && M) && "ICE: expect both predicate and flagModifier!");
+        assert(P->getTopDcl() == M->getTopDcl() &&
+            "ICE: both predicate and flagMod must be the same flag!");
+
+        G4_Declare* modDcl = M->getTopDcl();
+        G4_RegVar* modVar = modDcl->getRegVar();
+        G4_Type Ty = (modDcl->getWordSize() > 1) ? Type_UD : Type_UW;
+
+        // I0: (W)        mov (1|M0) WATemp  P
+        verifyRegVarSize(WATempVar, 4);
+        (void)createSIMD1Mov(aBB, aII, WATempVar, 0, modVar, 0, Ty);
+
+        uint32_t execMask = I->getExecLaneMask();
+        uint32_t negExecMask = (uint32_t)(~execMask);
+        bool isPlusP = (P->getState() == PredState_Plus);
+        G4_INST* I1 = nullptr;
+        if ((Ty == Type_UD && execMask == 0xFFFFFFFF) || (Ty == Type_UW && execMask == 0xFFFF))
+        {
+            // case 1 : entire P are defined.
+            // I1:  (W&-flagVar)  mov (1|M0) P  0 (for +p)| ExecMask (for -P)
+            G4_DstRegRegion* I1_d = builder.createDst(modVar, 0, 0, 1, Ty);
+            G4_Imm* I1_imm = builder.createImm(isPlusP ? 0 : execMask, Ty);
+            I1 = builder.createMov(g4::SIMD1, I1_d, I1_imm, InstOpt_WriteEnable, false);
+            G4_Predicate* I1_f = builder.createPredicate(PredState_Minus, aFlagVar, 0, getPredCtrl(UseAnyh));
+            I1->setPredicate(I1_f);
+            aBB->insertBefore(aII, I1);
+        }
+        else
+        {
+            // case 2 & 3
+            //
+            // case 2: +P
+            //   I1:  (W&-flagVar)  and (1|M0) P   P  ~execMask
+            // case 3: -P
+            //   I1:  (W&-flagVar)   or (1|M0) P   P  execMask
+            G4_DstRegRegion* I1_d = builder.createDst(modVar, 0, 0, 1, Ty);
+            G4_SrcRegRegion* I1_s0 = builder.createSrc(modVar, 0, 0, ScalarReg, Ty);
+            G4_Imm* I1_imm = builder.createImm((isPlusP ? negExecMask : execMask), Ty);
+            G4_opcode opc1 = (isPlusP ? G4_and : G4_or);
+            I1 = builder.createBinOp(opc1, g4::SIMD1, I1_d,I1_s0, I1_imm, InstOpt_WriteEnable, false);
+            G4_Predicate* I1_f = builder.createPredicate(PredState_Minus, aFlagVar, 0, getPredCtrl(UseAnyh));
+            I1->setPredicate(I1_f);
+            aBB->insertBefore(aII, I1);
+        }
+
+        // No change to I
+
+        // I2: (W&-flagVar)     mov (1|M0)  P   WATemp
+        auto nextII = std::next(aII);
+        G4_INST* I2 = createSIMD1Mov(aBB, nextII, modVar, 0, WATempVar, 0, Ty);
+        G4_Predicate* I2_f = builder.createPredicate(PredState_Minus, aFlagVar, 0, getPredCtrl(UseAnyh));
+        I2->setPredicate(I2_f);
+    };
+
+    auto doSimpleInstWA = [&](G4_BB* aBB, INST_LIST_ITER& aII, G4_RegVar* aFlagVar)
+    {
+        G4_INST* I = *aII;
+        G4_Predicate* P = I->getPredicate();
+        G4_CondMod* M = I->getCondMod();
+        assert((P == nullptr && M == nullptr) && "ICE: expect neither pred nor condmod!");
+
+        G4_Predicate* newPred = builder.createPredicate(PredState_Plus, aFlagVar, 0, getPredCtrl(UseAnyh));
+        I->setPredicate(newPred);
+    };
+
+    auto applyWAToInst = [&](G4_BB* aBB, INST_LIST_ITER& aII, G4_RegVar* aFlagVar)
+    {
+        G4_INST* I = *aII;
+        G4_Predicate* P = I->getPredicate();
+        G4_CondMod* M = I->getCondMod();
+
+        if (P == nullptr && M == nullptr)
+        {
+            doSimpleInstWA(aBB, aII, aFlagVar);
+        }
+        else if (P != nullptr && M == nullptr)
+        {
+            doPredicateInstWA(aBB, aII, aFlagVar);
+        }
+        else if (P == nullptr && M != nullptr)
+        {
+            if ((I->opcode() == G4_sel || I->opcode() == G4_csel))
+            {
+                // Not expecting null dst, as it is no-op
+                if (!isNull(I->getDst()))
+                {
+                    doFlagModifierSelInstWA(aBB, aII, aFlagVar);
+                }
+            }
+            else
+            {
+                doFlagModifierInstWA(aBB, aII, aFlagVar);
+            }
+        }
+        else
+        {
+            doPredicateAndFlagModifierInstWA(aBB, aII, aFlagVar);
+        }
+    };
+
+    for (G4_BB* BB : kernel.fg)
+    {
+        if ((BB->getBBType() & G4_BB_NM_WA_TYPE) == 0)
+        {
+            continue;
+        }
+
+        std::vector<INST_LIST_ITER> waInsts;
+        // Set default for WAFlag's type, and it may be changed later.
+        G4_Type WATy = (Simdsize == g4::SIMD32 ? Type_UD : Type_UW);
+        // use anyh is preferred as it uses one instruction less.
+        UseAnyh = true;
+
+        // Collect all insts that need to apply WA. It also does:
+        //    1. Determine WAFlag is UD or UW (simdsize isn't enough); and
+        //    2. Check if WAFlag can use anyh or WAFlag must be all one's.
+        for (auto II = BB->begin(), IE = BB->end(); II != IE; ++II)
+        {
+            G4_INST* I = *II;
+            if (isCandidate(I))
+            {
+                waInsts.push_back(II);
+
+                if ((I->getExecSize() + I->getMaskOffset()) > 16)
+                {
+                    WATy = Type_UD;
+                }
+                if (UseAnyh && (I->getExecSize() > Simdsize || I->getMaskOffset() != 0))
+                {
+                    UseAnyh = false;
+                }
+            }
+        }
+
+        if (waInsts.empty())
+        {
+            continue;
+        }
+
+        FlagDefUse FlagDUInfo(BB);
+
+        bool WAFlagCreated = false;
+        bool WAFlagSaved = false;
+        int ix = 0;
+        const int NumWAInsts = (int)waInsts.size();
+        while (ix < NumWAInsts)
+        {
+            INST_LIST_ITER currII = waInsts[ix];
+            uint32_t WAFreg = 0xff;   // init to invalid number
+            uint32_t WAFsreg = 0xff;  // init to invalid number
+
+            int nextIx;
+            bool hasFreeFlag = FlagDUInfo.getBestFlagIfAvailable(waInsts, ix, nextIx, WATy, WAFreg, WAFsreg);
+            if (hasFreeFlag)
+            {   // found available flag in [ix, nextIx).
+                assert(nextIx > ix);
+                // Given
+                //     (W) add (16|M0)  r10  r20  r30
+                // Changed to
+                //     1) (W) mov (1|M0) saveVar  f1.0
+                //     2) <init waflag f1.0>
+                //     3) apply WA to all inst in [ix, nextIx). "(W) add (16|M0)  r10  r20  r30" is at ix
+                //     4) (W) mov (1|M0)  f1.0  saveVar
+                G4_RegVar* WAFlagVar = getFlagDcl(WAFreg, WAFsreg, WATy)->getRegVar();
+                WAFlagVar->setPhyReg(builder.phyregpool.getFlagAreg(WAFreg), WAFsreg);
+
+                // 1) save the original flag for WAFlag.
+                (void)createSIMD1Mov(BB, currII, SaveVar, 0, WAFlagVar, 0, WATy);
+
+                // 2) init or reload WAFlag
+                bool saveWAFlag = (nextIx < NumWAInsts);
+                initWAFlag(BB, currII, WAFlagVar, WATy, WAFlagCreated, WAFlagSaved, saveWAFlag);
+
+                // 3) apply WA
+                INST_LIST_ITER lastII = waInsts[nextIx - 1];
+                INST_LIST_ITER nextII = std::next(lastII);
+                for (int j = ix; j < nextIx; ++j)
+                {
+                    currII = waInsts[j];
+                    applyWAToInst(BB, currII, WAFlagVar);
+                }
+
+                // 4) restore the saved original flag before the next inst.
+                (void)createSIMD1Mov(BB, nextII, WAFlagVar, 0, SaveVar, 0, WATy);
+
+                // set ix for the next wa inst.
+                ix = nextIx;
+            }
+            else
+            {
+                uint32_t fr, fsr;
+                G4_Type ty;
+
+                // waInsts[ix] uses all flags. Need to save one to the reserved tmp.
+                //   It is possible to have flag in src0, dst, and condMod/predicate.
+                //   First, need to pick up one that is not used by condMod/predicate
+                //   so that WAFlag can still work.
+                G4_INST* I = *currII;
+                G4_Predicate* P = I->getPredicate();
+                G4_CondMod* M = I->getCondMod();
+                G4_Operand* O_f = (P != nullptr ? (G4_Operand*)P : (G4_Operand*)M);
+                G4_Operand* src0 = I->getSrc(0);
+                G4_SrcRegRegion* sreg = ((!isNull(src0) && src0->isSrcRegRegion()) ? src0->asSrcRegRegion() : nullptr);
+                G4_DstRegRegion* dreg = I->getDst();
+                if (O_f != nullptr)
+                {
+                    bool isValid = FlagDefUse::getFlagRegAndSubreg(O_f, WAFreg, WAFsreg, ty);
+                    assert(isValid && "Flag should've been assigned physical reg already!");
+
+                    // WAFlag must use the other flag
+                    WAFreg = (WAFreg == 0 ? 1 : 0);
+                }
+                else
+                {
+                    G4_Operand* O = (!isNull(sreg) && src0->isFlag())
+                        ? (G4_Operand*)sreg
+                        : (G4_Operand*)((!isNull(dreg) && dreg->isFlag()) ? dreg : nullptr);
+                    assert(O != nullptr && "ICE: inst must have flag operands if it uses all flags!");
+
+                    bool isValid = FlagDefUse::getFlagRegAndSubreg(O, WAFreg, WAFsreg, ty);
+                    assert(isValid && "Flag should've been assigned physical reg already!");
+                }
+
+                // Save the entire flag, even though only the half is used.
+                G4_RegVar* tVar = getFlagDcl(WAFreg, 0, Type_UD)->getRegVar();
+                tVar->setPhyReg(builder.phyregpool.getFlagAreg(WAFreg), 0);
+
+                // WAFlag. It can be UW (no tVar:UD). Uses 0 as sreg always in this case.
+                WAFsreg = 0;
+                G4_RegVar* WAFlagVar = getFlagDcl(WAFreg, WAFsreg, WATy)->getRegVar();
+                WAFlagVar->setPhyReg(builder.phyregpool.getFlagAreg(WAFreg), WAFsreg);
+
+                // Assume that simdsize = 32 and currII is
+                //    (W&f0.1)  or (1|M0) f1.0:uw  f1.1 0x101:uw
+                // WA codes are:
+                //    1) (W) mov (1|M0)  saveVar:ud   f1.0:ud
+                //    2) <init waflag f1.0>
+                //    3) (W&f0.1   or (1|M0) saveVar:uw  saveVar.1:uw  0x101:uw  [WA will be applied]
+                //    4) (W) mov (1|M0)  f1.0:ud  saveVar:ud                     [needed for dst change]
+
+                // 1) save the original flag for WAFlag.
+                (void)createSIMD1Mov(BB, currII, SaveVar, 0, tVar, 0, Type_UD);
+
+                // 2) create WAFlag if not yet, or reload the WAFlag
+                bool saveWAFlag = (ix != (NumWAInsts - 1));
+                initWAFlag(BB, currII, WAFlagVar, WATy, WAFlagCreated, WAFlagSaved, saveWAFlag);
+
+                // 3) (1) Modify I; (2) apply WA
+                INST_LIST_ITER nextII = std::next(currII);
+                for (int i = 0; i < 2; ++i)
+                {
+                    G4_Operand* O = (i == 0 ? (G4_Operand*)dreg : (G4_Operand*)sreg);
+                    if (!isNull(O) && O->isFlag())
+                    {
+                        bool isValid = FlagDefUse::getFlagRegAndSubreg(O, fr, fsr, ty);
+                        assert(isValid && "Flag should've been assigned physical reg already!");
+
+                        if (fr == WAFreg)
+                        {
+                            // flag : either 2bytes at roff 0 or 1; or 4 bytes at roff 0
+                            assert(fsr == 0 || O->getTypeSize() == 2);
+                            if (i == 0)
+                            {
+                                // dst
+                                G4_DstRegRegion* newDreg =
+                                    builder.createDst(SaveVar, 0, fsr, dreg->getHorzStride(), dreg->getType());
+                                I->setDest(newDreg);
+                            }
+                            else
+                            {
+                                // src0
+                                G4_SrcRegRegion* newSreg =
+                                    builder.createSrc(SaveVar, 0, fsr, sreg->getRegion(), sreg->getType());
+                                I->setSrc(newSreg, 0);
+                            }
+                        }
+                    }
+                }
+                applyWAToInst(BB, currII, WAFlagVar);
+
+                // 4) Restore the original flag before the next inst
+                (void)createSIMD1Mov(BB, nextII, tVar, 0, SaveVar, 0, Type_UD);
+
+                // set ix for the next wa inst
+                ++ix;
+            }
+        }
+    }
+    kernel.deleteEUFusionNoMaskWAInfo();
 }
 
 void Optimizer::doNoMaskWA()
@@ -13494,7 +14861,7 @@ void Optimizer::doNoMaskWA()
         G4_Predicate* P = I->getPredicate();
         assert((P && !I->getCondMod()) && "ICE: expect predicate and no flagModifier!");
 
-        uint32_t flagBits = P->getRightBound() + 1;
+        uint32_t flagBits = (P->getRightBound() - P->getLeftBound() + 1) + I->getMaskOffset();
         assert((16 * flagVar->getDeclare()->getRootDeclare()->getWordSize()) >= flagBits &&
             "ICE[vISA]: WA's flagVar should not be smaller!");
 
@@ -14325,6 +15692,15 @@ void Optimizer::newDoNoMaskWA_postRA()
         {
             verifyBBInst(aBB, aWAInfo->WAFlag_allOne);
         }
+        for (auto& LI : aWAInfo->WASequenceInfo)
+        {
+            G4_INST* sI = std::get<0>(LI);
+            G4_INST* eI = std::get<1>(LI);
+            G4_INST* flagI = std::get<2>(LI);
+            verifyBBInst(aBB, sI);
+            verifyBBInst(aBB, eI);
+            verifyBBInst(aBB, flagI);
+        }
 #endif
     };
 
@@ -14380,6 +15756,52 @@ void Optimizer::newDoNoMaskWA_postRA()
         return false;
     };
 
+    auto isInsidePreRAWASequence = [&](G4_INST* aI, G4_BB* aBB, NoMaskWA_info_t* preRAWAInfo)
+    {
+        bool isFlagSpill = false;
+        bool isFlagFill = false;
+        uint32_t freg, fsreg;
+        G4_Type flagTy;
+        if (HasFlagSpill && aI->isMov() && aI->getExecSize() == g4::SIMD1
+            && aI->isWriteEnableInst() && aI->getSrc(0) && aI->getDst())
+        {
+            if (aI->getSrc(0)->isFlag() && aI->getDst()->isGreg())
+            {
+                isFlagSpill = true;
+                FlagDefUse::getFlagRegAndSubreg(aI->getSrc(0), freg, fsreg, flagTy);
+            }
+            else if (aI->getDst()->isFlag() && aI->getSrc(0)->isGreg())
+            {
+                isFlagFill = true;
+                FlagDefUse::getFlagRegAndSubreg(aI->getDst(), freg, fsreg, flagTy);
+            }
+        }
+        if ((isFlagSpill || isFlagFill) &&
+            preRAWAInfo != nullptr &&
+            !preRAWAInfo->WASequenceInfo.empty())
+        {
+            uint32_t fr, fsr;
+            G4_Type ty;
+            for (auto& LI : preRAWAInfo->WASequenceInfo)
+            {
+                G4_INST* startI = std::get<0>(LI);
+                G4_INST* endI = std::get<1>(LI);
+                G4_INST* flagI = std::get<2>(LI);
+                if (aI->getLocalId() > startI->getLocalId() && aI->getLocalId() < endI->getLocalId())
+                {
+                    assert(flagI->getPredicate());
+                    FlagDefUse::getFlagRegAndSubreg(flagI->getPredicate(), fr, fsr, ty);
+                    if (ty == flagTy && freg == fr)
+                    {
+                        return true;
+                    }
+                    break;
+                }
+            }
+        }
+        return false;
+    };
+
     auto createFlagFromCmp = [&](G4_BB* BB, INST_LIST_ITER& InsertPos, G4_RegVar* flag, G4_Type Ty)
     {
         //  I0:               (W) mov (1|M0)  flag:Ty,  0
@@ -14410,24 +15832,6 @@ void Optimizer::newDoNoMaskWA_postRA()
         aBB->insertBefore(aInsertBeforePos, tI);
         return tI;
     };
-
-    // Get all insts that need WA
-    std::unordered_map<G4_BB*, std::list<G4_INST*> > postRA_WAInsts;
-    for (G4_BB* BB : kernel.fg)
-    {
-        if ((BB->getBBType() & G4_BB_NM_WA_TYPE) == 0)
-        {
-            continue;
-        }
-        for (auto II = BB->begin(), IE = BB->end(); II != IE; ++II)
-        {
-            G4_INST* I = *II;
-            if (isCandidate(I, BB))
-            {
-                postRA_WAInsts[BB].push_back(I);
-            }
-        }
-    }
 
     // Algo assumes that NoMask insts, which are generated by RA and need WA,
     // have neither predicate nor cond modifier.
@@ -14509,20 +15913,34 @@ void Optimizer::newDoNoMaskWA_postRA()
 #endif
 
     // Apply WA to new insts generated by RA
-    for (auto MI : postRA_WAInsts)
+    for (G4_BB* BB : kernel.fg)
     {
-        G4_BB* BB = MI.first;
+        std::list<G4_INST*> waInsts;
         if ((BB->getBBType() & G4_BB_NM_WA_TYPE) == 0)
         {
             continue;
         }
-        std::list<G4_INST*>& waInsts = MI.second;
 
         // Reset local ids so we can check instruction order.
         BB->resetLocalIds();
 
-        // Sort waInsts in the vector
-        waInsts.sort( [](G4_INST* I0, G4_INST* I1) { return I0->getLocalId() < I1->getLocalId(); } );
+        // Collect all insts that need to apply WA.
+        NoMaskWA_info_t* preRA_WAInfo = kernel.getNoMaskWAInfo(BB);
+        for (auto II = BB->begin(), IE = BB->end(); II != IE; ++II)
+        {
+            G4_INST* I = *II;
+            if (isCandidate(I, BB))
+            {
+                if (!isInsidePreRAWASequence(I, BB, preRA_WAInfo))
+                {
+                    waInsts.push_back(I);
+                }
+            }
+        }
+        if (waInsts.empty())
+        {
+            continue;
+        }
 
         // WAFlag : preRA WA flag.
         //    Note: for WA flag (both preRA and postRA), Operands' subRegOff should be 0 always.
@@ -14531,7 +15949,6 @@ void Optimizer::newDoNoMaskWA_postRA()
         uint32_t WAFreg = 0xff;   // init to invalid number
 
         // If PreRA has done WA in this BB, it has range [preRA_start, preRA_end]
-        NoMaskWA_info_t* preRA_WAInfo = kernel.getNoMaskWAInfo(BB);
         INST_LIST_ITER preRA_waStartI = BB->end();
         INST_LIST_ITER preRA_waEndI = BB->end();
         int preRA_start_id = -1, preRA_end_id = -1;
@@ -15179,15 +16596,16 @@ void Optimizer::doNoMaskWA_postRA()
 //          else   // SmallEU
 //             call
 //   2. HW has a bug in which call always runs and it always uses BigEU's target as targets for both EUs.
-//      This causes several issues and the WA is used to fix this harware bugs.
+//      This causes several issues and the WA is used to fix this harware bug.
 //
 // Details of 2
 // ============
 //  Under EU fusion,  assume that an indirect call invokes A in thread 0 and invokes B in thread 1.
 //  Assume that these two threads are fused and run on a pair of fused EUs {bigEU, smallEU}. The hardware
-//  will always invoke A: the callee from thread 0 in bigEU, which is incorrect. To workaround this bug,
-//  we have to rely on the fact that cr0 is shared among the pair of fused EUs and copy thread 1's callee
-//  into thread 0. In doing so, thread 1's callee can be invoked. The details are as follows:
+//  will always invoke A: the callee from thread 0 in bigEU even in else (smallEU) barnch, which is
+//  incorrect. To workaround this bug, we have to rely on the fact that cr0.2 is shared among the pair
+//  of fused EUs and copy thread 1's callee into thread 0 via cr0.2. In doing so, thread 1's callee
+//  can be invoked. The details are as follows:
 //
 //    before:
 //      BB:
@@ -15220,14 +16638,14 @@ void Optimizer::doNoMaskWA_postRA()
 //      nextBB:
 //            join <nextJoin or null>                                       // finalJoin
 //
-// Those I4_patch_add/I5_patch_add, etc are added into m_labelPatchInsts/m_instsToBBs, so
-// that finishFusedCallWA() will have the right immediate to replace 0x33333333.
+// The BBs and those insts such as I4_patch_add/I5_patch_add, etc are added into m_indirectCallWAInfo
+// so that finishFusedCallWA() can finish post-processing to patch the relative IP and others.
 //
 // Note that there is another hardware bug. If BigEU is off, the mov instruction
 //    "(W)     mov (1 |M0)  smallEUTarget:ud   cr0.2<0;1,0>:ud"
-// will not run. As result, SmallEU's target cannot be copied into BigEU, which in turn will
-// not run the call for SmallEU (it shall hang as the target is undefined). This issue is
-// also handled in finishFusedCallWA().
+// will not run, thus BigEU will not have smallEU's target. Since this WA requires
+// the above move must be run, a special maskOff (M16) must be used to force NoMask to run
+// no matter if the EU is off or on. This will be handled in finishFusedCallWA().
 //
 void Optimizer::applyFusedCallWA()
 {
@@ -15284,7 +16702,7 @@ void Optimizer::applyFusedCallWA()
             {
                 // Cannot insert join, otherwise, label for while/endif would be wrong
                 // Here, create a new empty BB so that we can add join into it.
-                G4_BB* endBB = fg.createNewBBWithLabel("_FusedCallWA_EndBB/Tar", callI->getLineNo(), callI->getCISAOff());
+                G4_BB* endBB = fg.createNewBBWithLabel("CallWA_EndBB", callI->getLineNo(), callI->getCISAOff());
                 nextBI = fg.insert(nextBI, endBB);
 
                 // Adjust control-flow
@@ -15347,10 +16765,10 @@ void Optimizer::applyFusedCallWA()
         BB->push_back(I2);
         BB->push_back(I3);
 
-        G4_BB* bigB0 = fg.createNewBBWithLabel("_FusedCallWA_", callI->getLineNo(), callI->getCISAOff());
-        G4_BB* bigB1 = fg.createNewBBWithLabel("_FusedCallWA_", callI->getLineNo(), callI->getCISAOff());
-        G4_BB* smallB0 = fg.createNewBBWithLabel("_FusedCallWA_", callI->getLineNo(), callI->getCISAOff());
-        G4_BB* smallB1 = fg.createNewBBWithLabel("_FusedCallWA_", callI->getLineNo(), callI->getCISAOff());
+        G4_BB* bigB0 = fg.createNewBBWithLabel("CallWA_BigB0", callI->getLineNo(), callI->getCISAOff());
+        G4_BB* bigB1 = fg.createNewBBWithLabel("CallWA_BigB1", callI->getLineNo(), callI->getCISAOff());
+        G4_BB* smallB0 = fg.createNewBBWithLabel("CallWA_SmallB0", callI->getLineNo(), callI->getCISAOff());
+        G4_BB* smallB1 = fg.createNewBBWithLabel("CallWA_SmallB1", callI->getLineNo(), callI->getCISAOff());
         // Note that nextBI points to the nextBB!
         fg.insert(nextBI, bigB0);
         fg.insert(nextBI, bigB1);
@@ -15377,22 +16795,59 @@ void Optimizer::applyFusedCallWA()
                 nullptr, g4::NOSAT, callI->getExecSize(), nullptr, nSrc, nullptr, callI->getOption());
             smallB0->push_back(nCallI);
 
-            kernel.m_maskOffWAInsts.insert(std::make_pair(I3, BB));
-
             if (!fg.globalOpndHT.isOpndGlobal(Target))
             {
                 callI->removeDefUse(Opnd_src0);
             }
             fg.globalOpndHT.addGlobalOpnd(Target);
             fg.globalOpndHT.addGlobalOpnd(nSrc);
+
+            kernel.m_maskOffWAInsts.insert(std::make_pair(I3, BB));
+            kernel.m_indirectCallWAInfo.emplace(BB,
+                IndirectCallWAInfo(
+                    bigB0, smallB0, nullptr, nullptr, nullptr,
+                    nullptr, nullptr, callI, nCallI));
         }
         else
         {
-            // relative target for small EU:  need to patch offset after swsb
-            //    I4_ip_start:   add t  (-ip) + smallTarget
-            //    I4_patch_add:  add I4Target  t   -0x33
-            //         where 0x33 should be the IP difference between I4_ip_start and call I4Target, patched later.
-            G4_VarBase* V_ip = builder.phyregpool.getIpReg();
+            // relative target:  need to patch offset after SWSB in finishFusedCallWA()
+
+            //
+            //    I4_ip_start:   add rSmallIP  (-ip)  smallTarget
+            //    I4_patch_add:  add I4Target  rSmallIP   -0x33333333
+            //    I5_ip_start:   add rBigIP  (-ip) + bigTarget
+            //    I5_patch_add:  add I5Target  rBigIP   -0x33333333
+            //       where 0x33333333 should be the IP difference between I4_ip_start and nCallI
+            //       (to I4Target), I5_ip_start and callI (I5Target), respectively.
+            //       and it is patched later.
+            // If IP WA is needed, will add the following:
+            //    ip_wa_mov:     mov  tIP    0x89ABCDEF                : placeholder.
+            //    I4_ip_start:   add  rSmallIP  -tIP  smallTarget
+            //    I4_patch_add:  add  I4Target  rSmallIP   -0x33333333 : patch needed
+            //    I5_ip_start:   add  rBigIP  -tIP  smallTarget
+            //    I5_patch_add:  add  I5Target  rBigIP   -0x33333333   : patch needed
+            //  where ip_wa_mov will be removed in finishFusedCallWA() with ip wa using in-place call.
+            //
+            G4_VarBase* V_ip = nullptr;
+            G4_INST* ip_wa_placeholder = nullptr;
+            if (builder.needIPWA())
+            {
+                // Need 2 DWs (grf-aligned) as using IP WA needs 2 DWs (return IP and call mask)
+                G4_Declare* tIP_dcl = builder.createTempVar(2, Type_D, builder.getGRFAlign(), "tIP");
+                V_ip = (G4_VarBase*)tIP_dcl->getRegVar();
+
+                // placeholder mov makes sure tIP has a valid live range.
+                G4_DstRegRegion* IP_WA_Dst = builder.createDst(V_ip, 0, 0, 1, Type_D);
+                G4_Imm* IP_WA_Src0 = builder.createImm(0x89ABCDEF, Type_D);
+                ip_wa_placeholder = builder.createMov(g4::SIMD1, IP_WA_Dst, IP_WA_Src0, InstOpt_WriteEnable, false);
+                BB->push_back(ip_wa_placeholder);
+            }
+            else
+            {
+                V_ip = (G4_VarBase*)builder.phyregpool.getIpReg();
+            }
+
+            // SmallEU
             G4_Declare* I4_IP = builder.createTempVar(1, Type_D, Any, "rSmallIP");
             G4_DstRegRegion* I4_Dst = builder.createDst(I4_IP->getRegVar(), 0, 0, 1, Type_D);
             G4_SrcRegRegion* I4_Src0 = builder.createSrcRegRegion(Mod_Minus, Direct, V_ip, 0, 0, builder.getRegionScalar(), Type_D);
@@ -15405,10 +16860,7 @@ void Optimizer::applyFusedCallWA()
             G4_Imm* I4_pSrc1 = builder.createImm(0x33333333, Type_D);  // to be patched later
             G4_INST* I4_patch_add = builder.createBinOp(G4_add, g4::SIMD1, I4_pDst, I4_pSrc0, I4_pSrc1, InstOpt_WriteEnable, false);
 
-            // relative target of bigEU: need to patch offset after swsb
-            //    I5_ip_start:   add t  (-ip) + bigTarget
-            //    I5_patch_add:  add I5Target  t   -0x33
-            //         where 0x33 should be the IP difference between I4_ip_start and call I4Target, patched later.
+            // BigEU
             G4_Declare* I5_IP = builder.createTempVar(1, Type_D, Any, "rBigIP");
             G4_DstRegRegion* I5_Dst = builder.createDst(I5_IP->getRegVar(), 0, 0, 1, Type_D);
             G4_SrcRegRegion* I5_Src0 = builder.createSrcRegRegion(Mod_Minus, Direct, V_ip, 0, 0, builder.getRegionScalar(), Type_D);
@@ -15446,15 +16898,12 @@ void Optimizer::applyFusedCallWA()
                 callI->transferDef(I5_ip_start, Opnd_src0, Opnd_src1);
             }
 
-            // add patch info, so those patch_add will be patched.
-            kernel.m_labelPatchInsts.insert(std::make_pair(I4_patch_add, std::pair(I4_ip_start, nCallI)));
-            kernel.m_labelPatchInsts.insert(std::make_pair(I5_patch_add, std::pair(I5_ip_start, callI)));
-            kernel.m_instToBBs.insert(std::make_pair(I4_ip_start, BB));
-            kernel.m_instToBBs.insert(std::make_pair(I4_patch_add, BB));
-            kernel.m_instToBBs.insert(std::make_pair(I5_ip_start, BB));
-            kernel.m_instToBBs.insert(std::make_pair(I5_patch_add, BB));
-            kernel.m_instToBBs.insert(std::make_pair(callI, bigB0));
-            kernel.m_instToBBs.insert(std::make_pair(nCallI, smallB0));
+            // add indirect call wa info
+            kernel.m_indirectCallWAInfo.emplace(BB,
+                IndirectCallWAInfo(
+                    bigB0, smallB0,
+                    ip_wa_placeholder, I4_ip_start, I4_patch_add,
+                    I5_ip_start, I5_patch_add, callI, nCallI));
 
             kernel.m_maskOffWAInsts.insert(std::make_pair(I3, BB));
             kernel.m_maskOffWAInsts.insert(std::make_pair(I4_ip_start, BB));
@@ -15531,10 +16980,6 @@ void Optimizer::applyFusedCallWA()
         // To make RA know that the real inst can flow from bigB1 to smallB0
         // an edge is added from bigB1 to smallB0
         fg.addPredSuccEdges(bigB1, smallB0);
-
-        // save new call to make sure its target isn't defined inside smallB0
-        kernel.m_waCallInsts.push_back(nCallI);
-        kernel.m_instToBBs[nCallI] = smallB0;  // ok to reset for non-calla.
 
         // divergence property update
         //   new BBs's divergence is the same as BB's
@@ -15679,6 +17124,9 @@ void Optimizer::expandMadwPostSchedule()
             {
                 continue;
             }
+
+            // Unset a AccWrCtrl first.
+            inst->setOptionOff(InstOpt_AccWrCtrl);
 
             G4_Operand* src0 = inst->getSrc(0);
             G4_Operand* src1 = inst->getSrc(1);

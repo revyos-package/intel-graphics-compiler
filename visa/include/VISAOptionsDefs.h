@@ -41,6 +41,7 @@ DEF_VISA_OPTION(vISA_DebugConsoleDump,      ET_BOOL, "-dumpDebugConsoleOutput", 
 DEF_VISA_OPTION(vISA_EmitLocation,          ET_BOOL, "-emitLocation",    UNUSED, false)
 DEF_VISA_OPTION(vISA_dumpRPE,               ET_BOOL, "-dumpRPE",         UNUSED, false)
 DEF_VISA_OPTION(vISA_dumpLiveness,          ET_BOOL, "-dumpLiveness",         UNUSED, false)
+DEF_VISA_OPTION(vISA_DumpUndefUsesFromLiveness, ET_BOOL, "-dumpUndefUsesFromLiveness", UNUSED, false)
 DEF_VISA_OPTION(vISA_disableInstDebugInfo,  ET_BOOL, "-disableInstDebugInfo",      UNUSED, false)
 DEF_VISA_OPTION(vISA_analyzeMove,           ET_BOOL, "-analyzeMove",     UNUSED, false)
 DEF_VISA_OPTION(vISA_skipFDE,               ET_BOOL, "-skipFDE",         UNUSED, false)
@@ -51,6 +52,7 @@ DEF_VISA_OPTION(vISA_removeInstrinsics,     ET_BOOL, "-removeInstrinsics",     U
 DEF_VISA_OPTION(vISA_addSWSBInfo,           ET_BOOL, "-addSWSBInfo",     UNUSED, true)
 DEF_VISA_OPTION(vISA_DumpRAIntfGraph,       ET_BOOL, "-dumpintf",        UNUSED, false)
 DEF_VISA_OPTION(vISA_DumpGenOffset,         ET_BOOL, "-dumpgenoffset",   UNUSED, false)
+DEF_VISA_OPTION(vISA_ForceAssignRhysicalReg,ET_CSTR, "-forceAssignRhysicalReg", UNUSED, NULL)
 
 //=== Optimization options ===
 DEF_VISA_OPTION(vISA_EnableAlways,          ET_BOOL, NULLSTR,            UNUSED, true)
@@ -82,11 +84,12 @@ DEF_VISA_OPTION(vISA_EnableSplitVariables,  ET_BOOL, "-noSplitVariables", UNUSED
 DEF_VISA_OPTION(vISA_ChangeMoveType,        ET_BOOL, "-ALTMode",       UNUSED, true)
 DEF_VISA_OPTION(vISA_accSubstitution,       ET_BOOL, "-noAccSub",          UNUSED, true)
 DEF_VISA_OPTION(vISA_accSubBeforeRA,        ET_BOOL, "-noAccSubBRA",          UNUSED, true)
+DEF_VISA_OPTION(vISA_PreSchedForAcc,   ET_BOOL,  "-preSchedForAcc", UNUSED, false)
 DEF_VISA_OPTION(vISA_EnableGatherWithImm,      ET_BOOL, "-gatherWithImm",        UNUSED, 0)
 DEF_VISA_OPTION(vISA_doAccSubAfterSchedule, ET_BOOL, "-accSubPostSchedule",    UNUSED, true)
 DEF_VISA_OPTION(vISA_localizationForAccSub, ET_BOOL, "-localizeForACC",    UNUSED, false)
 DEF_VISA_OPTION(vISA_mathAccSub, ET_BOOL, "-mathAccSub",    UNUSED, false)
-DEF_VISA_OPTION(vISA_src2AccSub, ET_BOOL, "-src2AccSub",    UNUSED, false)
+DEF_VISA_OPTION(vISA_disableSrc2AccSub, ET_BOOL, "-disableSrc2AccSub",    UNUSED, false)
 DEF_VISA_OPTION(vISA_hasDoubleAcc, ET_BOOL, "-hasDoubleAcc",    UNUSED, false)
 DEF_VISA_OPTION(vISA_ifCvt,                 ET_BOOL, "-noifcvt",     UNUSED, true)
 DEF_VISA_OPTION(vISA_RegSharingHeuristics,  ET_BOOL, "-regSharingHeuristics", UNUSED, false)
@@ -108,6 +111,7 @@ DEF_VISA_OPTION(vISA_expandPlane,         ET_BOOL, "-expandPlane",        UNUSED
 DEF_VISA_OPTION(vISA_FImmToHFImm,         ET_BOOL, "-fiTohfi",    UNUSED, false)
 DEF_VISA_OPTION(vISA_cacheSamplerHeader,  ET_BOOL, "-noSamplerHeaderCache", UNUSED, true)
 DEF_VISA_OPTION(vISA_forceSamplerHeader,  ET_BOOL, "-forceSamplerHeader", UNUSED, false)
+DEF_VISA_OPTION(vISA_samplerHeaderWA,  ET_BOOL, "-samplerHeaderWA", UNUSED, false)
 DEF_VISA_OPTION(vISA_markSamplerMoves,    ET_BOOL, "-markSamplerMoves", UNUSED, false)
 DEF_VISA_OPTION(vISA_noncoherentStateless, ET_BOOL, "-ncstateless",       UNUSED, false)
 DEF_VISA_OPTION(vISA_enablePreemption,    ET_BOOL,  "-enablePreemption",  UNUSED, false)
@@ -131,6 +135,8 @@ DEF_VISA_OPTION(vISA_emitCrossThreadOffR0Reloc,  ET_BOOL, "-emitCrossThreadOffR0
 DEF_VISA_OPTION(vISA_CodePatch,   ET_INT32, "-codePatch",        UNUSED, 0)
 DEF_VISA_OPTION(vISA_Linker,      ET_INT32, "-linker",        UNUSED, 0)
 DEF_VISA_OPTION(vISA_lscEnableImmOffsFor,   ET_INT32, "-lscEnableImmOffsFor", UNUSED, 0x3001E)
+DEF_VISA_OPTION(vISA_PreserveR0InR0,        ET_BOOL, "-preserver0", UNUSED, false)
+DEF_VISA_OPTION(vISA_StackCallABIVer,       ET_INT32, "-abiver", UNUSED, 1)
 
 //=== RA options ===
 DEF_VISA_OPTION(vISA_RoundRobin,            ET_BOOL, "-noroundrobin",    UNUSED, true)
@@ -180,6 +186,7 @@ DEF_VISA_OPTION(vISA_DumpAllBCInfo,          ET_BOOL, "-dumpAllBCInfo", UNUSED, 
 DEF_VISA_OPTION(vISA_LinearScan,               ET_BOOL, "-linearScan",       UNUSED, false)
 DEF_VISA_OPTION(vISA_LSFristFit,               ET_BOOL, "-lsFirstFit",       UNUSED, true)
 DEF_VISA_OPTION(vISA_verifyLinearScan,               ET_BOOL, "-verifyLinearScan",       UNUSED, false)
+DEF_VISA_OPTION(vISA_boundsChecking,        ET_BOOL, "-boundsChecking", UNUSED, false)
 
 //=== scheduler options ===
 DEF_VISA_OPTION(vISA_LocalScheduling,       ET_BOOL, "-noschedule",      UNUSED, true)
@@ -238,6 +245,7 @@ DEF_VISA_OPTION(vISA_DistPropTokenAllocation,      ET_BOOL,  "-distPropTokenAllo
 DEF_VISA_OPTION(vISA_SWSBStitch,      ET_BOOL,  "-SWSBStitch",    UNUSED, false)
 DEF_VISA_OPTION(vISA_SBIDDepLoc,      ET_BOOL,  "-SBIDDepLoc",    UNUSED, false)
 DEF_VISA_OPTION(vISA_DumpSBID,      ET_BOOL,  "-dumpSBID",    UNUSED, false)
+DEF_VISA_OPTION(vISA_AssignTokenUsingStdSort, ET_BOOL, "-assignSWSBTokUsingStdSort", UNUSED, false)
 
 DEF_VISA_OPTION(vISA_EnableALUThreePipes,      ET_BOOL,  "-threeALUPipes",    UNUSED, true)
 DEF_VISA_OPTION(vISA_EnableDPASTokenReduction,      ET_BOOL,  "-DPASTokenReduction",    UNUSED, false)
@@ -246,9 +254,11 @@ DEF_VISA_OPTION(vISA_NoDPASMacro,      ET_BOOL,  "-noDPASMacro",    UNUSED, fals
 DEF_VISA_OPTION(vISA_forceDPASMacro,      ET_BOOL,  "-forceDPASMacro",    UNUSED, false)
 DEF_VISA_OPTION(vISA_TrueDepOnly,      ET_BOOL,  "-trueDepOnly",    UNUSED, false)
 DEF_VISA_OPTION(vISA_SplitMov64,            ET_INT32,"-SplitMov64",  "USAGE: -SplitMov64 (0|1|2)\n", 0)
+DEF_VISA_OPTION(vISA_PredicatedFdivSqrt,    ET_INT32, "-predicatedfdivsqrt",     "USAGE: -predicatedfdivsqrt 0(if)|1(predicated)|2(auto)", 2)
 DEF_VISA_OPTION(vISA_UseOldSubRoutineAugIntf,    ET_BOOL, "-useOldSubRoutineAugIntf",     UNUSED, false)
 DEF_VISA_OPTION(vISA_FastCompileRA,    ET_BOOL, "-fastCompileRA",     UNUSED, false)
 DEF_VISA_OPTION(vISA_HybridRAWithSpill,    ET_BOOL, "-hybridRAWithSpill",     UNUSED, false)
+DEF_VISA_OPTION(vISA_EnableSwapAccSub,    ET_BOOL,  "-swapAccSub",      UNUSED, true)
 
 //=== binary emission options ===
 DEF_VISA_OPTION(vISA_Compaction,          ET_BOOL,  "-nocompaction",    UNUSED, true)
@@ -282,6 +292,7 @@ DEF_VISA_OPTION(vISA_DecodeDbg,         ET_CSTR, "-decodedbg",             "USAG
 DEF_VISA_OPTION(vISA_encoderFile,       ET_CSTR, "-encoderStatisticsFile", "USAGE: -encoderStatisticsFile <reloc file>\n", "encoderStatistics.csv")
 DEF_VISA_OPTION(vISA_CISAbinary,        ET_CSTR, "-CISAbinary",            "USAGE: File Name with isaasm paths. ",  NULL)
 DEF_VISA_OPTION(vISA_DumpRegInfo, ET_BOOL, "-dumpRegInfo",            UNUSED, false)
+DEF_VISA_OPTION(vISA_PrintHexFloatInAsm, ET_BOOL, "-printHexFloatInAsm", UNUSED, false)
 
 //=== misc options ===
 DEF_VISA_OPTION(vISA_PlatformSet,         ET_INT32, NULLSTR,              UNUSED, -1 /*GENX_NONE*/)
@@ -310,6 +321,7 @@ DEF_VISA_OPTION(vISA_EnableMathDPASWA,    ET_BOOL,  "-enableMathDPASWA",      UN
 DEF_VISA_OPTION(vISA_skipFenceCommit,     ET_BOOL,  "-skipFenceCommit", UNUSED, false)
 DEF_VISA_OPTION(vISA_removeFence,         ET_BOOL,  "-removeFence", "Remove fence if no write in a kernel", false)
 
+
 //=== HW Workarounds ===
 DEF_VISA_OPTION(vISA_clearScratchWritesBeforeEOT,   ET_BOOL,  "-waClearScratchWrite", UNUSED, false)
 DEF_VISA_OPTION(vISA_clearHDCWritesBeforeEOT,       ET_BOOL,  "-waClearHDCWrite",    UNUSED, false)
@@ -320,9 +332,9 @@ DEF_VISA_OPTION(vISA_setFFID,                       ET_INT32, "-setFFID", "USAGE
 DEF_VISA_OPTION(vISA_replaceIndirectCallWithJmpi,   ET_BOOL,  "-replaceIndirectCallWithJmpi",  UNUSED, false)
 DEF_VISA_OPTION(vISA_noMaskWA,                      ET_INT32, "-noMaskWA",  "USAGE: -noMaskWA <[0:1]=0 (off)|1|2|3(3=2), [2:2]=0|1>\n", 0)
 DEF_VISA_OPTION(vISA_forceNoMaskWA,                 ET_BOOL,  "-forceNoMaskWA",  UNUSED, false)
-DEF_VISA_OPTION(vISA_newNoMaskWA,                   ET_BOOL,  "-newNoMaskWA", UNUSED, true)
+DEF_VISA_OPTION(vISA_newNoMaskWA,                   ET_BOOL,  "-newNoMaskWA", "Temp just for VC", true)
 DEF_VISA_OPTION(vISA_noMaskWAOnFuncEntry,           ET_BOOL,  "-noMaskWAOnFuncEntry", UNUSED, true)
-DEF_VISA_OPTION(vISA_newTmpNoMaskWA,                ET_BOOL,  "-newTmpNoMaskWA", "to control scalar IGC, temporary", false)
+DEF_VISA_OPTION(vISA_newTmpNoMaskWA,                ET_INT32, "-newTmpNoMaskWA", "to control scalar IGC, temporary -newTempNoMaskWA 0|1|2", 0)
 DEF_VISA_OPTION(vISA_fusedCallWA,                   ET_BOOL,  "-fusedCallWA",   "EU Fusion call wa, to be deleted after using WA id", false)
 DEF_VISA_OPTION(vISA_DstSrcOverlapWA,               ET_BOOL,  "-dstSrcOverlapWA",  UNUSED, true)
 DEF_VISA_OPTION(vISA_Src1Src2OverlapWA,               ET_BOOL,  "-src1Src2OverlapWA",  UNUSED, false)

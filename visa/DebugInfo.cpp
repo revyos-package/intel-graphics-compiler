@@ -623,7 +623,6 @@ void KernelDebugInfo::generateByteOffsetMapping(std::list<G4_BB*>& stackCallEntr
     // passed - stackCallEntryBBs that holds entryBBs of all stack
     // call functions part of this compilation unit.
 
-    bool done = false;
     unsigned int maxVISAIndex = 0;
     uint64_t maxGenIsaOffset = 0;
     // Now traverse CFG, create pair of CISA byte offset, gen binary offset and push to vector
@@ -633,28 +632,13 @@ void KernelDebugInfo::generateByteOffsetMapping(std::list<G4_BB*>& stackCallEntr
 
         int isaPrevByteOffset = -1;
 
-        if (kernel->fg.builder->getIsKernel())
+        // check if bb belongs to a stitched stack call function, if so
+        // stop before processing bb.
+        if (&bb->getParent() != &kernel->fg)
         {
-            auto entryBBend = stackCallEntryBBs.end();
-            for (auto entryBBIt = stackCallEntryBBs.begin();
-                entryBBIt != entryBBend;
-                entryBBIt++)
-            {
-                if (bb == (*entryBBIt))
-                {
-                    // Since we are traversing BBs in layout
-                    // order, we will parse all kernel BBs
-                    // first and as soon as we reach entryBB
-                    // of first stack call function, we stop
-                    // processing.
-                    done = true;
-                    break;
-                }
-            }
-        }
-
-        if (done == true)
-        {
+            // verify if bb is part of stackCallEntryBBs list
+            MUST_BE_TRUE(std::find(stackCallEntryBBs.begin(), stackCallEntryBBs.end(), bb) != stackCallEntryBBs.end(),
+                "didnt find matching entry bb from stitched stack call");
             break;
         }
 
@@ -2118,14 +2102,14 @@ void KernelDebugInfo::updateCallStackLiveIntervals()
         auto befpSetupInst = getBEFPSetupInst();
         if (befpSetupInst)
         {
-            start = (uint32_t)befpSetupInst->getGenOffset() +
+            start = (uint32_t)befpSetupInst->getGenOffset() - reloc_offset  +
                 getBinInstSize(befpSetupInst);
             auto spRestoreInst = getCallerSPRestoreInst();
             if (spRestoreInst)
             {
-                end = (uint32_t)spRestoreInst->getGenOffset();
+                end = (uint32_t)spRestoreInst->getGenOffset() - reloc_offset;
             }
-            for (uint32_t i = start - reloc_offset; i <= end - reloc_offset; i++)
+            for (uint32_t i = start; i <= end; i++)
             {
                 updateDebugInfo(*kernel, befp, i);
             }
@@ -2137,8 +2121,13 @@ void KernelDebugInfo::updateCallStackLiveIntervals()
     }
 
     auto callerbefp = getCallerBEFP();
-    if (callerbefp)
+    if (callerbefp && befp)
     {
+        // callerbefp is stored in FDE. BE_FP is needed to access
+        // FDE. Therefore:
+        // 1. Caller BP_FP location can be emitted only if BE_FP is valid
+        // 2. Caller BE_FP location is valid only after BE_FP is updated
+        //     in current frame
         auto callerbefpLIInfo = getLiveIntervalInfo(callerbefp);
         callerbefpLIInfo->clearLiveIntervals();
         auto callerbeSaveInst = getCallerBEFPSaveInst();
@@ -2147,8 +2136,10 @@ void KernelDebugInfo::updateCallStackLiveIntervals()
             auto callerbefpRestoreInst = getCallerBEFPRestoreInst();
             MUST_BE_TRUE(callerbefpRestoreInst != nullptr,
                 "Instruction destroying caller be fp not found in epilog");
-            start = (uint32_t)callerbeSaveInst->getGenOffset() - reloc_offset +
-                getBinInstSize(callerbeSaveInst);
+            // Guarantee that start of FDE live-range is same as or after BE_FP
+            // of current frame is initialized
+            start = std::max(start, (uint32_t)callerbeSaveInst->getGenOffset() - reloc_offset +
+                getBinInstSize(callerbeSaveInst));
             end = (uint32_t)callerbefpRestoreInst->getGenOffset() - reloc_offset;
             for (uint32_t i = start;
                 i <= end;

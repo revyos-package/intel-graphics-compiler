@@ -1,6 +1,6 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (C) 2017-2021 Intel Corporation
+Copyright (C) 2017-2022 Intel Corporation
 
 SPDX-License-Identifier: MIT
 
@@ -437,6 +437,46 @@ bool SpillManagerGRF::spillMemLifetimeInterfere(
     }
 }
 
+void SpillManagerGRF::getOverlappingIntervals(G4_Declare* dcl, std::vector<G4_Declare*>& intervals) const
+{
+    auto& allIntervals = spillingIntervals;
+    auto dclStart = gra.getStartInterval(dcl);
+    auto dclEnd = gra.getEndInterval(dcl);
+    auto dclMask = gra.getAugmentationMask(dcl);
+
+    // non-default variables have all interferences marked in
+    // interferences graph
+    if (dclMask == AugmentationMasks::NonDefault)
+        return;
+
+    for (auto otherDcl : allIntervals)
+    {
+        if (otherDcl == dcl)
+            continue;
+
+        auto start = gra.getStartInterval(otherDcl);
+        auto end = gra.getEndInterval(otherDcl);
+
+        // First overlap not yet seen
+        if (end->getLexicalId() < dclStart->getLexicalId())
+            continue;
+
+        // allIntervals are sorted on start. All overlapping
+        // intervals are guaranteed to be visited when
+        // current interval start is beyond end of dcl.
+        if (start->getLexicalId() > dclEnd->getLexicalId())
+            return;
+
+        // end lexical id >= dclStart lexical id
+        // add interval to list only if it is has same aug mask
+        // because overlapping intervals with different masks are already
+        // marked in intf graph.
+        if (start->getLexicalId() <= dclEnd->getLexicalId() &&
+            dclMask == gra.getAugmentationMask(otherDcl))
+            intervals.push_back(otherDcl);
+    }
+}
+
 // Calculate the spill memory displacement for the regvar.
 unsigned SpillManagerGRF::calculateSpillDisp(G4_RegVar *   regVar) const
 {
@@ -462,7 +502,19 @@ unsigned SpillManagerGRF::calculateSpillDisp(G4_RegVar *   regVar) const
             continue;
         locList.push_back(lrEdge);
     }
+
+    std::vector<G4_Declare*> overlappingDcls;
+    getOverlappingIntervals(regVar->getDeclare()->getRootDeclare(), overlappingDcls);
+    for (auto overlap : overlappingDcls)
+    {
+        auto lrEdge = overlap->getRegVar();
+        if (lrEdge->getDisp() == UINT_MAX)
+            continue;
+        locList.push_back(lrEdge);
+    }
+
     locList.sort([](G4_RegVar* v1, G4_RegVar* v2) { return v1->getDisp() < v2->getDisp(); });
+    locList.unique();
 
     // Find a spill slot for lRange within the locList.
     // we always start searching from nextSpillOffset_ to facilitate intra-iteration reuse.
@@ -1665,7 +1717,7 @@ SpillManagerGRF::createMRangeDeclare(
     if (useScratchMsg_)
     {
         assert(payloadHeaderHeight != DWORD_PAYLOAD_HEADER_MAX_HEIGHT);
-        // When using scratch msg descriptor we dont need to use a
+        // When using scratch msg descriptor we don't need to use a
         // separate GRF for payload. Source operand of send can directly
         // use r0.0.
         return builder_->getBuiltinR0();
@@ -3119,7 +3171,7 @@ bool SpillManagerGRF::checkUniqueDefAligned(G4_DstRegRegion* dst, G4_BB* defBB)
 }
 
 // This function checks whether each spill dst region requires a read-modify-write operation
-// when inserting spill code. Dominator/unique defs dont require redundant read operation.
+// when inserting spill code. Dominator/unique defs don't require redundant read operation.
 // Dst regions that do not need RMW are added to a set. This functionality isnt needed for
 // functional correctness. This function is executed before inserting spill code because
 // we need all dst regions of dcl available to decide whether read is redundant. If this is
@@ -3509,7 +3561,7 @@ void SpillManagerGRF::insertFillGRFRangeCode(
         // if inst is:
         // (W) mov (8|M0) SPLIT1    V10
         //
-        // and SPLIT1 is marked as spilled then dont insert spill code for it.
+        // and SPLIT1 is marked as spilled then don't insert spill code for it.
         // V10 is guaranteed to be spilled already so there is no point spilling
         // SPLIT1. we simply remove above instruction and any fill emitted to load
         // V10 and return.
@@ -3875,7 +3927,7 @@ void SpillManagerGRF::insertAddrTakenSpillAndFillCode(
                 // however, this sets a bit in liveness bit-vector that
                 // causes the temp variable to be marked as live-out from
                 // that BB. A general fix should treat address taken variables
-                // more accurately wrt liveness so they dont escape via
+                // more accurately wrt liveness so they don't escape via
                 // unfeasible paths.
                 //pointsToAnalysis.addFillToPointsTo(bbid, var, temp->getRegVar());
             }
@@ -4074,7 +4126,7 @@ void SpillManagerGRF::insertAddrTakenLSSpillAndFillCode(
                 // however, this sets a bit in liveness bit-vector that
                 // causes the temp variable to be marked as live-out from
                 // that BB. A general fix should treat address taken variables
-                // more accurately wrt liveness so they dont escape via
+                // more accurately wrt liveness so they don't escape via
                 // unfeasible paths.
                 //pointsToAnalysis.addFillToPointsTo(bbid, var, temp->getRegVar());
             }
@@ -4466,6 +4518,17 @@ bool SpillManagerGRF::insertSpillFillCode(
         else
         {
             lr->getVar()->getDeclare()->setSpillFlag();
+        }
+    }
+
+    if (doSpillSpaceCompression)
+    {
+        // cache spilling intervals in sorted order so we can use these
+        // for spill compression.
+        for (auto dcl : spillIntf_->getAugmentation().getSortedLiveIntervals())
+        {
+            if (dcl->isSpilled())
+                spillingIntervals.push_back(dcl);
         }
     }
 
@@ -4933,7 +4996,7 @@ void GlobalRA::saveRestoreA0(G4_BB * bb)
 
     auto isPrologOrEpilog = [this](G4_INST* inst)
     {
-        // a0 is a caller save register. Dont save/restore it if it is used in callee save/restore sequence or
+        // a0 is a caller save register. Don't save/restore it if it is used in callee save/restore sequence or
         // for frame descriptor spill instruction.
         if (inst == kernel.fg.builder->getFDSpillInst())
             return false;

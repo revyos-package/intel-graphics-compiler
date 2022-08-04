@@ -522,6 +522,11 @@ void gtPinData::setScratchNextFree(unsigned next) {
     nextScratchFree = ((next + kernel.numEltPerGRF<Type_UB>() - 1) / kernel.numEltPerGRF<Type_UB>()) * kernel.numEltPerGRF<Type_UB>();
 }
 
+unsigned int gtPinData::getScratchNextFree() const
+{
+    return nextScratchFree;
+}
+
 uint32_t gtPinData::getNumBytesScratchUse() const
 {
     if (gtpin_init)
@@ -537,9 +542,10 @@ uint32_t gtPinData::getNumBytesScratchUse() const
 
 
 G4_Kernel::G4_Kernel(const PlatformInfo& pInfo, INST_LIST_NODE_ALLOCATOR& alloc,
-    Mem_Manager& m, Options* options, Attributes* anAttr,
+    Mem_Manager& m, Options* options, Attributes* anAttr, uint32_t funcId,
     unsigned char major, unsigned char minor)
-    : platformInfo(pInfo), m_options(options), m_kernelAttrs(anAttr), RAType(RA_Type::UNKNOWN_RA),
+    : platformInfo(pInfo), m_options(options), m_kernelAttrs(anAttr),
+    m_function_id(funcId), RAType(RA_Type::UNKNOWN_RA),
     asmInstCount(0), kernelID(0), fg(alloc, this, m),
     major_version(major), minor_version(minor)
 {
@@ -562,6 +568,9 @@ G4_Kernel::G4_Kernel(const PlatformInfo& pInfo, INST_LIST_NODE_ALLOCATOR& alloc,
     } else {
         gtPinInfo = nullptr;
     }
+
+    // NoMask WA
+    m_EUFusionNoMaskWAInfo = nullptr;
 
     setKernelParameters();
 }
@@ -855,7 +864,7 @@ KernelDebugInfo* G4_Kernel::getKernelDebugInfo()
 
 unsigned G4_Kernel::getStackCallStartReg() const
 {
-    // Last 3 GRFs to be used as scratch
+    // Last 3 (or 2) GRFs reserved for stack call purpose
     unsigned totalGRFs = getNumRegTotal();
     unsigned startReg = totalGRFs - numReservedABIGRF();
     return startReg;
@@ -1340,6 +1349,11 @@ void G4_Kernel::emitDeviceAsm(
         os << "// --  BAD: " << fg.BCStats.NumOfBadInsts << "\n";
         os << "// --   OK: " << fg.BCStats.NumOfOKInsts << "\n";
     }
+
+    os << "//.accSubDef: " << fg.XeBCStats.accSubDef << "\n";
+    os << "//.accSubUse: " << fg.XeBCStats.accSubUse << "\n";
+    os << "//.accSubCandidateDef: " << fg.XeBCStats.accSubCandidateDef << "\n";
+    os << "//.accSubCandidateUse: " << fg.XeBCStats.accSubCandidateUse << "\n";
 }
 
 void G4_Kernel::emitRegInfo()
@@ -1874,8 +1888,9 @@ void G4_Kernel::emitDeviceAsmInstructionsIga(
     assert(errBuf);
     if (!errBuf)
         return;
+    TARGET_PLATFORM p = getPlatform();
     KernelView kv(
-        getIGAPlatform(getPlatform()), binary, binarySize,
+        getIGAPlatform(p), binary, binarySize,
         GetIGASWSBEncodeMode(*fg.builder),
         errBuf, ERROR_STRING_MAX_LENGTH);
     const auto errorMap =
@@ -1953,6 +1968,23 @@ void G4_Kernel::emitDeviceAsmInstructionsIga(
     int32_t pc = 0;
     std::vector<char> igaStringBuffer;
     igaStringBuffer.resize(512); // TODO: expand default after testing
+
+    // printedLabels - tracked the labels those have been printed to the pc to avoid
+    // printing the same label twice at the same pc. This can happen when there's an empty
+    // BB contains only labels. The BB and the following BB will both print those labels.
+    // The pair is the pc to label name pair.
+    std::set<std::pair<int32_t, std::string>> printedLabels;
+    // tryPrintLable - check if the given label is already printed with the given pc. Print it
+    // if not, and skip it if yes.
+    auto tryPrintLabel = [&os, &printedLabels](int32_t label_pc, std::string label_name) {
+        auto label_pair = std::make_pair(label_pc, label_name);
+        // skip if the same label in the set
+        if (printedLabels.find(label_pair) != printedLabels.end())
+            return;
+        os << label_name << ":\n";
+        printedLabels.insert(label_pair);
+    };
+
     for (BB_LIST_ITER itBB = fg.begin(); itBB != fg.end(); ++itBB) {
         os << "// "; (*itBB)->emitBbInfo(os); os << "\n";
         for (INST_LIST_ITER itInst = (*itBB)->begin();
@@ -1980,11 +2012,13 @@ void G4_Kernel::emitDeviceAsmInstructionsIga(
             if (isInstTarget) {
                 auto itr = ls.blockOffsets.find(pc);
                 if (itr == ls.blockOffsets.end()) {
-                    os << labeler(pc, &ls) << ":\n";
+                    std::string labelname(labeler(pc, &ls));
+                    tryPrintLabel(pc, labelname);
                 } else {
                     // there can be multiple labels per PC
                     for (const std::string &lbl : itr->second) {
-                        os << ls.labelPrefix << lbl << ":\n";
+                        std::string labelname(ls.labelPrefix + lbl);
+                        tryPrintLabel(pc, labelname);
                     }
                 }
                 if (!findNextNonLabel(false)) {
@@ -2013,7 +2047,8 @@ void G4_Kernel::emitDeviceAsmInstructionsIga(
             }
 
             static const uint32_t IGA_FMT_OPTS =
-                IGA_FORMATTING_OPT_PRINT_LDST
+                getOption(vISA_PrintHexFloatInAsm) ? IGA_FORMATTING_OPT_PRINT_HEX_FLOATS : IGA_FORMATTING_OPTS_DEFAULT
+                | IGA_FORMATTING_OPT_PRINT_LDST
                 | IGA_FORMATTING_OPT_PRINT_BFNEXPRS;
             while (true) {
                 size_t nw = kv.getInstSyntax(

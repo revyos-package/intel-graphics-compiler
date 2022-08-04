@@ -60,7 +60,7 @@ bool ResolveOCLRaytracingBuiltins::runOnModule(Module& M) {
     visit(M);
 
     if (m_callsToReplace.size() > 0) {
-        if (m_pCtx->platform.getPlatformInfo().eProductFamily != IGFX_PVC &&
+        if (m_pCtx->platform.getPlatformInfo().eRenderCoreFamily != IGFX_XE_HPC_CORE &&
             m_pCtx->platform.getPlatformInfo().eProductFamily != IGFX_DG2) {
             IGC_ASSERT_MESSAGE(0, "Raytracing extensions used on unsupported platform!");
             m_pCtx->EmitError("OCL raytracing extensions can be used only on supported platform", *m_callsToReplace.begin());
@@ -134,7 +134,7 @@ Description:
 Returns a pointer to the data structure which the RT hardware operates on.
 The RT Stack address is computed as:
     syncStackSize = sizeof(HitInfo)*2 + (sizeof(Ray) + sizeof(TravStack))*RTDispatchGlobals.maxBVHLevels;
-    syncBase = RTDispatchGlobals.rtMemBasePtr – (DSSID * NUM_SIMD_LANES_PER_DSS + StackID + 1)*syncStackSize;
+    syncBase = RTDispatchGlobals.rtMemBasePtr - (DSSID * NUM_SIMD_LANES_PER_DSS + StackID + 1)*syncStackSize;
 Where DSSID is an index which uniquely identifies the DSS in the machine (across tiles), and StackID is compute as below:
     With fused EUs (e.g. in DG2) :
       StackID[10:0] (msb to lsb) = (EUID[3:0]<<7) | (THREAD_ID[2:0]<<4) | SIMD_LANE_ID[3:0]
@@ -277,7 +277,7 @@ The return value of this function is a sync object which will be used by the ker
 */
 void ResolveOCLRaytracingBuiltins::handleDispatchTraceRayQuery(CallInst& callInst) {
   IGC_ASSERT(callInst.getType()->isPointerTy());
-  IGC_ASSERT(callInst.getNumArgOperands() == 3);
+  IGC_ASSERT(IGCLLVM::getNumArgOperands(&callInst) == 3);
 
   // Insert a ugm fence prior to send.rta to ensure RTUnit has accesss to
   // current data.
