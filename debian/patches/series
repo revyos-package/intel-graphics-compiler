@@ -1,4 +1,2 @@
 #placeholder
-fix-using-prebuilt-spirv-tools.diff
 fix-spirv-check.diff
-typos.patch

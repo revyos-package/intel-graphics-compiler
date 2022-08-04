@@ -1,6 +1,7 @@
 intel-graphics-compiler (1.0.11485-1) UNRELEASED; urgency=medium
 
   * New upstream release.
+  * fix-using-prebuilt-spirv-tools.diff, typos.patch: Dropped, upstream.
 
  -- Timo Aaltonen <tjaalton@debian.org>  Thu, 04 Aug 2022 15:46:27 +0300
 
