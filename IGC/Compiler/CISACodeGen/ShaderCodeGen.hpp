@@ -55,7 +55,6 @@ uint64_t GetImmediateVal(llvm::Value* Const);
 e_alignment GetPreferredAlignment(llvm::Value* Val, WIAnalysis* WIA, CodeGenContext* pContext);
 
 class CShaderProgram;
-class CBindlessShader;
 
 ///--------------------------------------------------------------------------------------------------------
 class CShader
@@ -326,6 +325,13 @@ public:
     /// Return true if we are sure that all lanes are active at the begging of the thread
     virtual bool HasFullDispatchMask() { return false; }
     bool needsEntryFence() const;
+
+    std::pair<bool, unsigned> getExtractMask(Value *V) const {
+        auto It = extractMasks.find(V);
+        if (It == extractMasks.end())
+            return std::make_pair(false, 0);
+        return std::make_pair(true, It->second);
+    }
 
     llvm::Function* entry;
     const CBTILayout* m_pBtiLayout;
@@ -720,14 +726,7 @@ public:
     CShader* GetShader(SIMDMode simd, ShaderDispatchMode mode = ShaderDispatchMode::NOT_APPLICABLE);
     void DeleteShader(SIMDMode simd, ShaderDispatchMode mode = ShaderDispatchMode::NOT_APPLICABLE);
     CodeGenContext* GetContext() { return m_context; }
-    void FillProgram(SVertexShaderKernelProgram* pKernelProgram);
-    void FillProgram(SHullShaderKernelProgram* pKernelProgram);
-    void FillProgram(SDomainShaderKernelProgram* pKernelProgram);
-    void FillProgram(SGeometryShaderKernelProgram* pKernelProgram);
-    void FillProgram(SPixelShaderKernelProgram* pKernelProgram);
-    void FillProgram(SComputeShaderKernelProgram* pKernelProgram);
-    void FillProgram(SOpenCLProgramInfo* pKernelProgram);
-    CBindlessShader* FillProgram(SBindlessProgram* pKernelProgram);
+
     ShaderStats* m_shaderStats;
 
 protected:

@@ -29,12 +29,12 @@ struct SendExDescOpts {
 
 class BinaryEncodingIGA
 {
-    int               IGAInstId = 0;
-    Mem_Manager&      mem;
-    G4_Kernel&        kernel;
-    std::string       fileName;
-    Kernel*      IGAKernel = nullptr;
-    const Model* platformModel;
+    int                     IGAInstId = 0;
+    Mem_Manager&            mem;
+    G4_Kernel&              kernel;
+    std::string             fileName; // .dat filename
+    Kernel*                 IGAKernel = nullptr;
+    const Model*            platformModel;
     const TARGET_PLATFORM   platform;
 public:
     BinaryEncodingIGA(vISA::Mem_Manager &m, vISA::G4_Kernel& k, std::string fname);
@@ -54,7 +54,6 @@ public:
 
     void FixInst();
     void *EmitBinary(size_t& binarySize);
-
 
 private:
     BinaryEncodingIGA(const BinaryEncodingIGA& other);
@@ -345,6 +344,7 @@ Platform BinaryEncodingIGA::getIGAInternalPlatform(TARGET_PLATFORM genxPlatform)
         platform = Platform::XE_HP;
         break;
     case Xe_DG2:
+    case Xe_MTL:
         platform = Platform::XE_HPG;
         break;
     case Xe_PVC:
@@ -975,7 +975,7 @@ void BinaryEncodingIGA::Encode()
             // for a single G4_INST, then it should be safe to
             // make pair between the G4_INST and first encoded
             // binary inst.
-            encodedInsts.push_back(std::make_pair(igaInst, inst));
+            encodedInsts.emplace_back(igaInst, inst);
         }
     }
 
@@ -1003,7 +1003,7 @@ void BinaryEncodingIGA::Encode()
             encoder.enableIGAAutoDeps();
         }
 
-        encoder.encode();
+        encoder.encode(kernel.fg.builder->criticalMsgStream());
 
         m_kernelBufferSize = encoder.getBinarySize();
         m_kernelBuffer = allocCodeBlock(m_kernelBufferSize);
@@ -1035,7 +1035,6 @@ void BinaryEncodingIGA::Encode()
             kernel.getComputeFFIDGP1NextOff();
     }
 }
-
 
 Instruction *BinaryEncodingIGA::translateInstruction(
     G4_INST *g4inst, Block*& bbNew)
@@ -1132,7 +1131,8 @@ Instruction *BinaryEncodingIGA::translateInstruction(
     }
 
     igaInst->setID(IGAInstId++);
-    igaInst->setLoc(g4inst->getCISAOff()); // make IGA src off track CISA id
+    int visaOff = g4inst->getCISAOff();
+    igaInst->setLoc(visaOff); // make IGA src off track CISA id
 
     if (opSpec->supportsDestination())
     {
@@ -1402,7 +1402,6 @@ void BinaryEncodingIGA::translateInstructionSrcs(
         }
     } // for
 }
-
 
 SendDesc BinaryEncodingIGA::getIGASendDesc(G4_INST* sendInst) const
 {
@@ -1945,6 +1944,8 @@ SWSB_ENCODE_MODE vISA::GetIGASWSBEncodeMode(const IR_Builder& builder) {
         return SWSB_ENCODE_MODE::SWSBInvalidMode;
 
     if (builder.hasThreeALUPipes()) {
+        if (builder.getPlatform() == Xe_MTL)
+            return SWSB_ENCODE_MODE::ThreeDistPipeDPMath;
         return SWSB_ENCODE_MODE::ThreeDistPipe;
     }
     else if (builder.hasFourALUPipes()) {

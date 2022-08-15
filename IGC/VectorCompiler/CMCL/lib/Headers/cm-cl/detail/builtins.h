@@ -85,6 +85,7 @@ template <typename T> T __cm_cl_abs_float(T src);
 template <typename T> T __cm_cl_ceil(T src);
 template <typename T> T __cm_cl_floor(T src);
 template <typename T> T __cm_cl_trunc(T src);
+template <typename T> T __cm_cl_roundne(T src);
 
 template <typename T> T __cm_cl_minnum(T src0, T src1);
 template <typename T> T __cm_cl_maxnum(T src0, T src1);
@@ -95,6 +96,8 @@ template <typename T> T __cm_cl_exp2(T src, bool use_fast);
 template <typename T> T __cm_cl_powr(T src0, T src1, bool use_fast);
 template <typename T> T __cm_cl_sin(T src, bool use_fast);
 template <typename T> T __cm_cl_cos(T src, bool use_fast);
+
+template <typename T> T __cm_cl_rsqrt(T src);
 
 vector_impl<uint32_t, 3> __cm_cl_local_id();
 vector_impl<uint32_t, 3> __cm_cl_local_size();
@@ -332,6 +335,12 @@ template <typename T> T trunc(T src) {
   static_assert(cl::is_floating_point<T>::value,
                 "Trunc function expects floating poing type.");
   return __cm_cl_trunc(src);
+}
+
+template <typename T> T roundne(T src) {
+  static_assert(cl::is_floating_point<T>::value,
+    "Roundne function expects floating poing type.");
+  return __cm_cl_roundne(src);
 }
 
 template <typename T> T min_float(T src0, T src1) {

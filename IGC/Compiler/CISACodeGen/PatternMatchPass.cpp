@@ -310,6 +310,16 @@ namespace IGC
         return flushesDenorms;
     }
 
+    bool CodeGenPatternMatch::ContractionAllowed(llvm::Instruction& I) const
+    {
+        if (m_AllowContractions ||
+            (m_ctx->m_DriverInfo.RespectPerInstructionContractFlag() && I.hasAllowContract()))
+        {
+            return true;
+        }
+        return false;
+    }
+
     // this function need to be in sync with CShader::EvaluateSIMDConstExpr on what can be supported
     bool CodeGenPatternMatch::SIMDConstExpr(Instruction* C)
     {
@@ -1269,11 +1279,6 @@ namespace IGC
                 match = MatchBlockReadWritePointer(*GII) ||
                     MatchSingleInstruction(*GII);
                 break;
-            case GenISAIntrinsic::GenISA_URBRead:
-            case GenISAIntrinsic::GenISA_URBReadOutput:
-                match = MatchURBRead(*GII) ||
-                    MatchSingleInstruction(*GII);
-                break;
             case GenISAIntrinsic::GenISA_UnmaskedRegionBegin:
                 match = MatchUnmaskedRegionBoundary(I, true);
                 break;
@@ -2037,7 +2042,7 @@ namespace IGC
         e_modifier src_mod[2] = { e_modifier::EMOD_NONE, e_modifier::EMOD_NONE };
         e_modifier pred_mod = e_modifier::EMOD_NONE;
         bool invertPred = false;
-        if (m_AllowContractions == false || IGC_IS_FLAG_ENABLED(DisableMatchPredAdd))
+        if (!ContractionAllowed(I) || IGC_IS_FLAG_ENABLED(DisableMatchPredAdd))
         {
             return false;
         }
@@ -2061,7 +2066,7 @@ namespace IGC
             llvm::BinaryOperator* mul = llvm::dyn_cast<llvm::BinaryOperator>(src);
             if (mul && mul->getOpcode() == Instruction::FMul)
             {
-                if (!mul->hasOneUse())
+                if (!mul->hasOneUse() || !ContractionAllowed(*mul))
                 {
                     continue;
                 }
@@ -2514,76 +2519,6 @@ namespace IGC
         return false;
     }
 
-    // 1. Detect and handle immediate URB read offsets - these can be put in message descriptor.
-    // 2. Detect offsets of the form "add dst, var, imm" - here we can remove the add, putting imm in message descriptor,
-    // and var in message payload.
-    bool CodeGenPatternMatch::MatchURBRead(llvm::GenIntrinsicInst& I)
-    {
-        struct URBReadPattern : public Pattern
-        {
-            explicit URBReadPattern(GenIntrinsicInst* I, QuadEltUnit globalOffset, llvm::Value* const perSlotOffset) :
-                m_inst(I), m_globalOffset(globalOffset), m_perSlotOffset(perSlotOffset)
-            {}
-
-            virtual void Emit(EmitPass* pass, const DstModifier& modifier)
-            {
-                IGC_ASSERT(m_inst->getIntrinsicID() == GenISAIntrinsic::GenISA_URBRead ||
-                    m_inst->getIntrinsicID() == GenISAIntrinsic::GenISA_URBReadOutput);
-                pass->emitURBReadCommon(m_inst, m_globalOffset, m_perSlotOffset);
-            }
-
-        private:
-            GenIntrinsicInst* const m_inst;
-            const QuadEltUnit m_globalOffset;
-            llvm::Value* const m_perSlotOffset;
-        };
-
-        if (I.getIntrinsicID() != GenISAIntrinsic::GenISA_URBRead &&
-            I.getIntrinsicID() != GenISAIntrinsic::GenISA_URBReadOutput)
-        {
-            return false;
-        }
-
-        const bool hasVertexIndexAsArg0 = I.getIntrinsicID() == GenISAIntrinsic::GenISA_URBRead;
-        llvm::Value* const offset = I.getOperand(hasVertexIndexAsArg0 ? 1 : 0);
-        if (const ConstantInt * const constOffset = dyn_cast<ConstantInt>(offset))
-        {
-            const QuadEltUnit globalOffset = QuadEltUnit(int_cast<unsigned>(constOffset->getZExtValue()));
-            if (hasVertexIndexAsArg0)
-            {
-                MarkAsSource(I.getOperand(0));
-            }
-            URBReadPattern* pattern = new (m_allocator) URBReadPattern(&I, globalOffset, nullptr);
-            AddPattern(pattern);
-            return true;
-        }
-        else if (llvm::Instruction * const inst = llvm::dyn_cast<llvm::Instruction>(offset))
-        {
-            if (inst->getOpcode() == llvm::Instruction::Add)
-            {
-                const bool isConstant0 = llvm::isa<llvm::ConstantInt>(inst->getOperand(0));
-                const bool isConstant1 = llvm::isa<llvm::ConstantInt>(inst->getOperand(1));
-                if (isConstant0 || isConstant1)
-                {
-                    IGC_ASSERT_MESSAGE(!(isConstant0 && isConstant1), "Both operands are immediate - constants should be folded elsewhere.");
-
-                    if (hasVertexIndexAsArg0)
-                    {
-                        MarkAsSource(I.getOperand(0));
-                    }
-                    const QuadEltUnit globalOffset = QuadEltUnit(int_cast<unsigned>(cast<ConstantInt>(
-                        isConstant0 ? inst->getOperand(0) : inst->getOperand(1))->getZExtValue()));
-                    llvm::Value* const perSlotOffset = isConstant0 ? inst->getOperand(1) : inst->getOperand(0);
-                    MarkAsSource(perSlotOffset);
-                    URBReadPattern* pattern = new (m_allocator) URBReadPattern(&I, globalOffset, perSlotOffset);
-                    AddPattern(pattern);
-                    return true;
-                }
-            }
-        }
-
-        return false;
-    }
 
     // Pattern matching to detect and handle immediate offsets in load/store
     // instructions.  It detects offsets of the form "add dst, var, imm"
@@ -2822,7 +2757,7 @@ namespace IGC
         llvm::Value* sources[3];
         e_modifier   src_mod[3];
 
-        if (m_AllowContractions == false)
+        if (!ContractionAllowed(I))
         {
             return false;
         }
@@ -2839,12 +2774,14 @@ namespace IGC
         for (uint i = 0; i < 2; i++)
         {
             llvm::BinaryOperator* mul = llvm::dyn_cast<llvm::BinaryOperator>(I.getOperand(i));
-            if (mul && mul->getOpcode() == Instruction::FMul)
+            if (mul &&
+                mul->getOpcode() == Instruction::FMul &&
+                ContractionAllowed(*mul))
             {
                 for (uint j = 0; j < 2; j++)
                 {
                     llvm::BinaryOperator* sub = llvm::dyn_cast<llvm::BinaryOperator>(mul->getOperand(j));
-                    if (sub)
+                    if (sub && ContractionAllowed(*sub))
                     {
                         llvm::ConstantFP* zero = llvm::dyn_cast<llvm::ConstantFP>(sub->getOperand(0));
                         if (zero && zero->isExactlyValue(0.f))
@@ -2893,7 +2830,9 @@ namespace IGC
             mul[0] = llvm::dyn_cast<llvm::BinaryOperator>(I.getOperand(0));
             mul[1] = llvm::dyn_cast<llvm::BinaryOperator>(I.getOperand(1));
             if (mul[0] && mul[0]->getOpcode() == Instruction::FMul &&
+                ContractionAllowed(*mul[0]) &&
                 mul[1] && mul[1]->getOpcode() == Instruction::FMul &&
+                ContractionAllowed(*mul[1]) &&
                 !llvm::isa<llvm::ConstantFP>(mul[0]->getOperand(0)) &&
                 !llvm::isa<llvm::ConstantFP>(mul[0]->getOperand(1)) &&
                 !llvm::isa<llvm::ConstantFP>(mul[1]->getOperand(0)) &&
@@ -2904,7 +2843,9 @@ namespace IGC
                     for (uint j = 0; j < 2; j++)
                     {
                         llvm::BinaryOperator* sub = llvm::dyn_cast<llvm::BinaryOperator>(mul[i]->getOperand(j));
-                        if (sub && sub->getOpcode() == Instruction::FSub)
+                        if (sub &&
+                            sub->getOpcode() == Instruction::FSub &&
+                            ContractionAllowed(*sub))
                         {
                             llvm::ConstantFP* one = llvm::dyn_cast<llvm::ConstantFP>(sub->getOperand(0));
                             if (one && one->isExactlyValue(1.f))
@@ -2979,7 +2920,10 @@ namespace IGC
                             uint k = 2 - casei;
 
                             //op[i] and op[j] should be fMul, and op[k] is src2
-                            if (op[i]->getOpcode() == Instruction::FMul && op[j]->getOpcode() == Instruction::FMul)
+                            if (op[i]->getOpcode() == Instruction::FMul &&
+                                op[j]->getOpcode() == Instruction::FMul &&
+                                ContractionAllowed(*op[i]) &&
+                                ContractionAllowed(*op[j]))
                             {
                                 for (uint srci = 0; srci < 2; srci++)
                                 {
@@ -5021,9 +4965,9 @@ namespace IGC
 
     bool CodeGenPatternMatch::MatchWaveShuffleIndex(llvm::GenIntrinsicInst& I)
     {
-        llvm::Value* helperLaneMode = I.getOperand(2);
+        auto helperLaneMode = cast<ConstantInt>(I.getOperand(2));
         IGC_ASSERT(helperLaneMode);
-        if (int_cast<int>(cast<ConstantInt>(helperLaneMode)->getSExtValue()) == 1)
+        if (int_cast<int>(helperLaneMode->getSExtValue()) == 1)
         {
             //only if helperLaneMode==1, we enable helper lane under some shuffleindex cases (not for all cases).
             HandleSubspanUse(I.getArgOperand(0));
@@ -5045,15 +4989,17 @@ namespace IGC
             helperLaneIndex = 1;
             break;
         case GenISAIntrinsic::GenISA_WaveClustered:
-        case GenISAIntrinsic::GenISA_WavePrefix:
             helperLaneIndex = 3;
+            break;
+        case GenISAIntrinsic::GenISA_WavePrefix:
+            helperLaneIndex = 4;
             break;
         default:
             IGC_ASSERT(false);
             break;
         }
-        llvm::Value* helperLaneMode = I.getArgOperand(helperLaneIndex);
-        if (int_cast<int>(cast<ConstantInt>(helperLaneMode)->getSExtValue()) == 1)
+        auto helperLaneMode = cast<ConstantInt>(I.getArgOperand(helperLaneIndex));
+        if (int_cast<int>(helperLaneMode->getSExtValue()) == 1)
         {
             m_NeedVMask = true;
         }

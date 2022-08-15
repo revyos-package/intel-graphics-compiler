@@ -509,7 +509,6 @@ void* VISAKernelImpl::encodeAndEmit(unsigned int& binarySize)
         for (auto decl : kernel->Declares)
         {
             auto regVar = decl->getRegVar();
-            kernel->emitRegInfo();
             if (regVar != nullptr)
             {
                 if (regVar->isRegVar())
@@ -703,15 +702,21 @@ void* VISAKernelImpl::encodeAndEmit(unsigned int& binarySize)
                         #undef COUNT_LSC_SEND
                     }
                 }
-                /* TODO
+
                 if (instr->isSpillIntrinsic())
                 {
+                    auto payload = instr->getSrc(1)->asSrcRegRegion();
+                    auto dcl = payload->getTopDcl();
+                    m_kernelInfo->spillFills.countBytesSpilled += dcl->getByteSize();
+
+                    m_kernelInfo->spillFills.AddVirtualVar(dcl->getName());
+                    m_kernelInfo->spillFills.spillInstrOrder.push_back(instr->getCISAOff());
 
                 }
                 else if (instr->isFillIntrinsic())
                 {
-
-                }*/
+                    m_kernelInfo->spillFills.spillInstrOrder.push_back(instr->getCISAOff());
+                }
             }
         }
     }
@@ -4974,7 +4979,8 @@ int VISAKernelImpl::AppendVISASplitBarrierInst(bool isSignal)
 
     if (IS_GEN_BOTH_PATH)
     {
-        status = m_builder->translateVISASplitBarrierInst(isSignal);
+        status = m_builder->translateVISASplitBarrierInst(
+            nullptr, isSignal);
     }
 
     if (IS_VISA_BOTH_PATH)
@@ -5645,6 +5651,7 @@ int VISAKernelImpl::AppendVISA3dSamplerMsgGeneric(
     return status;
 }
 
+
 int VISAKernelImpl::AppendVISA3dSampler(
     VISASampler3DSubOpCode subOpcode,
     bool pixelNullMask,
@@ -5679,6 +5686,7 @@ int VISAKernelImpl::AppendVISA3dSampler(
         numMsgSpecificOpnds,
         opndArray);
 }
+
 
 int VISAKernelImpl::AppendVISA3dLoad(
     VISASampler3DSubOpCode subOpcode,
@@ -8502,7 +8510,7 @@ VISA_BUILDER_API int VISAKernelImpl::AppendVISALscFence(
 
     if (IS_GEN_BOTH_PATH) {
         SFID sfid = LSC_SFID_To_SFID(lscSfid);
-        m_builder->translateLscFence(sfid, fenceOp, scope, status);
+        m_builder->translateLscFence(nullptr, sfid, fenceOp, scope, status);
     }
 
     if (IS_VISA_BOTH_PATH) {
@@ -8540,7 +8548,8 @@ VISA_BUILDER_API int VISAKernelImpl::AppendVISANamedBarrierWait(
 
     if (IS_GEN_BOTH_PATH)
     {
-        status = m_builder->translateVISANamedBarrierWait(barrierId->g4opnd);
+        status = m_builder->translateVISANamedBarrierWait(
+            nullptr, barrierId->g4opnd);
     }
 
     if (IS_VISA_BOTH_PATH)
@@ -8576,7 +8585,8 @@ VISA_BUILDER_API int VISAKernelImpl::AppendVISANamedBarrierSignal(
 
     if (IS_GEN_BOTH_PATH)
     {
-        status = m_builder->translateVISANamedBarrierSignal(barrierId->g4opnd, barrierCount->g4opnd);
+        status = m_builder->translateVISANamedBarrierSignal(
+            nullptr, barrierId->g4opnd, barrierCount->g4opnd);
     }
     if (IS_VISA_BOTH_PATH)
     {

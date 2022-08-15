@@ -931,34 +931,36 @@ void IR_Builder::initScratchSurfaceOffset()
     // (W) and (1) sso r0.5 0xFFFFC00, placed at kernel entry
     if (!scratchSurfaceOffset)
     {
-        G4_SrcRegRegion* R0_5 = createSrc(builtinR0->getRegVar(), 0, 5,
-            getRegionScalar(), Type_UD);
         scratchSurfaceOffset = createTempVar(1, Type_UD, Any, "SSO");
         scratchSurfaceOffset->setLiveOut();
         scratchSurfaceOffset->setDoNotSpill();
-        if (kernel.getBoolKernelAttr(Attributes::ATTR_SepSpillPvtSS))
         {
-            G4_Declare* slot0SSO = createTempVar(1, Type_UD, Any, "Slot0SSO");
-            G4_DstRegRegion* andDst = createDstRegRegion(slot0SSO, 1);
-            auto andInst = createBinOp(G4_and, g4::SIMD1, andDst, R0_5, createImm(0xFFFFFC00, Type_UD), InstOpt_WriteEnable, true);
-            instList.pop_back();
-            auto iter = std::find_if(instList.begin(), instList.end(), [](G4_INST* inst) { return !inst->isLabel(); });
-            instList.insert(iter, andInst);
+            G4_SrcRegRegion* R0_5 = createSrc(builtinR0->getRegVar(), 0, 5,
+                getRegionScalar(), Type_UD);
+            if (kernel.getBoolKernelAttr(Attributes::ATTR_SepSpillPvtSS))
+            {
+                G4_Declare* slot0SSO = createTempVar(1, Type_UD, Any, "Slot0SSO");
+                G4_DstRegRegion* andDst = createDstRegRegion(slot0SSO, 1);
+                auto andInst = createBinOp(G4_and, g4::SIMD1, andDst, R0_5, createImm(0xFFFFFC00, Type_UD), InstOpt_WriteEnable, true);
+                instList.pop_back();
+                auto iter = std::find_if(instList.begin(), instList.end(), [](G4_INST* inst) { return !inst->isLabel(); });
+                instList.insert(iter, andInst);
 
-            // scratchSurfaceOffset (r0.5+0x400)>>4 is reserved for spillfill, pvtmem should use r0.5>>4
-            // shift-right by 4 is done before send-msg when setting a0
-            G4_DstRegRegion* dst = createDstRegRegion(scratchSurfaceOffset, 1);
-            createBinOp(G4_add, g4::SIMD1, dst, createSrcRegRegion(slot0SSO, getRegionScalar()),
-                createImm(0x400, Type_UD), InstOpt_WriteEnable, true);
-        }
-        else
-        {
-            G4_DstRegRegion* andDst = createDstRegRegion(scratchSurfaceOffset, 1);
-            auto andInst = createBinOp(G4_and, g4::SIMD1, andDst, R0_5, createImm(0xFFFFFC00, Type_UD), InstOpt_WriteEnable, true);
-            andInst->setCISAOff(UNMAPPABLE_VISA_INDEX);
-            instList.pop_back();
-            auto iter = std::find_if(instList.begin(), instList.end(), [](G4_INST* inst) { return !inst->isLabel(); });
-            instList.insert(iter, andInst);
+                // scratchSurfaceOffset (r0.5+0x400)>>4 is reserved for spillfill, pvtmem should use r0.5>>4
+                // shift-right by 4 is done before send-msg when setting a0
+                G4_DstRegRegion* dst = createDstRegRegion(scratchSurfaceOffset, 1);
+                createBinOp(G4_add, g4::SIMD1, dst, createSrcRegRegion(slot0SSO, getRegionScalar()),
+                    createImm(0x400, Type_UD), InstOpt_WriteEnable, true);
+            }
+            else
+            {
+                G4_DstRegRegion* andDst = createDstRegRegion(scratchSurfaceOffset, 1);
+                auto andInst = createBinOp(G4_and, g4::SIMD1, andDst, R0_5, createImm(0xFFFFFC00, Type_UD), InstOpt_WriteEnable, true);
+                andInst->setCISAOff(UNMAPPABLE_VISA_INDEX);
+                instList.pop_back();
+                auto iter = std::find_if(instList.begin(), instList.end(), [](G4_INST* inst) { return !inst->isLabel(); });
+                instList.insert(iter, andInst);
+            }
         }
     }
 }
@@ -1640,17 +1642,25 @@ G4_INST* IR_Builder::createMov(
     G4_DstRegRegion* dst, G4_Operand* src0, G4_InstOpts options,
     bool appendToInstList)
 {
+    return createMov(nullptr, execSize, dst, src0, options, appendToInstList);
+}
+G4_INST* IR_Builder::createMov(
+    G4_Predicate *pred,
+    G4_ExecSize execSize,
+    G4_DstRegRegion* dst, G4_Operand* src0, G4_InstOpts options,
+    bool appendToInstList)
+{
     G4_INST* newInst = nullptr;
     if (appendToInstList)
     {
         newInst = createInst(
-            nullptr, G4_mov, nullptr, g4::NOSAT, execSize,
+            pred, G4_mov, nullptr, g4::NOSAT, execSize,
             dst, src0, nullptr, options, true);
     }
     else
     {
         newInst = createInternalInst(
-            nullptr, G4_mov, nullptr, g4::NOSAT, execSize,
+            pred, G4_mov, nullptr, g4::NOSAT, execSize,
             dst, src0, nullptr, options);
     }
     return newInst;
@@ -2055,6 +2065,8 @@ G4_InstSend* IR_Builder::createInternalSendInst(
 // Create a split send (sends) instruction
 // sends (size) dst src0 src1 exDesc msgDesc
 //
+
+
 
 G4_InstSend* IR_Builder::createSplitSendInst(
     G4_Predicate* prd,

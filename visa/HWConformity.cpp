@@ -1684,10 +1684,25 @@ bool HWConformity::fixRotate(INST_LIST_ITER i, G4_BB* bb)
 
     if (dst->getTypeSize() != src->getTypeSize())
     {
-        // keep exec type same and change dst to be same type as src
-        replaceDst(i, src->getType());
-        dst = inst->getDst();
-        changed = true;
+        // Expect rotate has the same size for its src0 and its dst.
+        // But visa could change the src0 to a different type
+        // Use the larger of src0 and dst as rotation type and keep exec type same.
+        if (dst->getTypeSize() > src->getTypeSize())
+        {
+            // use dst type as rotation type
+            G4_Operand* newSrc = insertMovBefore(i, 0, dst->getType(), bb);
+            inst->setSrc(newSrc, 0);
+            assert(newSrc->isSrcRegRegion());
+            src = newSrc->asSrcRegRegion();
+        }
+        else
+        {
+            // use src type as rotation type. (note: can this happen ?)
+            G4_DstRegRegion* newDst = insertMovAfter(i, dst, src->getType(), bb);
+            inst->setDest(newDst);
+            dst = newDst;
+        }
+        // let it fall-thru
     }
 
     if (dst->getType() == Type_W)
@@ -5198,6 +5213,8 @@ void HWConformity::fixSendInst(G4_BB* bb)
         // they satisfy EOT and preemption restrictions
         auto needsTempSrc = [this](G4_INST* inst, G4_Declare* dcl)
         {
+            if (dcl == nullptr) // %null is okay
+                return false;
             return dcl->getRegVar() && dcl->getRegVar()->getPhyReg() &&
                 ((inst->isEOT() && builder.hasEOTGRFBinding() &&
                     dcl->getRegVar()->getPhyReg()->asGreg()->getRegNum() < 112) ||
@@ -7849,25 +7866,6 @@ void HWConformity::fixMixedHFInst(G4_BB* bb)
 
         if (builder.hasPartialMixMode() && inst->getNumSrc() > 1)
         {
-            bool isPureBF = true;
-            if (inst->getDst()->getType() != Type_BF)
-            {
-                isPureBF = false;
-            }
-            for (int i = 0, numSrc = inst->getNumSrc(); i < numSrc; ++i)
-            {
-                if (inst->getSrc(i)->getType() != Type_BF)
-                {
-                    isPureBF = false;
-                    break;
-                }
-            }
-            if (isPureBF)
-            {
-                // pure BF arithmetic instruction is not supported, we make src0 F
-                replaceSrc(instIter, 0, Type_F, bb);
-            }
-
             // no HF on mad src2 or mul src1
             if (inst->isMixedMode())
             {
@@ -8555,6 +8553,35 @@ void HWConformity::fixUnalignedRegions(INST_LIST_ITER it, G4_BB* bb)
                 }
             }
             return;
+        }
+    }
+
+    if (builder.hasFtoPackedHFMove() && inst->opcode() == G4_mov)
+    {
+        G4_Operand* src0 = inst->getSrc(0);
+        G4_Type src0Ty = src0->getType();
+        G4_SrcRegRegion* reg0 = src0->isSrcRegRegion() ? src0->asSrcRegRegion() : nullptr;
+        bool src0IsScalar = (!reg0 || reg0->getRegion()->isScalar());
+        if (!src0IsScalar &&
+            ((dstTy == Type_HF && dst->getHorzStride() == 1 && src0Ty == Type_F) ||
+             (dstTy == Type_F && src0Ty == Type_HF && reg0->getRegion()->isContiguous(inst->getExecSize()))))
+        {
+            uint32_t dstOffBytes = dst->getSubRegOff() * dst->getTypeSize();
+            uint32_t src0OffBytes = reg0->getSubRegOff() * reg0->getTypeSize();
+            const uint32_t halfGRFBytes = kernel.numEltPerGRF<Type_UB>() / 2;
+            // For F, use the half of its offset!
+            dstOffBytes = (dstTy == Type_F ? dstOffBytes / 2 : dstOffBytes);
+            src0OffBytes = (src0Ty == Type_F ? src0OffBytes / 2 : src0OffBytes);
+            const bool isAligned = (dstOffBytes % halfGRFBytes) == (src0OffBytes % halfGRFBytes);
+            if ((!isAligned && dstOffBytes != 0) || (dstTy == Type_F && dst->getHorzStride() != 1))
+            {
+                inst->setDest(insertMovAfter(it, dst, dst->getType(), bb, builder.getGRFAlign()));
+            }
+            if ((!isAligned && src0OffBytes != 0) ||
+                (src0Ty == Type_F && !reg0->getRegion()->isContiguous(inst->getExecSize())))
+            {
+                inst->setSrc(insertMovBefore(it, 0, src0Ty, bb, builder.getGRFAlign()), 0);
+            }
         }
     }
 
@@ -9367,7 +9394,6 @@ bool HWConformity::fixSrnd(INST_LIST_ITER it, G4_BB* bb)
     // case 1. src0 cannot be imm.
     // case 2. subreg must be zero  (must be grf-aligned)
     // case 3. For HF->BF8,  both dst and src must be packed
-    // srnd: https://gfxspecs.intel.com/Predator/Home/Index/67451
     G4_DstRegRegion* dst = inst->getDst();
     uint32_t execsize = inst->getExecSize();
     bool Packed = (dst->getType() == Type_UB);

@@ -515,6 +515,22 @@ public:
     { }
 
     G4_INST(
+        const IR_Builder& irb,
+        G4_Predicate* prd,
+        G4_opcode o,
+        G4_CondMod* m,
+        G4_Sat s,
+        G4_ExecSize size,
+        G4_DstRegRegion* d,
+        G4_Operand* s0,
+        G4_Operand* s1,
+        G4_Operand* s2,
+        G4_Operand* s3,
+        G4_InstOpts opt)
+    : G4_INST(irb, prd, o, m, s, size, d, s0, s1, s2, s3, nullptr, opt)
+    { }
+
+    G4_INST(
         const IR_Builder& builder,
         G4_Predicate* prd,
         G4_opcode o,
@@ -526,6 +542,7 @@ public:
         G4_Operand* s1,
         G4_Operand* s2,
         G4_Operand* s3,
+        G4_Operand* s4,
         G4_InstOpts opt);
 
     virtual ~G4_INST()
@@ -843,7 +860,9 @@ public:
     void setEvenlySplitInst(bool val) { evenlySplitInst = val; }
     bool getEvenlySplitInst() { return evenlySplitInst; }
 
-    void setCISAOff(int offset) { srcCISAoff = offset; }
+    void setCISAOff(int offset) {
+        srcCISAoff = offset;
+    }
     int getCISAOff() const { return srcCISAoff; }
     bool isCISAOffValid() const { return getCISAOff() != UndefinedCisaOffset; }
 
@@ -1516,6 +1535,7 @@ public:
         G4_Operand* extDesc,
         G4_InstOpts opt,
         G4_SendDesc* md);
+
 
     G4_INST* cloneInst() override;
 

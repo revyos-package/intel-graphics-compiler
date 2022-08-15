@@ -168,9 +168,9 @@ void ModuleAllocaInfo::analyze(Function* F, unsigned& Offset,
 
     // Group by alignment and smallest first.
     auto getAlignment = [=](AllocaInst* AI) -> unsigned {
-        unsigned Alignment = AI->getAlignment();
+        unsigned Alignment = (unsigned)AI->getAlignment();
         if (Alignment == 0)
-            Alignment = DL->getABITypeAlignment(AI->getAllocatedType());
+            Alignment = (unsigned)DL->getABITypeAlignment(AI->getAllocatedType());
         return Alignment;
     };
 
@@ -277,11 +277,14 @@ bool PrivateMemoryResolution::safeToUseScratchSpace(llvm::Module& M) const
 
     //
     // Do not use scratch space if module has any stack call.
-    // Do not use scratch space if modeule has any variable length alloca
+    // Do not use scratch space if module has any variable length alloca
+    // Do not use scratch space if module has indirectly called functions
     //
     if (bOCLLegacyStatelessCheck) {
         if (auto * FGA = getAnalysisIfAvailable<GenXFunctionGroupAnalysis>()) {
             if (FGA->getModule() == &M) {
+                if (FGA->getIndirectCallGroup() != nullptr)
+                    return false;
                 for (auto& I : *FGA) {
                     if (I->hasStackCall())
                         return false;
@@ -1075,7 +1078,7 @@ bool PrivateMemoryResolution::resolveAllocaInstructions(bool privateOnStack)
                     }
                 }
             }
-
+            Ctx.metrics.UpdateVariable(pAI, privateBuffer);
             // Replace all uses of original alloca with the bitcast
             pAI->replaceAllUsesWith(privateBuffer);
             pAI->eraseFromParent();
@@ -1210,6 +1213,7 @@ bool PrivateMemoryResolution::resolveAllocaInstructions(bool privateOnStack)
             }
 
             // Replace all uses of original alloca with the bitcast
+            Ctx.metrics.UpdateVariable(pAI, privateBuffer);
             pAI->replaceAllUsesWith(privateBuffer);
             pAI->eraseFromParent();
 
@@ -1217,6 +1221,7 @@ bool PrivateMemoryResolution::resolveAllocaInstructions(bool privateOnStack)
             {
                 // Fix address space in uses of privateBufferPTR, ADDRESS_SPACE_PRIVATE => ADDRESS_SPACE_GLOBAL
                 FixAddressSpaceInAllUses(privateBufferPTR, ADDRESS_SPACE_GLOBAL, ADDRESS_SPACE_PRIVATE);
+                Ctx.metrics.UpdateVariable(privateBuffer, privateBufferPTR);
                 privateBuffer->replaceAllUsesWith(privateBufferPTR);
                 if (Instruction* inst = dyn_cast<Instruction>(privateBuffer))
                 {
@@ -1328,6 +1333,7 @@ bool PrivateMemoryResolution::resolveAllocaInstructions(bool privateOnStack)
         }
 
         // Replace all uses of original alloca with the bitcast
+        Ctx.metrics.UpdateVariable(pAI, privateBuffer);
         pAI->replaceAllUsesWith(privateBuffer);
         pAI->eraseFromParent();
     }

@@ -1,6 +1,6 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (C) 2017-2021 Intel Corporation
+Copyright (C) 2017-2022 Intel Corporation
 
 SPDX-License-Identifier: MIT
 
@@ -130,8 +130,6 @@ SPDX-License-Identifier: MIT
 /// might consider some changes to his/her kernel to optimize it.
 ///
 //===----------------------------------------------------------------------===//
-#define DEBUG_TYPE "GENX_ARGINDIRECTION"
-
 #include "FunctionGroup.h"
 #include "GenX.h"
 #include "GenXAlignmentInfo.h"
@@ -163,6 +161,8 @@ SPDX-License-Identifier: MIT
 
 #include "llvmWrapper/IR/Instructions.h"
 #include "llvmWrapper/IR/DerivedTypes.h"
+
+#define DEBUG_TYPE "GENX_ARGINDIRECTION"
 
 using namespace llvm;
 using namespace genx;
@@ -1151,7 +1151,7 @@ bool GenXArgIndirection::checkIndirectBale(Bale *B, LiveRange *ArgLR,
       case BaleInfo::WRREGION:
         // Check wrregion if its result is coalesced with arg.
         if (Liveness->getLiveRange(bi->Inst) == ArgLR) {
-          Region R = makeRegionFromBaleInfo(bi->Inst, bi->Info);
+          vc::Region R = makeRegionFromBaleInfo(bi->Inst, bi->Info);
           if (R.Indirect)
             break; // already indirect
           // Fake up scalar indirect index for the benefit of

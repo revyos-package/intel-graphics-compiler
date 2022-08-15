@@ -272,7 +272,7 @@ namespace //Anonymous
 
             auto ptrType = dyn_cast_or_null<llvm::PointerType>(type);
             return ptrType != nullptr
-                ? dyn_cast<llvm::StructType>(ptrType->getElementType())
+                ? dyn_cast<llvm::StructType>(ptrType->getPointerElementType())
                 : nullptr;
         }
 
@@ -1674,7 +1674,7 @@ namespace //Anonymous
                 if (auto gv = M.getGlobalVariable(name))
                 {
                     auto gvType = cast<llvm::PointerType>(gv->getType());
-                    auto initType = cast<llvm::PointerType>(gvType->getElementType());
+                    auto initType = cast<llvm::PointerType>(gvType->getPointerElementType());
                     auto nullConst = llvm::ConstantPointerNull::get(initType);
                     gv->setExternallyInitialized(false);
                     gv->setConstant(true);
@@ -2274,7 +2274,7 @@ namespace //Anonymous
             }
         }
 
-        auto align = _DL->getPrefTypeAlignment(destPtr->getType()->getPointerElementType());
+        unsigned align = (unsigned)_DL->getPrefTypeAlignment(destPtr->getType()->getPointerElementType());
 
         return (byVal && KindQuery::isStructType(typeToSelect))
             ? CreateMemCpy(destPtr, source, align)
@@ -2364,7 +2364,7 @@ namespace //Anonymous
             }
             align = elemAlign > align ? elemAlign : align;
         }
-        return align;
+        return (unsigned)align;
     }
 
     llvm::CallInst* BlockInvoke::EmitBlockInvokeCall(IGCLLVM::IRBuilder<>& builder, llvm::ArrayRef<llvm::Argument*> captures, llvm::ArrayRef<llvm::Argument*> tailingArgs) const

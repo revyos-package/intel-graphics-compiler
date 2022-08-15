@@ -2974,7 +2974,7 @@ void transFunctionPointerCallArgumentAttributes(SPIRVValue *BV, CallInst *CI) {
     auto LlvmAttr = IsTypeAttrKind
             ? Attribute::get(CI->getContext(), LlvmAttrKind,
                              cast<PointerType>(CI->getOperand(ArgNo)->getType())
-                                 ->getElementType())
+                                 ->getPointerElementType())
             : Attribute::get(CI->getContext(), LlvmAttrKind);
     CI->addParamAttr(ArgNo, LlvmAttr);
   }
@@ -3805,7 +3805,7 @@ SPIRVToLLVM::transValueWithoutDecoration(SPIRVValue *BV, Function *F,
     auto Call = CallInst::Create(
 #if LLVM_VERSION_MAJOR > 7
         llvm::cast<llvm::FunctionType>(
-            llvm::cast<llvm::PointerType>(func->getType())->getElementType()),
+            llvm::cast<llvm::PointerType>(func->getType())->getPointerElementType()),
 #endif
         func,
         transValue(BC->getArgumentValues(), F, BB),
@@ -4199,7 +4199,7 @@ SPIRVToLLVM::transFunction(SPIRVFunction *BF) {
      Attribute::AttrKind LLVMKind = SPIRSPIRVFuncParamAttrMap::rmap(Kind);
      Type *AttrTy = nullptr;
      if (LLVMKind == Attribute::AttrKind::ByVal)
-       AttrTy = cast<PointerType>(I->getType())->getElementType();
+       AttrTy = cast<PointerType>(I->getType())->getPointerElementType();
      else if (LLVMKind == Attribute::AttrKind::StructRet)
        AttrTy = I->getType();
      // Make sure to use a correct constructor for a typed/typeless attribute
@@ -4721,6 +4721,17 @@ SPIRVToLLVM::transKernelMetadata()
         }
 
         if (F->getCallingConv() != CallingConv::SPIR_KERNEL || F->isDeclaration())
+            continue;
+        // Kernel entry point wrappers and SPIR-V functions with actual kernel
+        // body resolve to the same LLVM functions. Only generate metadata upon
+        // encountering entry point wrappers, as SPIR-V stores all execution
+        // mode information at the entry point wrapper site.
+        // TODO: Instead, consider copying all SPIR-V function information from
+        // entry point wrappers to the actual SPIR-V funtions, and then
+        // erasing entry point wrappers as such from the SPIRVModule/
+        // SPIRVToLLVM classes. Preferably, such a rework should be done in the
+        // Khronos SPIR-V Translator and then downstreamed.
+        if (!isOpenCLKernel(BF))
             continue;
         std::vector<llvm::Metadata*> KernelMD;
         KernelMD.push_back(ValueAsMetadata::get(F));

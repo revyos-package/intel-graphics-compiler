@@ -8932,10 +8932,9 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
                 auto dstRead = builder.createDstRegRegion(sendDstDcl, 1);
                 auto src0Addr = builder.createSrcRegRegion(loadAddress, builder.getRegionStride1()); // address base
 
-                G4_SendDesc* desc = nullptr;
                 G4_InstSend* sendInst = nullptr;
                 {
-                desc = builder.createLscMsgDesc(
+                G4_SendDescRaw* desc = builder.createLscMsgDesc(
                     op,
                     lscSfid,
                     EXEC_SIZE_1,
@@ -8952,7 +8951,7 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
                     src0Addr,
                     nullptr,
                     g4::SIMD1,
-                    (G4_SendDescRaw*)desc,
+                    desc,
                     InstOpt_NoOpt,
                     ADDR_TYPE,
                     true);
@@ -9354,12 +9353,14 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
                         G4_INST* fenceInst = nullptr;
                         if (builder.getPlatform() == Xe_PVCXT)
                         {
-                            fenceInst = builder.translateLscFence(SFID::UGM, LSC_FENCE_OP_NONE, LSC_SCOPE_TILE);
+                            fenceInst = builder.translateLscFence(
+                                nullptr, SFID::UGM, LSC_FENCE_OP_NONE, LSC_SCOPE_TILE);
                         }
                         else
                         {
                             // use fence.ugm.6.tile. 6 is reserved and is the same as none.
-                            fenceInst = builder.translateLscFence(SFID::UGM, LSC_FENCE_OP_TYPE6, LSC_SCOPE_TILE);
+                            fenceInst = builder.translateLscFence(
+                                nullptr, SFID::UGM, LSC_FENCE_OP_TYPE6, LSC_SCOPE_TILE);
                         }
                         bb->insertBefore(iter, fenceInst);
                     }
@@ -9371,19 +9372,22 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
                     {
                         if (hasTypedWrites)
                         {
-                            auto fenceInst = builder.translateLscFence(SFID::TGM, LSC_FENCE_OP_NONE, LSC_SCOPE_LOCAL);
+                            auto fenceInst = builder.translateLscFence(
+                                nullptr, SFID::TGM, LSC_FENCE_OP_NONE, LSC_SCOPE_LOCAL);
                             bb->insertBefore(iter, fenceInst);
                         }
                         // If needLSCFence is true, the fence has been added already, skip the following.
                         if (hasUAVWrites && !needLscUgmFence)
                         {
-                            auto fenceInst = builder.translateLscFence(SFID::UGM, LSC_FENCE_OP_NONE, LSC_SCOPE_LOCAL);
+                            auto fenceInst = builder.translateLscFence(
+                                nullptr, SFID::UGM, LSC_FENCE_OP_NONE, LSC_SCOPE_LOCAL);
                             bb->insertBefore(iter, fenceInst);
                         }
                         if (hasSLMWrites && !hasUAVWrites)
                         {
                             // UGM fence takes of SLM fence as well
-                            auto fenceInst = builder.translateLscFence(SFID::SLM, LSC_FENCE_OP_NONE, LSC_SCOPE_LOCAL);
+                            auto fenceInst = builder.translateLscFence(
+                                nullptr, SFID::SLM, LSC_FENCE_OP_NONE, LSC_SCOPE_LOCAL);
                             bb->insertBefore(iter, fenceInst);
                         }
                     }
@@ -9396,12 +9400,14 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
                         }
                         if (hasUAVWrites || hasTypedWrites)
                         {
-                            auto fenceInst = builder.createFenceInstruction(0, true, true, false);
+                            auto fenceInst = builder.createFenceInstructionPreLSC(
+                                nullptr, 0, true, true, false);
                             bb->insertBefore(iter, fenceInst);
                         }
                         if (hasSLMWrites)
                         {
-                            auto fenceInst = builder.createFenceInstruction(0, true, false, false);
+                            auto fenceInst = builder.createFenceInstructionPreLSC(
+                                nullptr, 0, true, false, false);
                             bb->insertBefore(iter, fenceInst);
                         }
                     }
@@ -9432,10 +9438,10 @@ bool Optimizer::foldPseudoAndOr(G4_BB* bb, INST_LIST_ITER& ii)
             auto iter = std::find_if(entryBB->begin(), entryBB->end(), [](G4_INST* inst) { return !inst->isLabel(); });
 
             builder.instList.clear();
-            builder.translateLscFence(SFID::UGM, LSC_FENCE_OP_EVICT, LSC_SCOPE_GPU);
+            builder.translateLscFence(nullptr, SFID::UGM, LSC_FENCE_OP_EVICT, LSC_SCOPE_GPU);
             // according to architects the invalidate fence should not use backup mode
             const_cast<Options*>(builder.getOptions())->setOption(vISA_LSCBackupMode, false);
-            builder.translateLscFence(SFID::UGM, LSC_FENCE_OP_INVALIDATE, LSC_SCOPE_GPU);
+            builder.translateLscFence(nullptr, SFID::UGM, LSC_FENCE_OP_INVALIDATE, LSC_SCOPE_GPU);
             const_cast<Options*>(builder.getOptions())->setOption(vISA_LSCBackupMode, true);
             entryBB->insert(iter, builder.instList.begin(), builder.instList.end());
             builder.instList.clear();

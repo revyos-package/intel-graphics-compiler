@@ -1,6 +1,6 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (C) 2017-2021 Intel Corporation
+Copyright (C) 2017-2022 Intel Corporation
 
 SPDX-License-Identifier: MIT
 
@@ -11,8 +11,6 @@ SPDX-License-Identifier: MIT
 // detailed comment.
 //
 //===----------------------------------------------------------------------===//
-#define DEBUG_TYPE "GENX_INSTRUCTION_BALING"
-
 #include "GenXBaling.h"
 #include "GenXConstants.h"
 #include "GenXIntrinsics.h"
@@ -44,6 +42,8 @@ SPDX-License-Identifier: MIT
 #include "llvmWrapper/IR/DerivedTypes.h"
 
 #include "Probe/Assertion.h"
+
+#define DEBUG_TYPE "GENX_INSTRUCTION_BALING"
 
 // Part of the bodge to allow abs to bale in to sext/zext. This needs to be set
 // to some arbitrary value that does not clash with any
@@ -249,7 +249,8 @@ void GenXBaling::processInst(Instruction *Inst)
  * otherwise, if the region is considered baled and skip legalization,
  * we may have illegal standalone read-region.
  */
-bool GenXBaling::isRegionOKForIntrinsic(unsigned ArgInfoBits, const Region &R,
+bool GenXBaling::isRegionOKForIntrinsic(unsigned ArgInfoBits,
+                                        const vc::Region &R,
                                         bool CanSplitBale) {
   GenXIntrinsicInfo::ArgInfo AI(ArgInfoBits);
   if (!AI.isGeneral())
@@ -526,7 +527,7 @@ bool GenXBaling::operandCanBeBaled(
     // - it is indirect.
     // as bitcast will not bale its operands and indirect multiple-use region
     // reads often lead to narrow simd width after legalization.
-    if (Opnd->getNumUses() > 1 && (Kind == BalingKind::BK_Legalization ||
+    if (Opnd->hasNUsesOrMore(2) && (Kind == BalingKind::BK_Legalization ||
                                    Kind == BalingKind::BK_Analysis)) {
       for (auto U : Opnd->users())
         if (isa<BitCastInst>(U))
@@ -1001,7 +1002,7 @@ void GenXBaling::processFuncPointer(Instruction *Inst) {
   IGC_ASSERT_MESSAGE(CI, "genx.faddr expected");
   IGC_ASSERT_MESSAGE(GenXIntrinsic::getGenXIntrinsicID(CI) == GenXIntrinsic::genx_faddr,
     "genx.faddr expected");
-  IGC_ASSERT(Inst->getNumUses() == 1);
+  IGC_ASSERT(Inst->hasOneUse());
   auto *NextUser = Inst->user_back();
   if (isa<BitCastInst>(NextUser)) {
     // bitcasts <N x i64> -> <2*N x i32> may appear after i64 emulation

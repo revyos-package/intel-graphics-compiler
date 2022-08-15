@@ -16,14 +16,8 @@ SPDX-License-Identifier: MIT
 #include "Compiler/CISACodeGen/GenCodeGenModule.h"
 #include "Compiler/CISACodeGen/messageEncoding.hpp"
 #include "Compiler/CISACodeGen/VariableReuseAnalysis.hpp"
-#include "Compiler/CISACodeGen/PixelShaderCodeGen.hpp"
-#include "Compiler/CISACodeGen/VertexShaderCodeGen.hpp"
-#include "Compiler/CISACodeGen/GeometryShaderCodeGen.hpp"
-#include "Compiler/CISACodeGen/ComputeShaderCodeGen.hpp"
-#include "Compiler/CISACodeGen/HullShaderCodeGen.hpp"
-#include "Compiler/CISACodeGen/DomainShaderCodeGen.hpp"
 #include "Compiler/CISACodeGen/OpenCLKernelCodeGen.hpp"
-#include "Compiler/CISACodeGen/BindlessShaderCodeGen.hpp"
+#include "Compiler/CISACodeGen/VectorProcess.hpp"
 #include "Compiler/MetaDataApi/MetaDataApi.h"
 #include "common/secure_mem.h"
 #include "Probe/Assertion.h"
@@ -275,6 +269,40 @@ void CShader::EOTGateway(CVariable* payload)
 
 void CShader::AddEpilogue(llvm::ReturnInst* ret)
 {
+    if (IGC_IS_FLAG_ENABLED(deadLoopForFloatException))
+    {
+        // (W) mov (8|M0) t sr0.1<0;1,0>:ud
+        CVariable* t = GetNewVariable(
+            numLanes(m_SIMDSize),
+            ISA_TYPE_UW, EALIGN_WORD, "tmp_sr0_1");
+        encoder.SetNoMask();
+        encoder.SetSrcSubReg(0, 1);
+        CVariable* SR0 = GetNewVariable(4, ISA_TYPE_UW, EALIGN_WORD, true, CName::NONE);
+        encoder.GetVISAPredefinedVar(SR0, PREDEFINED_SR0);
+        encoder.Copy(t, SR0);
+        encoder.Push();
+
+        // (W) and (8|M0) t t 0x3F:uw
+        encoder.SetNoMask();
+        encoder.And(t, t, ImmToVariable(0x3F, ISA_TYPE_UW)); // sr0.1 bit 0~5 for float exception
+        encoder.Push();
+
+        // (W) cmp.ne (8|M0) f0.0  t:uw  0:uw
+        CVariable* lsPred = GetNewVariable(
+            numLanes(m_SIMDSize), ISA_TYPE_BOOL, EALIGN_BYTE, "pred_sr0");
+        encoder.SetNoMask();
+        encoder.Cmp(EPREDICATE_NE, lsPred, t, ImmToVariable(0, ISA_TYPE_UW));
+        encoder.Push();
+
+        // create loop label
+        uint label = encoder.GetNewLabelID("sr0_1_loop");
+        encoder.Label(label);
+        encoder.Push();
+
+        //(W&f0.0) jmpi     label
+        encoder.Jump(lsPred, label);
+        encoder.Push();
+    }
     encoder.EOT();
     encoder.Push();
 }
@@ -335,15 +363,6 @@ void CShader::RestoreStackState()
 
 void CShader::InitializeScratchSurfaceStateAddress()
 {
-    m_ScratchSurfaceAddress = GetNewVariable(1, ISA_TYPE_D, EALIGN_DWORD, true, 1, "ScratchSurfaceAddress");
-    {
-        // For scratch surface, we need to shr the surface state offset coming in R0.5 by 4
-        // This is because the scratch offset is passed in via r0.5[31:10],
-        // but the BSS/SS descriptor expects the offset in [31:6] bits, thus we must shift it right by 4
-        encoder.SetSrcSubReg(0, 5);
-        encoder.Shr(m_ScratchSurfaceAddress, GetR0(), ImmToVariable(4, ISA_TYPE_UD));
-        encoder.Push();
-    }
 }
 
 void CShader::CreateImplicitArgs()
@@ -763,9 +782,9 @@ void CShader::MapPushedInputs()
 
 bool CShader::IsPatchablePS()
 {
-    return (GetShaderType() == ShaderType::PIXEL_SHADER &&
-        static_cast<CPixelShader*>(this)->GetPhase() != PSPHASE_PIXEL);
+    return false;
 }
+
 
 CVariable* CShader::GetR0()
 {
@@ -1350,6 +1369,69 @@ uint CShader::GetNbVectorElementAndMask(llvm::Value* val, uint32_t& mask)
         {
             nbElement = iSTD::BitCount(mask);
         }
+    } else if (auto *LD = dyn_cast<LoadInst>(val)) {
+        do {
+            if (shouldGenerateLSC(LD))
+                break;
+            Value *Ptr = LD->getPointerOperand();
+            PointerType *PtrTy = cast<PointerType>(Ptr->getType());
+            bool useA32 = !IGC::isA64Ptr(PtrTy, GetContext());
+
+            Type* Ty = LD->getType();
+            IGCLLVM::FixedVectorType* VTy = dyn_cast<IGCLLVM::FixedVectorType>(Ty);
+            Type* eltTy = VTy ? VTy->getElementType() : Ty;
+            uint32_t eltBytes = GetScalarTypeSizeInRegister(eltTy);
+            // Skip if not 32-bit load.
+            if (eltBytes != 4)
+                break;
+
+            uint32_t elts = VTy ? int_cast<uint32_t>(VTy->getNumElements()) : 1;
+            uint32_t totalBytes = eltBytes * elts;
+
+            unsigned align = (unsigned)LD->getAlignment();
+
+            uint bufferIndex = 0;
+            bool directIndexing = false;
+            BufferType bufType = DecodeAS4GFXResource(PtrTy->getAddressSpace(), directIndexing, bufferIndex);
+            // Some driver describe constant buffer as typed which forces us to use
+            // byte scatter message.
+            bool forceByteScatteredRW = (bufType == CONSTANT_BUFFER) && UsesTypedConstantBuffer(GetContext(), bufType);
+
+            // Keep this check consistent in emitpass.
+            if (bufType == STATELESS_A32)
+                break;
+
+            // Keep this check consistent in emitpass.
+            if (totalBytes < 4)
+                break;
+
+            // Keep this check consistent in emitpass.
+            if (GetIsUniform(Ptr))
+                break;
+
+            VectorMessage VecMessInfo(this);
+            VecMessInfo.getInfo(Ty, align, useA32, forceByteScatteredRW);
+
+            // Skip if non-trival case or gather4 won't be used. So far, only
+            // VectorMessage::MESSAGE_A32_UNTYPED_SURFACE_RW is considered.
+            if (VecMessInfo.numInsts != 1 ||
+                VecMessInfo.insts[0].kind !=
+                    VectorMessage::MESSAGE_A32_UNTYPED_SURFACE_RW)
+                break;
+
+            for (auto *User : LD->users()) {
+                auto *EEI = dyn_cast<ExtractElementInst>(User);
+                auto *CI = EEI ? dyn_cast<ConstantInt>(EEI->getIndexOperand()) : nullptr;
+                if (!CI) {
+                    // Don't populate any mask so that default one could be used instead.
+                    mask = 0;
+                    break;
+                }
+                mask |= BIT(unsigned(CI->getZExtValue()));
+            }
+            if (mask)
+                nbElement = iSTD::BitCount(mask);
+        } while (0);
     }
     return nbElement;
 }
@@ -3030,11 +3112,7 @@ CVariable* CShader::GetSymbol(llvm::Value* value, bool fromConstantPool)
             symbolMapping.insert(std::pair<Value*, CVariable*>(value, Alias));
             return Alias;
         }
-        if (genInst->getIntrinsicID() == GenISAIntrinsic::GenISA_UpdateDiscardMask)
-        {
-            IGC_ASSERT(GetShaderType() == ShaderType::PIXEL_SHADER);
-            return (static_cast<CPixelShader*>(this))->GetDiscardPixelMask();
-        }
+
     }
 
     if (m_coalescingEngine) {
@@ -3181,6 +3259,12 @@ bool CShader::CanTreatAsAlias(llvm::ExtractElementInst* inst)
         {
             return false;
         }
+        // If there is another component not being treated as alias, this
+        // component cannot be neither. This decision should be mitigated once
+        // the VISA could track the liveness of individual elements of vector
+        // variables.
+        if (IsCoalesced(extract))
+            return false;
     }
 
     return true;
@@ -3791,27 +3875,6 @@ CShader* CShaderProgram::CreateNewShader(SIMDMode simd)
         {
         case ShaderType::OPENCL_SHADER:
             pShader = new COpenCLKernel((OpenCLProgramContext*)m_context, m_kernel, this);
-            break;
-        case ShaderType::PIXEL_SHADER:
-            pShader = new CPixelShader(m_kernel, this);
-            break;
-        case ShaderType::VERTEX_SHADER:
-            pShader = new CVertexShader(m_kernel, this);
-            break;
-        case ShaderType::GEOMETRY_SHADER:
-            pShader = new CGeometryShader(m_kernel, this);
-            break;
-        case ShaderType::HULL_SHADER:
-            pShader = new CHullShader(m_kernel, this);
-            break;
-        case ShaderType::DOMAIN_SHADER:
-            pShader = new CDomainShader(m_kernel, this);
-            break;
-        case ShaderType::COMPUTE_SHADER:
-            pShader = new CComputeShader(m_kernel, this);
-            break;
-        case ShaderType::RAYTRACING_SHADER:
-            pShader = new CBindlessShader(m_kernel, this);
             break;
         default:
             IGC_ASSERT_MESSAGE(0, "wrong shader type");

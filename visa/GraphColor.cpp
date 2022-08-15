@@ -6944,6 +6944,62 @@ bool GraphColor::assignColors(ColorHeuristic colorHeuristicGRF, bool doBankConfl
         }
     }
 
+    if (failSafeIter)
+    {
+        // As per spec, EOT has to be allocated to r112+.
+        // When fail safe iteration is run, upper GRFs are
+        // reserved. It's possible that # of reserved
+        // GRFs are too many and r112+ allocation restriction
+        // on EOT cannot be fulfilled (eg, r116-r127 are reserved
+        // EOT src operand size is 8 GRFs). This causes EOT var
+        // to spill and then the spill range faces the same
+        // restriction. The fix here is to check whether
+        // reserved GRF restriction can be eased for EOT.
+        auto hasSpilledNeighbor = [&](unsigned int id)
+        {
+            for (const auto* spillLR : spilledLRs)
+            {
+                if (id != spillLR->getVar()->getId() &&
+                    getIntf()->interfereBetween(id, spillLR->getVar()->getId()))
+                    return true;
+            }
+            return false;
+        };
+
+        if (builder.getOption(vISA_HybridRAWithSpill))
+        {
+            // This local analysis is skipped in favor of
+            // compile time in global RA loop, so run it here
+            // when needed.
+            gra.markGraphBlockLocalVars();
+        }
+
+        for (auto lrIt = spilledLRs.begin();
+            lrIt != spilledLRs.end();
+            ++lrIt)
+        {
+            auto lr = (*lrIt);
+            bool needsEOTGRF = lr->getEOTSrc() && builder.hasEOTGRFBinding();
+            if (needsEOTGRF &&
+                gra.isBlockLocal(lr->getDcl()) &&
+                (totalGRFRegCount + lr->getNumRegNeeded()) <= kernel.getNumRegTotal() &&
+                !hasSpilledNeighbor(lr->getVar()->getId()))
+            {
+                // Following conditions true:
+                // 1. EOT range spilled that needs r112-r127 assignment,
+                // 2. Variable is local to a BB,
+                // 3. Reserved GRF start + # EOT GRFs fits within total GRFs,
+                // 4. Has no spilled neighbor
+                //
+                // This makes it safe to directly assign a reserved GRF to this
+                // variable than spill it.
+                lr->setPhyReg(builder.phyregpool.getGreg(kernel.getNumRegTotal() - lr->getNumRegNeeded()), 0);
+                spilledLRs.erase(lrIt);
+                break;
+            }
+        }
+    }
+
     // record RA type
     if (liveAnalysis.livenessClass(G4_GRF))
     {
@@ -7322,6 +7378,7 @@ bool GraphColor::regAlloc(
     unsigned reserveSpillSize = 0;
     if (reserveSpillReg)
     {
+        failSafeIter = reserveSpillReg;
         gra.determineSpillRegSize(spillRegSize, indrSpillRegSize);
         reserveSpillSize = spillRegSize + indrSpillRegSize;
         MUST_BE_TRUE(reserveSpillSize < kernel.getNumCalleeSaveRegs(), "Invalid reserveSpillSize in fail-safe RA!");
@@ -7433,7 +7490,8 @@ bool GraphColor::regAlloc(
     {
         bool hasStackCall = kernel.fg.getHasStackCalls() || kernel.fg.getIsStackCallFunc();
 
-        bool willSpill = ((builder.getOption(vISA_FastCompileRA) || builder.getOption(vISA_HybridRAWithSpill)) && !hasStackCall) ||
+        bool willSpill = ((builder.getOption(vISA_FastCompileRA) || builder.getOption(vISA_HybridRAWithSpill))
+            && (!hasStackCall || builder.getOption(vISA_Partitioning))) ||
             (kernel.getInt32KernelAttr(Attributes::ATTR_Target) == VISA_3D &&
             rpe->getMaxRP() >= kernel.getNumRegTotal() + 24);
         if (willSpill)
@@ -10378,7 +10436,7 @@ int GlobalRA::coloringRegAlloc()
                 return VISA_SPILL;
             }
         }
-        else if (builder.getOption(vISA_LocalRA) && !hasStackCall)
+        else if (builder.getOption(vISA_LocalRA) && (!hasStackCall || builder.getOption(vISA_Partitioning)))
         {
             copyMissingAlignment();
             BankConflictPass bc(*this, false);
@@ -10443,7 +10501,7 @@ int GlobalRA::coloringRegAlloc()
     unsigned fastCompileIter = 1;
     bool fastCompile =
         (builder.getOption(vISA_FastCompileRA) || builder.getOption(vISA_HybridRAWithSpill)) &&
-        !hasStackCall;
+        (!hasStackCall || builder.getOption(vISA_Partitioning));
 
     if (fastCompile)
     {
@@ -10469,9 +10527,15 @@ int GlobalRA::coloringRegAlloc()
     bool rematDone = false, alignedScalarSplitDone = false;
     bool reserveSpillReg = false;
     VarSplit splitPass(*this);
+    DynPerfModel perfModel(kernel);
 
     while (iterationNo < maxRAIterations)
     {
+        if (builder.getOption(vISA_DynPerfModel))
+        {
+            perfModel.NumRAIters++;
+        }
+
         if (builder.getOption(vISA_RATrace))
         {
             std::cout << "--GRF RA iteration " << iterationNo << "--" << kernel.getName() << "\n";
@@ -10675,7 +10739,11 @@ int GlobalRA::coloringRegAlloc()
                 if (iterationNo == 0 && !fastCompile &&
                     kernel.getOption(vISA_DoSplitOnSpill))
                 {
-                    LoopVarSplit loopSplit(kernel, &coloring, &rpe);
+                    if (builder.getOption(vISA_RATrace))
+                    {
+                        std::cout << "\t--var split around loop\n";
+                    }
+                    LoopVarSplit loopSplit(kernel, &coloring, &liveAnalysis);
                     kernel.fg.getLoops().computePreheaders();
                     loopSplit.run();
                 }
@@ -10846,6 +10914,11 @@ int GlobalRA::coloringRegAlloc()
                     regChart->dumpRegChart(std::cerr);
                 }
 
+                if (builder.getOption(vISA_DynPerfModel))
+                {
+                    perfModel.run();
+                }
+
                 expandSpillFillIntrinsics(nextSpillOffset);
 
                 if (builder.getOption(vISA_OptReport))
@@ -10988,6 +11061,11 @@ int GlobalRA::coloringRegAlloc()
     if (builder.getOption(vISA_LocalDeclareSplitInGlobalRA))
     {
         removeSplitDecl();
+    }
+
+    if (builder.getOption(vISA_DynPerfModel))
+    {
+        perfModel.dump();
     }
 
     return VISA_SUCCESS;
@@ -13822,4 +13900,111 @@ void RegChartDump::recordLiveIntervals(const std::vector<G4_Declare*>& dcls)
         auto end = gra.getEndInterval(dcl);
         startEnd.insert(std::make_pair(dcl, std::make_pair(start, end)));
     }
+}
+
+void DynPerfModel::run()
+{
+    char LocalBuffer[1024];
+    for (auto BB : Kernel.fg.getBBList())
+    {
+        for (auto Inst : BB->getInstList())
+        {
+            if (Inst->isLabel() || Inst->isPseudoKill())
+                continue;
+
+            if (Inst->isSpillIntrinsic())
+                NumSpills++;
+            if (Inst->isFillIntrinsic())
+                NumFills++;
+
+            auto InnerMostLoop = Kernel.fg.getLoops().getInnerMostLoop(BB);
+            auto NestingLevel = InnerMostLoop ? InnerMostLoop->getNestingLevel() : 0;
+            if (Inst->isFillIntrinsic())
+            {
+                FillDynInst += (unsigned int)std::pow<unsigned int>(10, NestingLevel) * 1;
+            }
+            else if (Inst->isSpillIntrinsic())
+            {
+                SpillDynInst += (unsigned int)std::pow<unsigned int>(10, NestingLevel) * 1;
+            }
+            TotalDynInst += (unsigned int)std::pow<unsigned int>(10, NestingLevel) * 1;
+        }
+    }
+
+    std::stack<Loop*> Loops;
+    for (auto Loop : Kernel.fg.getLoops().getTopLoops())
+    {
+        Loops.push(Loop);
+    }
+    while (Loops.size() > 0)
+    {
+        auto CurLoop = Loops.top();
+        Loops.pop();
+        unsigned int FillCount = 0;
+        unsigned int SpillCount = 0;
+        unsigned int TotalCount = 0;
+        unsigned int LoopLevel = CurLoop->getNestingLevel();
+        if (SpillFillPerNestingLevel.size() <= LoopLevel)
+            SpillFillPerNestingLevel.resize(LoopLevel + 1);
+        std::get<0>(SpillFillPerNestingLevel[LoopLevel]) += 1;
+        for (auto BB : CurLoop->getBBs())
+        {
+            for (auto Inst : BB->getInstList())
+            {
+                if (Inst->isLabel() || Inst->isPseudoKill())
+                    continue;
+                TotalCount++;
+                if (Inst->isFillIntrinsic())
+                {
+                    FillCount++;
+                    std::get<2>(SpillFillPerNestingLevel[LoopLevel]) += 1;
+                }
+                else if (Inst->isSpillIntrinsic())
+                {
+                    SpillCount++;
+                    std::get<1>(SpillFillPerNestingLevel[LoopLevel]) += 1;
+                }
+            }
+        }
+
+        sprintf_s(LocalBuffer, sizeof(LocalBuffer), "Loop %d @ level %d: %d total, %d fill, %d spill\n", CurLoop->id, LoopLevel, TotalCount, FillCount, SpillCount);
+        Buffer += std::string(LocalBuffer);
+
+        for (auto Child : CurLoop->immNested)
+            Loops.push(Child);
+    };
+}
+
+void DynPerfModel::dump()
+{
+    char LocalBuffer[1024];
+
+    unsigned int InstCount = 0;
+    for (auto BB : Kernel.fg.getBBList())
+    {
+        for (auto Inst : BB->getInstList())
+        {
+            if (!Inst->isLabel() && !Inst->isPseudoKill())
+                InstCount++;
+        }
+    }
+    auto AsmName = Kernel.getOptions()->getOptionCstr(VISA_AsmFileName);
+    auto SpillSize = Kernel.fg.builder->getJitInfo()->spillMemUsed;
+    sprintf_s(LocalBuffer, sizeof(LocalBuffer), "Kernel name: %s\n # BBs : %d\n # Asm Insts: %d\n # RA Iters = %d\n Spill Size = %d\n # Spills: %d\n # Fills : %d\n",
+        AsmName, (int)Kernel.fg.getBBList().size(), InstCount, NumRAIters, SpillSize, NumSpills, NumFills);
+    Buffer += std::string(LocalBuffer);
+
+    sprintf_s(LocalBuffer, sizeof(LocalBuffer), "Total dyn inst: %llu\nFill dyn inst: %llu\nSpill dyn inst: %llu\n", TotalDynInst, FillDynInst, SpillDynInst);
+    Buffer += std::string(LocalBuffer);
+
+    sprintf_s(LocalBuffer, sizeof(LocalBuffer), "Percent Fill/Total dyn inst: %f\n", (double)FillDynInst / ((double)TotalDynInst > 0 ? (double)TotalDynInst : 1) * 100.0f);
+    Buffer += std::string(LocalBuffer);
+
+    for (unsigned int I = 1; I != SpillFillPerNestingLevel.size() && SpillFillPerNestingLevel.size() > 0; ++I)
+    {
+        sprintf_s(LocalBuffer, sizeof(LocalBuffer), "LL%d(#%d): {S-%d, F-%d}, ", I, std::get<0>(SpillFillPerNestingLevel[I]), std::get<1>(SpillFillPerNestingLevel[I]), std::get<2>(SpillFillPerNestingLevel[I]));
+        Buffer += std::string(LocalBuffer);
+    }
+
+    std::cerr << Buffer << std::endl;
 }

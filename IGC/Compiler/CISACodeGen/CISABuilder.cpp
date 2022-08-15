@@ -8,8 +8,6 @@ SPDX-License-Identifier: MIT
 
 #include "Compiler/CISACodeGen/CISABuilder.hpp"
 #include "Compiler/CISACodeGen/ShaderCodeGen.hpp"
-#include "Compiler/CISACodeGen/PixelShaderCodeGen.hpp"
-#include "Compiler/CISACodeGen/ComputeShaderCodeGen.hpp"
 #include "Compiler/Optimizer/OpenCLPasses/NamedBarriers/NamedBarriersResolution.hpp"
 #include "common/allocator.h"
 #include "common/Types.hpp"
@@ -2591,7 +2589,8 @@ namespace IGC
         }
 
         {
-            int status = vKernel->AppendVISA3dSampler(
+        int status = -1; //VISA_FAILURE;
+            status = vKernel->AppendVISA3dSampler(
                 ConvertSubOpcode(subOpcode, zeroLOD),
                 feedbackEnable, // pixel null mask
                 cpsEnable,
@@ -2883,6 +2882,11 @@ namespace IGC
         }
         imm_data |= RM_bits;
 
+        if (IGC_IS_FLAG_ENABLED(deadLoopForFloatException))
+        {
+            imm_data |= 0x200; //Cr0 , bit 9 to enable float exception trap
+        }
+
         // If we are in the default mode no need to set the CR
         if (imm_data != 0)
         {
@@ -3122,6 +3126,7 @@ namespace IGC
                 || platform->getPlatformInfo().eProductFamily == IGFX_ROCKETLAKE
                 || platform->getPlatformInfo().eProductFamily == IGFX_ALDERLAKE_S
                 || platform->getPlatformInfo().eProductFamily == IGFX_ALDERLAKE_P
+                || platform->getPlatformInfo().eProductFamily == IGFX_ALDERLAKE_N
                )
             {
                 return GENX_TGLLP;
@@ -3965,15 +3970,8 @@ namespace IGC
         }
 
         bool EnableBarrierInstCounterBits = false;
-        if (context->type == ShaderType::HULL_SHADER)
-        {
-            EnableBarrierInstCounterBits = true;
-        }
         bool preserveR0 = false;
-        if (context->type == ShaderType::PIXEL_SHADER)
-        {
-            preserveR0 = !static_cast<CPixelShader*>(m_program)->IsLastPhase();
-        }
+
         bool isOptDisabled = context->getModuleMetaData()->compOpt.OptDisable;
 
         // Set up options. This must be done before creating any variable/instructions
@@ -4174,36 +4172,46 @@ namespace IGC
         if (context->m_instrTypes.hasDebugInfo)
         {
             SaveOption(vISA_GenerateDebugInfo, true);
+        }
 
-            if (context->metrics.Enable())
-            {
-                SaveOption(vISA_GenerateKernelInfo, true);
-                SaveOption(vISA_EmitLocation, true);
-            }
+        if (context->metrics.Enable())
+        {
+            SaveOption(vISA_GenerateKernelInfo, true);
+            SaveOption(vISA_EmitLocation, true);
         }
 
         if (canAbortOnSpill)
         {
             SaveOption(vISA_AbortOnSpill, true);
-            if (AvoidRetryOnSmallSpill())
+            if (AvoidRetryOnSmallSpill())  // only applied to pixel shader
             {
                 // 2 means #spill/fill is roughly 1% of #inst
                 // ToDo: tune the threshold
                 if (m_program->m_dispatchSize == SIMDMode::SIMD8)
                     SaveOption(vISA_AbortOnSpillThreshold, IGC_GET_FLAG_VALUE(SIMD8_SpillThreshold) * 2);
-
                 else if (m_program->m_dispatchSize == SIMDMode::SIMD16)
+                {
+                    if (m_program->m_Platform->getGRFSize() >= 64)
+                        SaveOption(vISA_AbortOnSpillThreshold, IGC_GET_FLAG_VALUE(SIMD8_SpillThreshold) * 2);
+                    else
+                        SaveOption(vISA_AbortOnSpillThreshold, IGC_GET_FLAG_VALUE(SIMD16_SpillThreshold) * 2);
+                }
+                else
                     SaveOption(vISA_AbortOnSpillThreshold, IGC_GET_FLAG_VALUE(SIMD16_SpillThreshold) * 2);
             }
         }
 
-        if (context->type == ShaderType::OPENCL_SHADER && m_program->m_dispatchSize == SIMDMode::SIMD8)
+        if (context->type == ShaderType::OPENCL_SHADER)
         {
             // AllowSpill is set to false if -cl-intel-no-spill internal option was passed from OpenCL Runtime.
             // It has been implemented to avoid scratch space usage for scheduler kernel.
             if (AllowSpill)
             {
-                SaveOption(vISA_AbortOnSpillThreshold, IGC_GET_FLAG_VALUE(SIMD8_SpillThreshold) * 2);
+                if (m_program->m_dispatchSize == SIMDMode::SIMD8)
+                    SaveOption(vISA_AbortOnSpillThreshold, IGC_GET_FLAG_VALUE(SIMD8_SpillThreshold) * 2);
+                else if (m_program->m_Platform->getGRFSize() >= 64 &&
+                         m_program->m_dispatchSize == SIMDMode::SIMD16)
+                    SaveOption(vISA_AbortOnSpillThreshold, IGC_GET_FLAG_VALUE(SIMD8_SpillThreshold) * 2);
             }
         }
 
@@ -4548,13 +4556,19 @@ namespace IGC
         {
             SaveOption(vISA_UseOldSubRoutineAugIntf, true);
         }
-        if (IGC_IS_FLAG_ENABLED(FastCompileRA) && !hasStackCall)
+        if (IGC_IS_FLAG_ENABLED(FastCompileRA)
+            && (!hasStackCall || (IGC_GET_FLAG_VALUE(PartitionUnit) & 0x3) != 0))
         {
             SaveOption(vISA_FastCompileRA, true);
         }
-        if (IGC_IS_FLAG_ENABLED(HybridRAWithSpill) && !hasStackCall)
+        if (IGC_IS_FLAG_ENABLED(HybridRAWithSpill)
+            && (!hasStackCall || (IGC_GET_FLAG_VALUE(PartitionUnit) & 0x3) != 0))
         {
             SaveOption(vISA_HybridRAWithSpill, true);
+        }
+        if ((IGC_GET_FLAG_VALUE(PartitionUnit) & 0x3) != 0)
+        {
+            SaveOption(vISA_Partitioning, true);
         }
         if (IGC_IS_FLAG_ENABLED(DumpPayloadToScratch))
         {
@@ -4619,12 +4633,7 @@ namespace IGC
             SaveOption(vISA_QuickTokenAllocation, true);
         }
 
-        if (IGC_IS_FLAG_ENABLED(EnableSWSBStitch) ||
-            (context->type == ShaderType::PIXEL_SHADER &&
-             static_cast<CPixelShader*>(m_program)->GetPhase() == PSPHASE_PIXEL))
-        {
-            SaveOption(vISA_SWSBStitch, true);
-        }
+
 
         if (IGC_IS_FLAG_ENABLED(DisableRegDistDep))
         {
@@ -4808,7 +4817,6 @@ namespace IGC
         // TODO: Re-enable SendFusion when VMask is enabled. The hardware should support this, but
         //  more investigation needs to be done on whether simply replacing sr0.2 with sr0.3 is enough.
         if (IGC_IS_FLAG_ENABLED(EnableSendFusion) &&
-            !(context->type == ShaderType::PIXEL_SHADER && static_cast<CPixelShader*>(m_program)->NeedVMask()) &&
             m_program->GetContext()->platform.supportSplitSend() &&
             m_program->m_dispatchSize == SIMDMode::SIMD8 &&
             (IGC_GET_FLAG_VALUE(EnableSendFusion) == FLAG_LEVEL_2 ||   // 2: force send fusion
@@ -4911,6 +4919,7 @@ namespace IGC
         {
             SaveOption(vISA_writeCombine, false);
         }
+
 
     } // InitVISABuilderOptions
 
@@ -5414,9 +5423,14 @@ namespace IGC
     bool CEncoder::AvoidRetryOnSmallSpill() const
     {
         CodeGenContext* context = m_program->GetContext();
-        return context->type == ShaderType::PIXEL_SHADER &&
-            (m_program->m_dispatchSize == SIMDMode::SIMD8 || m_program->m_dispatchSize == SIMDMode::SIMD16) &&
-            context->m_retryManager.IsFirstTry();
+        if (context->type == ShaderType::PIXEL_SHADER && context->m_retryManager.IsFirstTry())
+        {
+            if (m_program->m_Platform->getGRFSize() >= 64)
+                return true;
+            else
+                return m_program->m_dispatchSize == SIMDMode::SIMD8 || m_program->m_dispatchSize == SIMDMode::SIMD16;
+        }
+        return false;
     }
 
     void CEncoder::CreateLocalSymbol(const std::string& kernelName, vISA::GenSymType type,
@@ -6671,7 +6685,7 @@ namespace IGC
     void CEncoder::Gather4ScaledNd(CVariable* dst,
         const ResourceDescriptor& resource,
         CVariable* offset,
-        unsigned nd) {
+        unsigned nd, unsigned Mask) {
 
         VISA_StateOpndHandle* surfaceOpnd = GetVISASurfaceOpnd(resource);
         VISA_PredOpnd* predOpnd = GetFlagOperand(m_encoderState.m_flag);
@@ -6682,13 +6696,15 @@ namespace IGC
         int val = 0;
         V(vKernel->CreateVISAImmediate(globalOffsetOpnd, &val, ISA_TYPE_UD));
 
+        if (!Mask)
+            Mask = BIT(nd) - 1;
         V(vKernel->AppendVISASurfAccessGather4Scatter4ScaledInst(
             ISA_GATHER4_SCALED,
             predOpnd,
             GetAluEMask(dst),
             visaExecSize(offset->IsUniform() ? lanesToSIMDMode(offset->GetNumberElement()) :
                 m_encoderState.m_simdSize),
-            ConvertChannelMaskToVisaType(BIT(nd) - 1),
+            ConvertChannelMaskToVisaType(Mask),
             surfaceOpnd,
             globalOffsetOpnd,
             addressOpnd, dstOpnd));
@@ -6725,10 +6741,10 @@ namespace IGC
 
     void CEncoder::Gather4Scaled(CVariable* dst,
         const ResourceDescriptor& resource,
-        CVariable* offset)
+        CVariable* offset, unsigned Mask)
     {
         unsigned nd = getNumChannels(dst);
-        Gather4ScaledNd(dst, resource, offset, nd);
+        Gather4ScaledNd(dst, resource, offset, nd, Mask);
     }
 
     void CEncoder::Scatter4Scaled(CVariable* src,
@@ -7625,7 +7641,35 @@ namespace IGC
         }
         else if (surfaceType == ESURFACE_SCRATCH)
         {
-            return GetSourceOperandNoModifier(bti);
+            {
+                // For scratch surface, we need to shr the surface state offset coming in R0.5 by 4
+                //      This is because the scratch offset is passed in via r0.5[31:10],
+                //      but the BSS/SS descriptor expects the offset in [31:6] bits, thus we must shift it right by 4
+                VISA_GenVar* r0Var = nullptr;
+                V(vKernel->GetPredefinedVar(r0Var, PREDEFINED_R0));
+
+                VISA_VectorOpnd* surfOpnd = nullptr;
+                V(vKernel->CreateVISASrcOperand(surfOpnd, r0Var, MODIFIER_NONE, 0, 1, 0, 0, 5));
+
+                VISA_VectorOpnd* surfOpndShrDst = nullptr;
+                VISA_VectorOpnd* shrOpnd = nullptr;
+                uint16_t imm_data = 4;
+
+                V(vKernel->CreateVISAImmediate(shrOpnd, &imm_data, ISA_TYPE_UW));
+                CVariable* surfOpndShrVar = m_program->GetNewVariable(1, ISA_TYPE_UD, EALIGN_DWORD, true, "SurfaceOpnd");
+                V(vKernel->CreateVISADstOperand(surfOpndShrDst, GetVISAVariable(surfOpndShrVar), 1, 0, 0));
+                V(vKernel->AppendVISAArithmeticInst(
+                    ISA_SHR,
+                    nullptr,
+                    false,
+                    vISA_EMASK_M1_NM,
+                    EXEC_SIZE_1,
+                    surfOpndShrDst,
+                    surfOpnd,
+                    shrOpnd));
+
+                return GetSourceOperandNoModifier(surfOpndShrVar);
+            }
         }
         else
         {

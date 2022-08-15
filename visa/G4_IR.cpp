@@ -223,6 +223,7 @@ G4_INST::G4_INST(
     G4_Operand* s1,
     G4_Operand* s2,
     G4_Operand* s3,
+    G4_Operand* s4,
     G4_InstOpts opt) :
     op(o), dst(d), predicate(prd), mod(m), option(opt),
     useInstList(irb.getAllocator()),
@@ -240,6 +241,7 @@ G4_INST::G4_INST(
     srcs[1] = s1;
     srcs[2] = s2;
     srcs[3] = s3;
+    srcs[4] = s4;
 
     dead = false;
     skipPostRA = false;
@@ -252,6 +254,7 @@ G4_INST::G4_INST(
     resetRightBound(s1);
     resetRightBound(s2);
     resetRightBound(s3);
+    resetRightBound(s4);
     computeRightBound(predicate);
     computeRightBound(mod);
 
@@ -260,6 +263,7 @@ G4_INST::G4_INST(
     associateOpndWithInst(s1, this);
     associateOpndWithInst(s2, this);
     associateOpndWithInst(s3, this);
+    associateOpndWithInst(s4, this);
     associateOpndWithInst(predicate, this);
     associateOpndWithInst(mod, this);
 }
@@ -298,6 +302,7 @@ G4_InstSend::G4_InstSend(
     setSrc(extDesc, 3);
     md->setExecSize(size);
 }
+
 
 void G4_INST::setOpcode(G4_opcode opcd)
 {
@@ -950,6 +955,11 @@ bool G4_INST::isMathPipeInst() const
         return true;
     }
 
+    if (isDFInstruction())
+    {
+        if (builder.getPlatform() == Xe_MTL)
+            return true;
+    }
 
     return false;
 }
@@ -2368,6 +2378,13 @@ bool G4_INST::canPropagateTo(
         }
     }
 
+    if ((useInst_op == G4_rol || useInst_op == G4_ror) && opndNum == 0 &&
+        (TypeSize(dstType) != TypeSize(srcType) || TypeSize(dstType) != TypeSize(useType)))
+    {
+        // rotation's src0 is sensitive to its type size. No prop if type sizes are different.
+        return false;
+    }
+
     // In general, to check whether that MOV could be propagated:
     //
     //  dst/T1 = src/T0;
@@ -2934,6 +2951,13 @@ bool G4_INST::canHoistTo(const G4_INST *defInst, bool simdBB) const
             // Disable it; otherwise shift's mode is changed illegally!
             return false;
         }
+    }
+
+    if ((defInst->opcode() == G4_rol || defInst->opcode() == G4_ror) &&
+        (TypeSize(defDstType) != TypeSize(srcType) || TypeSize(defDstType) != TypeSize(dstType)))
+    {
+        // rotate's dst is sensitive to its size. Make sure operand's size remains unchanged.
+        return false;
     }
 
     // Cannot do hoisting if the use inst has src modifier.

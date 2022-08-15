@@ -770,7 +770,7 @@ bool BIImport::runOnModule(Module& M)
                     // Load function address from the table index
                     Value* FP = builder.CreateGEP(FPTablePtr, builder.getInt32(tableIndex));
                     FP = builder.CreateLoad(FP);
-                    IGC_ASSERT(FP->getType()->isPointerTy() && cast<PointerType>(FP->getType())->getElementType()->isFunctionTy());
+                    IGC_ASSERT(FP->getType()->isPointerTy() && cast<PointerType>(FP->getType())->getPointerElementType()->isFunctionTy());
                     // Call the loaded function address
                     SmallVector<Value*, 8> Args;
                     for (unsigned i = 1; i < IGCLLVM::getNumArgOperands(CI); i++)
@@ -1173,7 +1173,8 @@ bool PreBIImportAnalysis::runOnModule(Module& M)
                 isCandidate = true;
               }
 
-              if (isCandidate && fmulInst->getNumUses() > 1) {
+              // used to be: fmulInst->getNumUses() > 1
+              if (isCandidate && fmulInst->hasNUsesOrMore(2)) {
                 Value::use_iterator fmulUse = fmulInst->use_begin();
                 Value::use_iterator fmulUseEnd = fmulInst->use_end();
 
