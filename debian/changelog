@@ -1,4 +1,4 @@
-intel-graphics-compiler (1.0.11485-1) UNRELEASED; urgency=medium
+intel-graphics-compiler (1.0.11702.1-1) UNRELEASED; urgency=medium
 
   * New upstream release.
   * fix-using-prebuilt-spirv-tools.diff, typos.patch: Dropped, upstream.
