@@ -14,7 +14,7 @@ Build-Depends: debhelper-compat (= 13),
  spirv-tools,
 # keep the clang/llvm version in sync
  clang-11,
- intel-vc-intrinsics-11-dev (>= 0.5.0),
+ intel-vc-intrinsics-11-dev,
  liblld-11-dev,
  libllvmspirvlib-11-dev,
  libopencl-clang-11-dev,
