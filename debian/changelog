@@ -3,6 +3,7 @@ intel-graphics-compiler (1.0.11702.1-3) UNRELEASED; urgency=medium
   * control: Re-add version to intel-vc-intrinsics build-dep, it now provides
     a versioned virtual package.
   * control: Build with llvm 14.  (Closes: #1004883)
+  * Restore and refresh typos.patch.
   * Update Lintian overrides.
 
  -- Andreas Beckmann <anbe@debian.org>  Sun, 21 Aug 2022 01:08:00 +0200
