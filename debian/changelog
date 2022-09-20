@@ -1,3 +1,9 @@
+intel-graphics-compiler (1.0.11702.4-1) UNRELEASED; urgency=medium
+
+  * New upstream release.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Tue, 20 Sep 2022 11:06:10 +0300
+
 intel-graphics-compiler (1.0.11702.1-3) experimental; urgency=medium
 
   * control: Re-add version to intel-vc-intrinsics build-dep, it now provides
