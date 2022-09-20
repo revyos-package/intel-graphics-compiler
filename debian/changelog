@@ -1,3 +1,9 @@
+intel-graphics-compiler (1.0.11702.4-2) unstable; urgency=medium
+
+  * Upload to unstable.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Tue, 20 Sep 2022 14:46:33 +0300
+
 intel-graphics-compiler (1.0.11702.4-1) experimental; urgency=medium
 
   * New upstream release.
