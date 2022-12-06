@@ -6,6 +6,8 @@ intel-graphics-compiler (1.0.12504.6-1) UNRELEASED; urgency=medium
 
   [ Timo Aaltonen ]
   * New upstream release.
+  * patches: Disable typos.patch, it doesn't apply, is hard to maintain
+    and isn't sent upstream.
 
  -- Andreas Beckmann <anbe@debian.org>  Tue, 08 Nov 2022 16:35:32 +0100
 
