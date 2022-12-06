@@ -1,4 +1,4 @@
-intel-graphics-compiler (1.0.12504.6-1) UNRELEASED; urgency=medium
+intel-graphics-compiler (1.0.12504.6-1) unstable; urgency=medium
 
   [ Andreas Beckmann ]
   * Add salsa-ci.yml.
@@ -9,7 +9,7 @@ intel-graphics-compiler (1.0.12504.6-1) UNRELEASED; urgency=medium
   * patches: Disable typos.patch, it doesn't apply, is hard to maintain
     and isn't sent upstream.
 
- -- Andreas Beckmann <anbe@debian.org>  Tue, 08 Nov 2022 16:35:32 +0100
+ -- Timo Aaltonen <tjaalton@debian.org>  Tue, 06 Dec 2022 11:27:47 +0200
 
 intel-graphics-compiler (1.0.11702.15-1) unstable; urgency=medium
 
