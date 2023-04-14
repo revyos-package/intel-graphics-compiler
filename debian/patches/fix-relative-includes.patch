@@ -1,0 +1,15 @@
+Author: Andreas Beckmann <anbe@debian.org>
+Description: fix relative #include paths
+Bug: https://github.com/intel/intel-graphics-compiler/issues/260
+
+--- a/IGC/AdaptorOCL/OCL/sp/sp_g8.cpp
++++ b/IGC/AdaptorOCL/OCL/sp/sp_g8.cpp
+@@ -38,7 +38,7 @@ SPDX-License-Identifier: MIT
+ 
+ #include "../../../Compiler/CodeGenPublic.h"
+ 
+-#include "../../../visa/include/visaBuilder_interface.h"
++#include "../../../../visa/include/visaBuilder_interface.h"
+ 
+ #include <algorithm>
+ #include <cstdint>
