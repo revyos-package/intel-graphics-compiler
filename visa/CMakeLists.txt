@@ -15,6 +15,16 @@
 
 include(Functions.cmake)
 
+# TODO: Move this to a common file?
+# Get the latest commit hash
+execute_process(
+    COMMAND git rev-parse HEAD
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    OUTPUT_VARIABLE GIT_COMMIT_HASH
+    OUTPUT_STRIP_TRAILING_WHITESPACE)
+
+add_definitions(-DGIT_COMMIT_HASH=\"${GIT_COMMIT_HASH}\")
+
 #none of the values about 32/64 are being propogated down
 #and BuildSetup.cmake is not part of IGC enviroment
 #so setting it manually
@@ -227,6 +237,7 @@ set(GenX_Common_Sources_External_Other
   G4_Verifier.cpp
   GraphColor.cpp
   HWConformity.cpp
+  IncrementalRA.cpp
   InstSplit.cpp
   JitterDataStruct.cpp
   LinearScanRA.cpp
@@ -239,6 +250,7 @@ set(GenX_Common_Sources_External_Other
   PhyRegUsage.cpp
   PointsToAnalysis.cpp
   PreDefinedVars.cpp
+  PrologEpilog.cpp
   RPE.cpp
   ReduceExecSize.cpp
   RegAlloc.cpp
@@ -249,6 +261,7 @@ set(GenX_Common_Sources_External_Other
   SpillCleanup.cpp
   SpillCode.cpp
   SpillManagerGMRF.cpp
+  SWWA.cpp
   TranslationInterface.cpp
   VISAKernelImpl.cpp
   VarSplit.cpp
@@ -316,6 +329,7 @@ set(GenX_Common_Headers
   G4_Declare.h
   G4_IR.hpp
   G4_Kernel.hpp
+  G4_MsgOpDefs.hpp
   G4_Opcode.h
   G4_Operand.h
   G4_Register.h

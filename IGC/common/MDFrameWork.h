@@ -1,6 +1,6 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (C) 2017-2022 Intel Corporation
+Copyright (C) 2017-2023 Intel Corporation
 
 SPDX-License-Identifier: MIT
 
@@ -19,6 +19,7 @@ SPDX-License-Identifier: MIT
 #include <climits>
 #include "common/LLVMWarningsPush.hpp"
 #include <llvm/ADT/MapVector.h>
+#include <llvm/ADT/SetVector.h>
 #include "common/LLVMWarningsPop.hpp"
 
 #include "AdaptorCommon/RayTracing/API/MemoryStyleEnum.h" // ^MDFramework^: ../AdaptorCommon/RayTracing/API
@@ -376,6 +377,8 @@ namespace IGC
         unsigned VISAPreSchedRPThreshold           = 0;
         unsigned SetLoopUnrollThreshold            = 0;
         bool UnsafeMathOptimizations                    = false;
+        bool disableCustomUnsafeOpts                    = false;
+        bool disableReducePow                           = false;
         bool FiniteMathOnly                             = false;
         bool FastRelaxedMath                            = false;
         bool DashGSpecified                             = false;
@@ -426,11 +429,15 @@ namespace IGC
         bool DisableCPSOmaskWA                          = false;
 
         bool DisableFastestGopt                         = false;
-        bool WaForceHalfPromotion                       = false;
+        bool WaForceHalfPromotionComputeShader          = false;
+        bool WaForceHalfPromotionPixelVertexShader      = false;
         bool DisableConstantCoalescing                  = false;
         bool EnableUndefAlphaOutputAsRed                = true;
         bool WaEnableALTModeVisaWA                      = false;
         bool NewSpillCostFunction                       = false;
+        bool ForceLargeGRFNum4RQ                        = false;
+        bool DisableEUFusion                            = false;
+        bool DisableFDivToFMulInvOpt                    = false;
     };
 
     enum class ThreadIDLayout
@@ -466,6 +473,9 @@ namespace IGC
         bool forceTileYWalk = false;
         // enable atomic branch optimization
         bool atomicBranch = false;
+        // enable compute walk order optimization
+        bool walkOrderEnabled = false;
+        unsigned int walkOrderOverride = 0;
         // resource index for hf packing (resourceRangeID, indexIntoRange)
         std::vector<std::vector<unsigned int>> ResForHfPacking;
 
@@ -588,7 +598,7 @@ namespace IGC
     struct InlineProgramScopeBuffer
     {
         int alignment = 0;
-        unsigned allocSize = 0;
+        size_t allocSize = 0;
         std::vector<unsigned char> Buffer;
     };
 
@@ -659,7 +669,7 @@ namespace IGC
         std::map<uint32_t, std::array<uint32_t, 8>> inlineDynTextures;
         std::vector<InlineResInfo> inlineResInfoData;
         ImmConstantInfo immConstant;
-        std::set<llvm::GlobalVariable*> stringConstants;
+        llvm::SetVector<llvm::GlobalVariable*> stringConstants;
         std::vector<InlineProgramScopeBuffer> inlineConstantBuffers;
         std::vector<InlineProgramScopeBuffer> inlineGlobalBuffers;
         std::vector<PointerProgramBinaryInfo> GlobalPointerProgramBinaryInfos;
@@ -688,9 +698,13 @@ namespace IGC
         bool statefulResourcesNotAliased = false;
         bool disableMixMode = false;
 
+        // When true, it means that GenericAddressResolution pass has resolved
+        // some memory accesses.
+        bool genericAccessesResolved = false;
+
         unsigned int privateMemoryPerWI = 0;
 
-        std::map<llvm::Function*, unsigned int> PrivateMemoryPerFG;
+        llvm::MapVector<llvm::Function*, unsigned int> PrivateMemoryPerFG;
 
         // List of optimizations to disable at a module level
         std::set<std::string> m_OptsToDisable;
@@ -710,5 +724,5 @@ namespace IGC
     bool isCallStackHandler(const IGC::FunctionMetaData &funcMD);
 
     // User annotations query functions
-    unsigned extractAnnotatedNumThreads(const IGC::FunctionMetaData& funcMD);
+    int extractAnnotatedNumThreads(const IGC::FunctionMetaData& funcMD);
 }

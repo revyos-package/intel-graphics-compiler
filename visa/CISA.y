@@ -1,6 +1,6 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (C) 2017-2021 Intel Corporation
+Copyright (C) 2017-2023 Intel Corporation
 
 SPDX-License-Identifier: MIT
 
@@ -218,6 +218,19 @@ std::vector<attr_gen_struct*> AttrOptVar;
         VISA_opnd               *regs[6];
         LSC_ADDR                 addr;
     } lsc_addr_operand;
+    struct {
+        VISA_opnd               *surface;
+        // for UNTYPED
+        //  simple:  regs[0] = reg addr
+        //  strided: regs[0] = base; regs[1] = strided
+        //  block2d: regs = {surfBase,surfWidth,surfHeight,surfPitch,surfX,surfY}
+        //
+        // for TYPED: {U, V, R, sample index/LOD}
+        // for TYPED block2d: regs = {BlockStartX, BlockStartY}
+        VISA_opnd               *regs[6];
+        int                     immOffsets[2];
+        LSC_ADDR                 addr;
+    } lsc_block2d_addr_operand;
     LSC_ADDR_SIZE              lsc_addr_size;
     LSC_ADDR_TYPE              lsc_addr_type;
     VISA_opnd                 *lsc_addr_surface_ident; // vec. opnd imm or reg
@@ -572,7 +585,7 @@ std::vector<attr_gen_struct*> AttrOptVar;
 %type <lsc_addr_model>         LscRegAddrModel
 %type <lsc_addr_operand>       LscUntypedAddrOperand
 %type <lsc_addr_operand>       LscUntypedStridedAddrOperand
-%type <lsc_addr_operand>       LscUntypedBlock2dAddrOperand
+%type <lsc_block2d_addr_operand> LscUntypedBlock2dAddrOperand
 %type <lsc_addr_operand>       LscTypedAddrOperand
 %type <lsc_addr_operand>       LscTypedOneAddrOperand
 %type <lsc_addr_operand>       LscTypedTwoAddrOperand
@@ -582,9 +595,11 @@ std::vector<attr_gen_struct*> AttrOptVar;
 %type <lsc_addr_type>          LscRegAddrModelKind
 %type <intval>                 LscAddrImmOffsetOpt
 %type <intval>                 LscAddrImmScaleOpt
-%type <lsc_addr_surface_ident> LscVectorOpRegOrImm
+%type <lsc_addr_surface_ident> LscVectorOpRegOrImm32
+%type <lsc_addr_surface_ident> LscVectorOpRegOrImm64
 %type <lsc_addr_surface_ident> LscVectorOpReg
-%type <lsc_addr_surface_ident> LscVectorOpImm
+%type <lsc_addr_surface_ident> LscVectorOpImm32
+%type <lsc_addr_surface_ident> LscVectorOpImm64
 
 // data syntax; e.g. V13:u32x4t
 %type <lsc_data_operand>       LscDataOperand
@@ -1649,6 +1664,8 @@ LscUntypedBlock2dLoad:
             $6.reg,      // dst
             $7.regs,     // src0 surface info / addrs
             nullptr,     // src1
+            $7.immOffsets[0],
+            $7.immOffsets[1],
             CISAlineno);
     }
 
@@ -1725,13 +1742,15 @@ LscUntypedBlock2dStore:
             nullptr,     // dst
             $6.regs,     // src0 addrs
             $7.reg,      // src1
+            $6.immOffsets[0],
+            $6.immOffsets[1],
             CISAlineno);
     }
 
 // EXAMPLES:
-//     lsc_atomic_iinc.ugm   VRESULT:u32  flat[VADDR]:a64       V0     V0
-//     lsc_atomic_iinc.ugml  VRESULT:u32  flat[VADDR]:a64       V0     V0
-//     lsc_atomic_iadd.slm   VRESULT:u32  flat[VADDR+0x10]:a32  VSRC1  V0
+//     lsc_atomic_iinc.ugm   VRESULT:d32  flat[VADDR]:a64        %null     %null
+//     lsc_atomic_iinc.ugml  VRESULT:d32  flat[VADDR]:a64        %null     %null
+//     lsc_atomic_iadd.slm   VRESULT:d32  flat[VADDR+0x10]:a32   VSRC1     %null
 LscUntypedAtomic:
 //  1         2                    3                       4             5
     Predicate LSC_ATOMIC_MNEMONIC  LSC_SFID_UNTYPED_TOKEN  LscCacheOpts  ExecSize
@@ -1936,8 +1955,8 @@ LscUntypedAddrOperand:
 LscUntypedStridedAddrOperand:
 //  1               2      3                  4
     LscAddrModelOpt LBRACK LscAddrImmScaleOpt LscPayloadNonNullReg
-//    5                    6     7                   8      9
-      LscAddrImmOffsetOpt  COMMA LscVectorOpRegOrImm RBRACK LSC_ADDR_SIZE_TK
+//    5                    6     7                     8      9
+      LscAddrImmOffsetOpt  COMMA LscVectorOpRegOrImm32 RBRACK LSC_ADDR_SIZE_TK
     {
         $$ = {$1.surface,{$4,$7},{$1.type,(int)$3,(int)$5,$9}};
     }
@@ -1946,6 +1965,7 @@ LscUntypedStridedAddrOperand:
         $$.regs[1] = nullptr;
     }
 
+
 // e.g. flat[VBASE(0,0),VSWIDTH(1,0),VSHEIGHT(1,0),VPITCH(1,0),VX(0,4),VY(0,5)]
 LscUntypedBlock2dAddrOperand:
 //  1            2
@@ -1953,21 +1973,40 @@ LscUntypedBlock2dAddrOperand:
 //            3 (surfaceAddr)
               LscVectorOpReg
 //      4     5 (surfaceWidth)
-        COMMA LscVectorOpRegOrImm
+        COMMA LscVectorOpRegOrImm32
 //      6     7 (surfaceHeight)
-        COMMA LscVectorOpRegOrImm
+        COMMA LscVectorOpRegOrImm32
 //      8     9 (surfacePitch)
-        COMMA LscVectorOpRegOrImm
+        COMMA LscVectorOpRegOrImm32
+//      10    11 (baseX)          12
+        COMMA LscVectorOpReg LscAddrImmOffsetOpt
+//      13    14 (baseY)          15
+        COMMA LscVectorOpReg LscAddrImmOffsetOpt
+//      16
+        RBRACK
+    {
+        $$ = {nullptr,{$3,$5,$7,$9,$11,$14},{(int)$12, (int)$15},{LSC_ADDR_TYPE_FLAT,1,0,LSC_ADDR_SIZE_64b}};
+    }
+    |
+//  1            2
+    LSC_AM_FLAT  LBRACK
+//            3 (surfaceAddr)
+              LscVectorOpReg
+//      4     5 (surfaceWidth)
+        COMMA LscVectorOpRegOrImm32
+//      6     7 (surfaceHeight)
+        COMMA LscVectorOpRegOrImm32
+//      8     9 (surfacePitch)
+        COMMA LscVectorOpRegOrImm32
 //      10    11 (baseX)
-        COMMA LscVectorOpRegOrImm
+        COMMA LscVectorOpImm32
 //      12    13 (baseY)
-        COMMA LscVectorOpRegOrImm
+        COMMA LscVectorOpImm32
 //      14
         RBRACK
     {
-        $$ = {nullptr,{$3,$5,$7,$9,$11,$13},{LSC_ADDR_TYPE_FLAT,1,0,LSC_ADDR_SIZE_64b}};
+        $$ = {nullptr,{$3,$5,$7,$9,$11,$13},{0, 0},{LSC_ADDR_TYPE_FLAT,1,0,LSC_ADDR_SIZE_64b}};
     }
-
 LscTypedOneAddrOperand:
 // just U
 //  1               2
@@ -2045,7 +2084,7 @@ LscTypedFourAddrOperand:
     }
 
 LscTypedAddrOperand:
-  LscTypedOneAddrOperand
+    LscTypedOneAddrOperand
   | LscTypedTwoAddrOperand
   | LscTypedThreeAddrOperand
   | LscTypedFourAddrOperand
@@ -2074,7 +2113,7 @@ LscAddrModelOpt:
 
 LscRegAddrModel:
     // address models that take a reg parameter
-    LscRegAddrModelKind  LPAREN  LscVectorOpRegOrImm  RPAREN {
+    LscRegAddrModelKind  LPAREN  LscVectorOpRegOrImm32  RPAREN {
         $$ = {$1,$3};
     }
 
@@ -2083,12 +2122,18 @@ LscRegAddrModelKind:
   | LSC_AM_SS  {$$ = LSC_ADDR_TYPE_SS;}
   | LSC_AM_BTI {$$ = LSC_ADDR_TYPE_BTI;}
 
-LscVectorOpRegOrImm: LscVectorOpReg | LscVectorOpImm
+LscVectorOpRegOrImm32: LscVectorOpReg | LscVectorOpImm32
+LscVectorOpRegOrImm64: LscVectorOpReg | LscVectorOpImm64
 
-LscVectorOpImm:
+LscVectorOpImm32:
     IntExp {
-        $$ = pBuilder->CISA_create_immed($1,ISA_TYPE_UD, CISAlineno);
+        $$ = pBuilder->CISA_create_immed($1, ISA_TYPE_UD, CISAlineno);
     }
+LscVectorOpImm64:
+    IntExp {
+        $$ = pBuilder->CISA_create_immed($1, ISA_TYPE_UQ, CISAlineno);
+    }
+
 
 LscVectorOpReg:
     Var {

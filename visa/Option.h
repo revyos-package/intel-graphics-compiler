@@ -34,6 +34,10 @@ enum Stepping {
 enum EntryType {
   ET_UNINIT = 0,
   ET_BOOL,
+  // like ET_BOOL, except that when specified without a value in command line
+  // (e.g., "-foo"), it set the option to true instead of flipping its default
+  // value.
+  ET_BOOL_TRUE,
   ET_INT32,
   ET_2xINT32,
   ET_INT64,
@@ -51,63 +55,61 @@ union EntryValue {
 struct VISAOptionsEntry {
   EntryType type = ET_UNINIT;
   EntryValue val;
-  EntryType getType(void) const { return type; }
-  virtual void dump(void) const { std::cerr << "BASE"; }
-  virtual ~VISAOptionsEntry() {}
-};
-
-struct VISAOptionsEntryBool : VISAOptionsEntry {
-  VISAOptionsEntryBool(bool Val) {
+  EntryType getType() const { return type; }
+  void setBool(bool Val) {
     val.boolean = Val;
     type = ET_BOOL;
   }
-  virtual void dump(void) const override {
-    std::cerr << std::left << std::setw(10)
-              << ((val.boolean) ? "true" : "false");
-  }
-  bool getVal(void) const { return val.boolean; }
-};
-struct VISAOptionsEntryUint32 : VISAOptionsEntry {
-  VISAOptionsEntryUint32(uint32_t Val) {
+  void setUint32(uint32_t Val) {
     val.int32 = Val;
     type = ET_INT32;
   }
-  virtual void dump(void) const override {
-    std::cerr << std::left << std::setw(10) << val.int32;
-  }
-  uint32_t getVal(void) const { return val.int32; }
-};
-struct VISAOptionsEntryUint64 : VISAOptionsEntry {
-  VISAOptionsEntryUint64(uint64_t Val) {
+  void setUint64(uint64_t Val) {
     val.int64 = Val;
     type = ET_INT64;
   }
-  virtual void dump(void) const override {
-    std::cerr << std::left << std::setw(10) << val.int64;
-  }
-  uint64_t getVal(void) const { return val.int64; }
-};
-struct VISAOptionsEntryCstr : VISAOptionsEntry {
-  VISAOptionsEntryCstr(const char *Val) {
+  void setCStr(const char *Val) {
     val.cstr = Val;
     type = ET_CSTR;
   }
-  virtual void dump(void) const override {
-    if (val.cstr) {
-      std::cerr << std::left << std::setw(10) << val.cstr;
-    } else {
-      std::cerr << std::left << std::setw(10) << "NULL";
-    }
+  bool getBool() const {
+    vASSERT(type == ET_BOOL);
+    return val.boolean;
   }
-  const char *getVal(void) const { return val.cstr; }
+  uint32_t getUint32() const {
+    vASSERT(type == ET_INT32);
+    return val.int32;
+  }
+  uint64_t getUint64() const {
+    vASSERT(type == ET_INT64);
+    return val.int64;
+  }
+  const char *getCStr() const {
+    vASSERT(type == ET_CSTR);
+    return val.cstr;
+  }
+  void dump() const {
+    std::cerr << std::left << std::setw(10);
+    if (type == ET_BOOL)
+      std::cerr << ((val.boolean) ? "true" : "false");
+    else if (type == ET_INT32)
+      std::cerr << val.int32;
+    else if (type == ET_INT64)
+      std::cerr << val.int64;
+    else if (type == ET_CSTR)
+      std::cerr << (val.cstr ? val.cstr : "NULL");
+    else
+      std::cerr << "NULL";
+  }
+  virtual ~VISAOptionsEntry() {}
 };
 
 class Options {
   std::unordered_map<std::string, vISAOptions> argToOption;
   const char *vISAOptionsToStr[vISA_NUM_OPTIONS];
-  void initializeArgToOption(void);
-  void initialize_vISAOptionsToStr(void);
-  void initialize_m_vISAOptions(void);
+  void initializeArgToOption();
+  void initialize_vISAOptionsToStr();
+  void initialize_m_vISAOptions();
 
 public:
   Options();
@@ -163,36 +165,30 @@ private:
     // The TYPE
     EntryType type;
     // This holds the actual value
-    VISAOptionsEntry *value;
+    VISAOptionsEntry value;
     // This holds the default value
-    VISAOptionsEntry *defaultValue;
+    VISAOptionsEntry defaultValue;
     // The error message to show when argument is badly formed
     const char *errorMsg;
     // This is set to TRUE if this option is passed as an argument
     bool argIsSet;
+    // Behavior for a bool flag without value (e.g., "-foo"). TRUE means we flip
+    // the default value, FALSE means we set the option to true.
+    bool flipBoolDefaultVal;
 
-    VISAOptionsLine(void) {
+    VISAOptionsLine() {
       argStr = (const char *)nullptr;
       type = ET_UNINIT;
-      value = nullptr;
-      defaultValue = nullptr;
       errorMsg = nullptr;
       argIsSet = false;
+      flipBoolDefaultVal = true;
     }
     // Debug print
-    void dump(void) const {
+    void dump() const {
       std::cerr << std::setw(30) << argStr << " [" << argIsSet << "] ";
-      if (value) {
-        value->dump();
-      } else {
-        std::cerr << std::left << std::setw(10) << "NULL";
-      }
+      value.dump();
       std::cerr << ", (default:";
-      if (defaultValue) {
-        defaultValue->dump();
-      } else {
-        std::cerr << std::left << std::setw(10) << "NULL";
-      }
+      defaultValue.dump();
       std::cerr << ")";
     }
   };
@@ -205,30 +201,21 @@ private:
 
   // The main structure where we hold the options, their "-argument string",
   // their assigned values, their default values etc.
-  // It is a map from vISAOptions->VISAOptionsLine
+  // It is a vector of VISAOptionsLine indexed by the vISAOptions enum.
   class VISAOptionsDB {
   private:
+    // Parent pointer.
     Options *options = nullptr;
-    std::unordered_map<vISAOptions, VISAOptionsLine, vISAOptionsHash>
-        optionsMap;
-    // Check if KEY has already a value assigned to it
-    void freeIfAlreadySet(vISAOptions key, bool dontCheckNull = true) {
-      // If already set, free tha last one
-      auto it = optionsMap.find(key);
-      if (it != optionsMap.end()) {
-        if (dontCheckNull || it->second.value != nullptr) {
-          delete it->second.value;
-        }
-      }
-    }
+    std::vector<VISAOptionsLine> optionsMap;
 
   public:
     // Debug print all the options
     void dump(void) const {
-      for (auto pair : optionsMap) {
-        const VISAOptionsLine &line = pair.second;
+      for (int i = 0; i < static_cast<int>(vISA_NUM_OPTIONS); ++i) {
+        const VISAOptionsLine &line = optionsMap[i];
         std::cerr << std::left << std::setw(34)
-                  << options->get_vISAOptionsToStr(pair.first) << ": ";
+                  << options->get_vISAOptionsToStr(static_cast<vISAOptions>(i))
+                  << ": ";
         line.dump();
         std::cerr << "\n";
       }
@@ -239,38 +226,30 @@ private:
     void setArgSetByUser(vISAOptions key) { optionsMap[key].argIsSet = true; }
     // Set the value of the option
     void setBool(vISAOptions key, bool val) {
-      freeIfAlreadySet(key);
-      optionsMap[key].value = new VISAOptionsEntryBool(val);
+      optionsMap[key].value.setBool(val);
     }
     void setUint32(vISAOptions key, uint32_t val) {
-      freeIfAlreadySet(key);
-      optionsMap[key].value = new VISAOptionsEntryUint32(val);
+      optionsMap[key].value.setUint32(val);
     }
     void setUint64(vISAOptions key, uint64_t val) {
-      freeIfAlreadySet(key);
-      optionsMap[key].value = new VISAOptionsEntryUint64(val);
+      optionsMap[key].value.setUint64(val);
     }
     void setCstr(vISAOptions key, const char *val) {
-      freeIfAlreadySet(key, false);
-      if (!val) {
-        optionsMap[key].value = nullptr;
-      } else {
-        optionsMap[key].value = new VISAOptionsEntryCstr(val);
-      }
+      optionsMap[key].value.setCStr(val);
     }
 
     // Set the value of the option
     void setDefaultBool(vISAOptions key, bool val) {
-      optionsMap[key].defaultValue = new VISAOptionsEntryBool(val);
+      optionsMap[key].defaultValue.setBool(val);
     }
     void setDefaultUint32(vISAOptions key, uint32_t val) {
-      optionsMap[key].defaultValue = new VISAOptionsEntryUint32(val);
+      optionsMap[key].defaultValue.setUint32(val);
     }
     void setDefaultUint64(vISAOptions key, uint64_t val) {
-      optionsMap[key].defaultValue = new VISAOptionsEntryUint64(val);
+      optionsMap[key].defaultValue.setUint64(val);
     }
     void setDefaultCstr(vISAOptions key, const char *val) {
-      optionsMap[key].defaultValue = new VISAOptionsEntryCstr(val);
+      optionsMap[key].defaultValue.setCStr(val);
     }
 
     // Set the "-fooBarOption"
@@ -288,68 +267,46 @@ private:
       optionsMap[key].errorMsg = errorMsg;
     }
 
+    void setFlipBoolDefaultVal(vISAOptions key, bool val) {
+      vASSERT(optionsMap[key].type == ET_BOOL);
+      optionsMap[key].flipBoolDefaultVal = val;
+    }
+
+    bool getFlipBoolDefaultVal(vISAOptions key) const {
+      return optionsMap[key].flipBoolDefaultVal;
+    }
+
     // Get the argument string "-fooArg"
     const char *getArgStr(vISAOptions key) const {
-      auto it = optionsMap.find(key);
-      if (it != optionsMap.end()) {
-        const char *argStr = it->second.argStr;
-        return argStr;
-      } else {
-        return "UNDEFINED";
-      }
+      return optionsMap[key].argStr;
     }
 
     // Get the type of KEY
-    EntryType getType(vISAOptions key) const {
-      vASSERT(optionsMap.count(key));
-      return optionsMap.at(key).type;
-    }
+    EntryType getType(vISAOptions key) const { return optionsMap.at(key).type; }
 
     // Get the type of KEY
     const char *getErrorMsg(vISAOptions key) const {
-      vASSERT(optionsMap.count(key));
       return optionsMap.at(key).errorMsg;
     }
 
     // Get the values
+    // Note that value is guaranteed to be set already because we initialize all
+    // vISAOptions' values to their default when constructing the Option object.
     bool getBool(vISAOptions key) const {
-      vASSERT(optionsMap.count(key));
-      const VISAOptionsEntry *value = optionsMap.at(key).value;
-      vISA_ASSERT(value->getType() == ET_BOOL, "Bad Type");
-      const VISAOptionsEntryBool *Bool =
-          static_cast<const VISAOptionsEntryBool *>(value);
-      vISA_ASSERT(Bool, "Uninitialized?");
-      return Bool->getVal();
+      const VISAOptionsEntry &value = optionsMap.at(key).value;
+      return value.getBool();
     }
     uint32_t getUint32(vISAOptions key) const {
-      vASSERT(optionsMap.count(key));
-      const VISAOptionsEntry *value = optionsMap.at(key).value;
-      vISA_ASSERT(value->getType() == ET_INT32, "Bad Type");
-      const VISAOptionsEntryUint32 *Int32 =
-          static_cast<const VISAOptionsEntryUint32 *>(value);
-      vISA_ASSERT(Int32, "Uninitialized?");
-      return Int32->getVal();
+      const VISAOptionsEntry &value = optionsMap.at(key).value;
+      return value.getUint32();
     }
     uint64_t getUint64(vISAOptions key) const {
-      vASSERT(optionsMap.count(key));
-      const VISAOptionsEntry *value = optionsMap.at(key).value;
-      vISA_ASSERT(value->getType() == ET_INT64, "Bad Type");
-      const VISAOptionsEntryUint64 *Int64 =
-          static_cast<const VISAOptionsEntryUint64 *>(value);
-      vISA_ASSERT(Int64, "Uninitialized?");
-      return Int64->getVal();
+      const VISAOptionsEntry &value = optionsMap.at(key).value;
+      return value.getUint64();
     }
     const char *getCstr(vISAOptions key) const {
-      vASSERT(optionsMap.count(key));
-      const VISAOptionsEntry *value = optionsMap.at(key).value;
-      if (!value) {
-        return nullptr;
-      }
-      vISA_ASSERT(value->getType() == ET_CSTR, "Bad Type");
-      const VISAOptionsEntryCstr *Cstr =
-          static_cast<const VISAOptionsEntryCstr *>(value);
-      // vISA_ASSERT(Cstr, "Bad option type OR uninit");
-      return Cstr->getVal();
+      const VISAOptionsEntry &value = optionsMap.at(key).value;
+      return value.getCStr();
     }
 
     // TRUE if the options is passed as a cmd line argument
@@ -358,52 +315,25 @@ private:
     }
     // Get defaults
     bool getDefaultBool(vISAOptions key) const {
-      vASSERT(optionsMap.count(key));
-      const VISAOptionsEntry *defValue = optionsMap.at(key).defaultValue;
-      vISA_ASSERT(defValue->getType() == ET_BOOL, "Bad Type");
-      const VISAOptionsEntryBool *Bool =
-          static_cast<const VISAOptionsEntryBool *>(defValue);
-      vISA_ASSERT(Bool, "Uninitialized?");
-      return Bool->getVal();
+      const VISAOptionsEntry &defValue = optionsMap.at(key).defaultValue;
+      return defValue.getBool();
     }
     uint32_t getDefaultUint32(vISAOptions key) const {
-      vASSERT(optionsMap.count(key));
-      const VISAOptionsEntry *defValue = optionsMap.at(key).defaultValue;
-      vISA_ASSERT(defValue->getType() == ET_INT32, "Bad Type");
-      const VISAOptionsEntryUint32 *Int32 =
-          static_cast<const VISAOptionsEntryUint32 *>(defValue);
-      vISA_ASSERT(Int32, "Uninitialized?");
-      return Int32->getVal();
+      const VISAOptionsEntry &defValue = optionsMap.at(key).defaultValue;
+      return defValue.getUint32();
     }
     uint64_t getDefaultUint64(vISAOptions key) const {
-      vASSERT(optionsMap.count(key));
-      const VISAOptionsEntry *defValue = optionsMap.at(key).defaultValue;
-      vISA_ASSERT(defValue->getType() == ET_INT64, "Bad Type");
-      const VISAOptionsEntryUint64 *Int64 =
-          static_cast<const VISAOptionsEntryUint64 *>(defValue);
-      vISA_ASSERT(Int64, "Uninitialized?");
-      return Int64->getVal();
+      const VISAOptionsEntry &defValue = optionsMap.at(key).defaultValue;
+      return defValue.getUint64();
     }
     const char *getDefaultCstr(vISAOptions key) const {
-      vASSERT(optionsMap.count(key));
-      const VISAOptionsEntry *defValue = optionsMap.at(key).defaultValue;
-      vISA_ASSERT(defValue->getType() == ET_CSTR, "Bad Type");
-      const VISAOptionsEntryCstr *Cstr =
-          static_cast<const VISAOptionsEntryCstr *>(defValue);
-      vISA_ASSERT(Cstr, "Uninitialized?");
-      return Cstr->getVal();
+      const VISAOptionsEntry &defValue = optionsMap.at(key).defaultValue;
+      return defValue.getCStr();
     }
-    VISAOptionsDB() {}
-    VISAOptionsDB(Options *opt) { options = opt; }
+    explicit VISAOptionsDB(Options *opt)
+        : optionsMap(static_cast<int>(vISA_NUM_OPTIONS)), options(opt) {}
 
-    ~VISAOptionsDB(void) {
-      for (auto pair : optionsMap) {
-        auto *val = pair.second.value;
-        delete val;
-        auto *defVal = pair.second.defaultValue;
-        delete defVal;
-      }
-    }
+    ~VISAOptionsDB() {}
   };
 
   VISAOptionsDB m_vISAOptions;

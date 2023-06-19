@@ -132,6 +132,7 @@ class G4_Operand {
   // field (mainly for bound?)
   friend class G4_INST;
   friend class G4_InstSend;
+  friend class G4_InstIntrinsic;
   friend class G4_FillIntrinsic;
   friend class G4_SpillIntrinsic;
   friend class G4_PseudoMovInstrinsic;
@@ -205,6 +206,9 @@ public:
   unsigned short getTypeSize() const { return TypeSize(getType()); }
 
   bool isImm() const { return kind == Kind::immediate; }
+  bool isVectImm() const {
+    return (isImm() && (type == Type_UV || type == Type_V || type == Type_VF));
+  }
   bool isSrcRegRegion() const { return kind == Kind::srcRegRegion; }
   bool isDstRegRegion() const { return kind == Kind::dstRegRegion; }
   bool isRegRegion() const {
@@ -370,6 +374,7 @@ public:
   void setAccRegSel(G4_AccRegSel value) { accRegSel = value; }
   G4_AccRegSel getAccRegSel() const { return accRegSel; }
   bool isAccRegValid() const { return accRegSel != ACC_UNDEFINED; }
+  bool isPhysicallyAllocatedRegVar(bool includeAccRegSel = true) const;
 
   unsigned getLinearizedStart();
   unsigned getLinearizedEnd();
@@ -554,8 +559,10 @@ public:
   void setModifier(G4_SrcModifier m) { mod = m; }
 
   bool sameSrcRegRegion(G4_SrcRegRegion &rgn);
+
   void emit(std::ostream &output) override;
   void emitRegVarOff(std::ostream &output);
+  void emitRegVarOffNoRegion(std::ostream &output);
 
   bool isAreg() const { return base->isAreg(); }
   bool isNullReg() const { return base->isNullReg(); }

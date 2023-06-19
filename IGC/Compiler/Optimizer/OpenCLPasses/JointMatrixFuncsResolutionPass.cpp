@@ -19,9 +19,13 @@ SPDX-License-Identifier: MIT
 #include <llvm/IR/Function.h>
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/IRBuilder.h>
+#include <llvm/ADT/Sequence.h>
+#include <llvm/ADT/STLExtras.h>
+#include <llvm/ADT/PostOrderIterator.h>
 
 #include "llvmWrapper/IR/DerivedTypes.h"
 #include "llvmWrapper/IR/Module.h"
+#include "llvmWrapper/Support/Alignment.h"
 #include "common/LLVMWarningsPop.hpp"
 
 #include "Probe/Assertion.h"
@@ -52,14 +56,25 @@ bool JointMatrixFuncsResolutionPass::runOnFunction(Function& F)
     m_Ctx = getAnalysis<CodeGenContextWrapper>().getCodeGenContext();
     PlaceholderInstructions.clear();
     ResolvedValues.clear();
+    ResolvedTypes.clear();
     InstsToErase.clear();
     Changed = false;
 
-    visit(F);
+    // Use reverse post order traversal to reduce level or recursion
+    ReversePostOrderTraversal<Function *> RPOT(&F);
+    for (BasicBlock *BB : RPOT)
+        visit(BB);
 
     for (Instruction *I : InstsToErase) {
-        Value *undef = UndefValue::get(I->getType());
-        I->replaceAllUsesWith(undef);
+        if (ResolvedValues[I] && I->getType() == ResolvedValues[I]->getType())
+        {
+            I->replaceAllUsesWith(ResolvedValues[I]);
+        }
+        else
+        {
+            Value *undef = UndefValue::get(I->getType());
+            I->replaceAllUsesWith(undef);
+        }
         I->eraseFromParent();
     }
 
@@ -67,16 +82,24 @@ bool JointMatrixFuncsResolutionPass::runOnFunction(Function& F)
 }
 
 static const char *CommonBIPrefix = "__builtin_spirv_";
-static const char *JointMatrixLoadPrefx  = "__builtin_spirv_OpJointMatrixLoadINTEL";
-static const char *JointMatrixStorePrefx = "__builtin_spirv_OpJointMatrixStoreINTEL";
-static const char *JointMatrixMadPrefx   = "__builtin_spirv_OpJointMatrixMadINTEL";
-static const char *JointMatrixSUMadPrefx = "__builtin_spirv_OpJointMatrixSUMadINTEL";
-static const char *JointMatrixUSMadPrefx = "__builtin_spirv_OpJointMatrixUSMadINTEL";
-static const char *JointMatrixUUMadPrefx = "__builtin_spirv_OpJointMatrixUUMadINTEL";
-static const char *JointMatrixFillPrefx  = "__builtin_spirv_OpCompositeConstructJointMatrixINTEL";
-static const char *JointMatrixWorkItemLengthPrefx = "__builtin_spirv_OpJointMatrixWorkItemLengthINTEL";
-static const char *JointMatrixSliceInsert  = "__builtin_spirv_OpVectorInsertDynamicJointMatrixINTEL";
-static const char *JointMatrixSliceExtract = "__builtin_spirv_OpVectorExtractDynamicJointMatrixINTEL";
+static const char *JointMatrixLoadPrefx  = "JointMatrixLoadINTEL";
+static const char *JointMatrixStorePrefx = "JointMatrixStoreINTEL";
+static const char *JointMatrixMadPrefx   = "JointMatrixMadINTEL";
+static const char *JointMatrixSUMadPrefx = "JointMatrixSUMadINTEL";
+static const char *JointMatrixUSMadPrefx = "JointMatrixUSMadINTEL";
+static const char *JointMatrixUUMadPrefx = "JointMatrixUUMadINTEL";
+static const char *JointMatrixFillPrefx  = "CompositeConstruct";
+static const char *JointMatrixWorkItemLengthPrefx = "JointMatrixWorkItemLengthINTEL";
+static const char *JointMatrixSliceInsert  = "VectorInsertDynamic";
+static const char *JointMatrixSliceExtract = "VectorExtractDynamic";
+static const char *JointMatrixGetCoordPrefx = "JointMatrixGetElementCoordINTEL";
+
+enum {
+    UseMatrixA = 0,
+    UseMatrixB = 1,
+    UseAccumulator = 2,
+    UseMax,
+};
 
 enum {
     LayoutRowMajor,
@@ -251,18 +274,20 @@ bool JointMatrixFuncsResolutionPass::ValidateLoadStore
     return result == ALL_VALID;
 }
 
-std::string JointMatrixFuncsResolutionPass::GetLoadStoreMatrixFuncName
-        (bool isLoad, unsigned operationLayout, const JointMatrixTypeDescription *desc)
-{
+std::string JointMatrixFuncsResolutionPass::GetMatrixFuncName(
+    bool isGetCoord, bool isLoad, unsigned operationLayout,
+    unsigned address_space, const JointMatrixTypeDescription *desc,
+    std::string prefix) {
     /* Treat row major matrices with types not supported by accumulators as
      * PackedA matrices. Both are in row major format. */
     unsigned matrixLayout = desc->layout;
-    if (isLoad && matrixLayout == LayoutRowMajor && desc->bitWidth <= 16) {
+    if (!isGetCoord && isLoad && matrixLayout == LayoutRowMajor &&
+        desc->bitWidth <= 16) {
         matrixLayout = LayoutPackedA;
     }
 
-    std::string name
-      = isLoad ? "__builtin_spriv_OpJointMatrixLoadINTEL_" : "__builtin_spriv_OpJointMatrixStoreINTEL_";
+    std::string name = prefix;
+
     switch (matrixLayout) {
       case LayoutPackedA:
         name += "PackedA_";
@@ -278,29 +303,34 @@ std::string JointMatrixFuncsResolutionPass::GetLoadStoreMatrixFuncName
         IGC_ASSERT_MESSAGE(false, "Unexpected matrix layout.");
     }
 
-    /* New version of the JointMatrix specification uses single value to
-     * represent PackedA and PackedB layouts, named simply; 'Packed'. The value
-     * of 'Packed' is equal to the value of legacy 'PackedA'. If we meet
-     * load/store that tries to load/store packedA data into B matrix, we can
-     * assume that the intended layout was PackedB (load of A into B would be illegal).
-     * This should be removed when we stop to support the legacy version of the spec. */
-    if (matrixLayout == LayoutPackedB && operationLayout == LayoutPackedA) {
-        operationLayout = LayoutPackedB;
-    }
+    if (!isGetCoord) {
+        /* New version of the JointMatrix specification uses single value to
+         * represent PackedA and PackedB layouts, named simply; 'Packed'. The
+         * value of 'Packed' is equal to the value of legacy 'PackedA'. If we
+         * meet load/store that tries to load/store packedA data into B matrix,
+         * we can assume that the intended layout was PackedB (load of A into B
+         * would be illegal). This should be removed when we stop to support the
+         * legacy version of the spec. */
 
-    switch (operationLayout) {
-      case LayoutRowMajor:
-        name += "RowMajor_";
-        break;
-      case LayoutColumnMajor:
-        name += "ColumnMajor_";
-        break;
-      case LayoutPackedB:
-        IGC_ASSERT_MESSAGE(matrixLayout == operationLayout, "Unexpected load/store layout.");
-        name += "PackedB_";
-        break;
-      default:
-        IGC_ASSERT_MESSAGE(false, "Unexpected load/store layout.");
+        if (matrixLayout == LayoutPackedB && operationLayout == LayoutPackedA) {
+            operationLayout = LayoutPackedB;
+        }
+
+        switch (operationLayout) {
+        case LayoutRowMajor:
+            name += "RowMajor_";
+            break;
+        case LayoutColumnMajor:
+            name += "ColumnMajor_";
+            break;
+        case LayoutPackedB:
+            IGC_ASSERT_MESSAGE(matrixLayout == operationLayout,
+                               "Unexpected load/store layout.");
+            name += "PackedB_";
+            break;
+        default:
+            IGC_ASSERT_MESSAGE(false, "Unexpected load/store layout.");
+        }
     }
 
     /* On PVC due to SIMD16 different SIMD lane contribution is used for matrix A.
@@ -316,13 +346,26 @@ std::string JointMatrixFuncsResolutionPass::GetLoadStoreMatrixFuncName
     name += "_";
 
     if (desc->bitWidth == 8) {
-        name += "i8_";
+        name += "i8";
     } else if (desc->bitWidth == 16) {
-        name += "i16_";
+        name += "i16";
     } else if (desc->bitWidth == 32) {
-        name += "i32_";
+        name += "i32";
     } else {
         IGC_ASSERT_MESSAGE(false, "Unexpected matrix element size.");
+    }
+
+    // We are done creating the mangling for get_coord here()
+    if (isGetCoord)
+        return name;
+
+    // Continue mangling for load and store
+    if (address_space == ADDRESS_SPACE_GLOBAL) {
+        name += "_global_";
+    } else if (address_space == ADDRESS_SPACE_LOCAL) {
+        name += "_local_";
+    } else {
+        name += "_generic_";
     }
 
     if (isLoad) {
@@ -337,7 +380,8 @@ static unsigned parseNumber(StringRef name, unsigned *offset) {
 #define BUFFER_SIZE 16
     char buffer[BUFFER_SIZE+1];
     unsigned count = 0;
-    while (std::isdigit(name[*offset]) && count < BUFFER_SIZE) {
+    const unsigned lenght = name.size();
+    while (*offset < lenght && std::isdigit(name[*offset]) && count < BUFFER_SIZE) {
         buffer[count] = name[*offset];
         *offset += 1;
         count += 1;
@@ -348,7 +392,7 @@ static unsigned parseNumber(StringRef name, unsigned *offset) {
 
 /* This function extracts metadata from JointMatrix type names. They use the
  * following convention: intel.joint_matrix_acc_8x8_i32_t */
-static void parseMatrixTypeName(const Type *opaqueType, JointMatrixTypeDescription *outDescription) {
+static bool parseMatrixTypeNameLegacy(const Type *opaqueType, JointMatrixTypeDescription *outDescription) {
     const PointerType *ptrType = cast<PointerType>(opaqueType);
     StringRef name = IGCLLVM::getNonOpaquePtrEltTy(ptrType)->getStructName();
 
@@ -374,6 +418,136 @@ static void parseMatrixTypeName(const Type *opaqueType, JointMatrixTypeDescripti
 
     offset += 1; /* Skip type specifier, [f|i] */
     outDescription->bitWidth = parseNumber(name, &offset);
+    return true;
+}
+
+/* %spirv.JointMatrixINTEL._int_8_16_3_3_2   --> C
+ * %spirv.JointMatrixINTEL._char_8_32_0_3_0  --> A
+ * %spirv.JointMatrixINTEL._char_32_16_2_3_1 --> B
+ * type, rows, cols, layout, scope, use
+ * */
+bool JointMatrixFuncsResolutionPass::ParseMatrixTypeName(const Type *opaqueType, JointMatrixTypeDescription *outDescription) {
+    const PointerType *ptrType = cast<PointerType>(opaqueType);
+    StringRef name = IGCLLVM::getNonOpaquePtrEltTy(ptrType)->getStructName();
+    StringRef fullName = name;
+
+    if (name.startswith("intel.joint_matrix")) {
+        return parseMatrixTypeNameLegacy(opaqueType, outDescription);
+    }
+
+    if (!name.consume_front("spirv.JointMatrixINTEL._")) {
+        std::string msg = "Unexpected Joint Matrix type name: '"
+                        + fullName.str() + "', unknown prefix.";
+        m_Ctx->EmitError(msg.c_str(), nullptr);
+        return false;
+    }
+
+    if (name.consume_front("int_")) {
+        outDescription->bitWidth = 32;
+        outDescription->isFloating = false;
+    } else if (name.consume_front("short_")) {
+        outDescription->bitWidth = 16;
+        outDescription->isFloating = false;
+    } else if (name.consume_front("char_")) {
+        outDescription->bitWidth = 8;
+        outDescription->isFloating = false;
+    } else if (name.consume_front("float_")) {
+        outDescription->bitWidth = 32;
+        outDescription->isFloating = true;
+    } else if (name.consume_front("half_")) {
+        outDescription->bitWidth = 16;
+        outDescription->isFloating = true;
+    } else {
+        std::string msg = "Unexpected Joint Matrix type name: '"
+                        + fullName.str() + "', unknown element type.";
+        m_Ctx->EmitError(msg.c_str(), nullptr);
+        return false;
+    }
+
+    unsigned offset = 0;
+    outDescription->rows = parseNumber(name, &offset);
+    offset += 1; /* Skip delimiter, '_'. */
+    outDescription->columns = parseNumber(name, &offset);
+    offset += 1; /* Skip delimiter, '_' */
+    unsigned legacyLayout = parseNumber(name, &offset);
+    offset += 1; /* Skip delimiter, '_' */
+    unsigned scope = parseNumber(name, &offset);
+    offset += 1; /* Skip delimiter, '_' */
+    unsigned use = parseNumber(name, &offset);
+
+    /* currently unused: */
+    (void)legacyLayout; (void)scope;
+
+    if (use == UseMatrixA) {
+        outDescription->layout = LayoutPackedA;
+    } else if (use == UseMatrixB) {
+        outDescription->layout = LayoutPackedB;
+    } else if (use == UseAccumulator) {
+        outDescription->layout = LayoutRowMajor;
+    } else {
+        std::string msg = "Unexpected Joint Matrix type name: '"
+                        + fullName.str() + "', unknown use type.";
+        return false;
+    }
+    return true;
+}
+
+static bool isMatrixType(const Type *type)
+{
+    if (!type->isPointerTy())
+        return false;
+
+    Type *eltType = IGCLLVM::getNonOpaquePtrEltTy(type);
+    if (!eltType || !eltType->isStructTy())
+        return false;
+
+    StringRef name = eltType->getStructName();
+    if (name.startswith("intel.joint_matrix"))
+        return true;
+
+    return false;
+}
+
+static void PreOrderTypeTraversal(const Type *t, std::unordered_set<const Type *> &set)
+{
+    if (set.find(t) != set.end())
+        return;
+
+    if (const StructType *ST = dyn_cast<StructType>(t))
+    {
+        set.insert(t);
+        for (auto subT : ST->elements())
+            PreOrderTypeTraversal(subT, set);
+        return;
+    }
+
+    if (const ArrayType *AT = dyn_cast<ArrayType>(t))
+    {
+        set.insert(t);
+        return PreOrderTypeTraversal(AT->getElementType(), set);
+    }
+
+    if (const PointerType *PT = dyn_cast<PointerType>(t))
+    {
+        set.insert(t);
+        return PreOrderTypeTraversal(IGCLLVM::getNonOpaquePtrEltTy(PT), set);
+    }
+
+    return;
+}
+
+static bool isOrContainsMatrixType(const Type *root)
+{
+    std::unordered_set<const Type *> set;
+    PreOrderTypeTraversal(root, set);
+
+    for (const auto &t : set)
+    {
+        if (isMatrixType(t))
+            return true;
+    }
+
+    return false;
 }
 
 Type *JointMatrixFuncsResolutionPass::ResolveType(const Type *opaqueType, JointMatrixTypeDescription *outDesc)
@@ -382,7 +556,8 @@ Type *JointMatrixFuncsResolutionPass::ResolveType(const Type *opaqueType, JointM
         "Unexpected type in matrix function resolution.");
 
     JointMatrixTypeDescription desc;
-    parseMatrixTypeName(opaqueType, &desc);
+    bool parseResult = ParseMatrixTypeName(opaqueType, &desc);
+    IGC_ASSERT_EXIT_MESSAGE(parseResult, "Failed to parse matrix type.");
     /* Treat row major matrices with types not supported by accumulators as
      * PackedA matrices. Both are in row major format. */
     if (desc.layout == LayoutRowMajor && desc.bitWidth <= 16) {
@@ -443,18 +618,20 @@ static Type *getIntegerEquivalent(Type *matTy) {
 }
 
 template <class BuilderT>
-static Instruction *shrinkCastVector
-        (BuilderT *builder, IGCLLVM::FixedVectorType *rawMatTy, Instruction *instr) {
+static Instruction *shrinkExpandCastVector(BuilderT *builder,
+                                           IGCLLVM::FixedVectorType *rawMatTy, Value *origVal)
+{
+    SmallVector<IGCLLVM::ShuffleVectorMaskType, 8> mask;
+    llvm::copy(llvm::seq<IGCLLVM::ShuffleVectorMaskType>(
+                   0,
+                   (IGCLLVM::ShuffleVectorMaskType)rawMatTy->getNumElements()),
+               std::back_inserter(mask));
 
-    Value *slice = UndefValue::get(rawMatTy);
-    for (unsigned i = 0; i < rawMatTy->getNumElements(); i++) {
-        Value *value = builder->CreateExtractElement(instr, i);
-        if (value->getType() != rawMatTy->getElementType()) {
-          value = builder->CreateBitCast(value, rawMatTy->getElementType());
-        }
-        slice = builder->CreateInsertElement(slice, value, i);
-    }
-    return dyn_cast<Instruction>(slice);
+    Value *newMat = builder->CreateShuffleVector(origVal,
+                                                 UndefValue::get(origVal->getType()),
+                                                 mask, origVal->getName() + ".shuffle");
+    newMat = builder->CreateBitCast(newMat, rawMatTy, newMat->getName() + ".cast");
+    return cast<Instruction>(newMat);
 }
 
 Instruction *JointMatrixFuncsResolutionPass::ResolveLoad(CallInst *CI)
@@ -470,9 +647,12 @@ Instruction *JointMatrixFuncsResolutionPass::ResolveLoad(CallInst *CI)
     Type *retTy = getIntegerEquivalent(matTy);
 
     Module *M = CI->getParent()->getModule();
+    unsigned address_space = ptrVal->getType()->getPointerAddressSpace();
 
     ValidateLoadStore(true, loadLayout, &desc, CI);
-    std::string funcName = GetLoadStoreMatrixFuncName(true, loadLayout, &desc);
+    std::string funcName =
+        GetMatrixFuncName(false, true, loadLayout, address_space, &desc,
+                          "__builtin_spriv_OpJointMatrixLoadINTEL_");
     FunctionType *funcType = FunctionType::get(retTy, { ptrVal->getType(), strideVal->getType() }, false);
     std::vector<Value *> Args = { ptrVal, strideVal };
 
@@ -480,35 +660,18 @@ Instruction *JointMatrixFuncsResolutionPass::ResolveLoad(CallInst *CI)
 
     IRBuilder builder(CI);
     Instruction *newCall = builder.CreateCall(M->getOrInsertFunction(funcName, funcType), Args, "matrix");
-    newCall->setDebugLoc(CI->getDebugLoc());
     if (retTy != matTy) {
         IGCLLVM::FixedVectorType *rawMatTy = dyn_cast<IGCLLVM::FixedVectorType>(matTy);
         IGCLLVM::FixedVectorType *rawRetTy = dyn_cast<IGCLLVM::FixedVectorType>(retTy);
         if (rawMatTy != nullptr && rawMatTy->getNumElements() < rawRetTy->getNumElements()) {
-            newCall = shrinkCastVector(&builder, rawMatTy, newCall);
+            newCall = shrinkExpandCastVector(&builder, rawMatTy, newCall);
         } else {
             Value *bitcast = builder.CreateBitCast(newCall, matTy, "matrix.load.cast");
             newCall = dyn_cast<Instruction>(bitcast);
         }
-        newCall->setDebugLoc(CI->getDebugLoc());
     }
+    newCall->setDebugLoc(CI->getDebugLoc());
     return newCall;
-}
-
-template <class BuilderT>
-static Instruction *
-expandVector(BuilderT *builder, IGCLLVM::FixedVectorType *rawArgTy,
-             IGCLLVM::FixedVectorType *rawMatTy, Value *origVal) {
-
-  Value *slice = UndefValue::get(rawMatTy);
-  for (unsigned i = 0; i < rawArgTy->getNumElements(); i++) {
-    Value *value = builder->CreateExtractElement(origVal, i);
-    if (value->getType() != rawMatTy->getElementType()) {
-      value = builder->CreateBitCast(value, rawMatTy->getElementType());
-    }
-    slice = builder->CreateInsertElement(slice, value, i);
-  }
-  return dyn_cast<Instruction>(slice);
 }
 
 Instruction *JointMatrixFuncsResolutionPass::ResolveStore(CallInst *CI)
@@ -536,15 +699,19 @@ Instruction *JointMatrixFuncsResolutionPass::ResolveStore(CallInst *CI)
 
       if (rawMatTy != nullptr &&
           rawArgTy->getNumElements() < rawMatTy->getNumElements()) {
-        matVal = expandVector(&builder, rawArgTy, rawMatTy, matVal);
+        matVal = shrinkExpandCastVector(&builder, rawMatTy, matVal);
       } else {
         matVal = BitCastInst::Create(Instruction::BitCast, matVal, matTy,
                                      "matrix.store.cast", CI);
       }
     }
 
+    unsigned address_space = ptrVal->getType()->getPointerAddressSpace();
+
     ValidateLoadStore(false, storeLayout, &desc, CI);
-    std::string funcName = GetLoadStoreMatrixFuncName(false, storeLayout, &desc);
+    std::string funcName =
+        GetMatrixFuncName(false, false, storeLayout, address_space, &desc,
+                          "__builtin_spriv_OpJointMatrixStoreINTEL_");
     FunctionType *funcType =
         FunctionType::get(Type::getVoidTy(M->getContext()),
             { ptrVal->getType(), matTy, strideVal->getType() }, false);
@@ -630,22 +797,36 @@ Instruction *JointMatrixFuncsResolutionPass::ResolveMad(CallInst *CI, unsigned O
 }
 
 static int getResolvedVectorSize(Type *matrixType) {
-    IGCLLVM::FixedVectorType *ty = dyn_cast<IGCLLVM::FixedVectorType>(matrixType);
-    IGC_ASSERT_MESSAGE(ty, "Unexpected type when calculating slice size.");
-    return (int)ty->getNumElements();
+    if (IGCLLVM::FixedVectorType *ty =
+            dyn_cast<IGCLLVM::FixedVectorType>(matrixType)) {
+      return (int)ty->getNumElements();
+    }
+    /*We do not have a vector that has one element, so just return 1*/
+    return 1;
 }
 
 static Type *getResolvedVectorElementType(Type *matrixType) {
-    IGCLLVM::FixedVectorType *ty = dyn_cast<IGCLLVM::FixedVectorType>(matrixType);
-    IGC_ASSERT_MESSAGE(ty, "Unexpected type when calculating slice size.");
-    return ty->getElementType();
+    if (IGCLLVM::FixedVectorType *ty =
+            dyn_cast<IGCLLVM::FixedVectorType>(matrixType)) {
+      return ty->getElementType();
+    }
+    return matrixType;
+}
+
+static unsigned getResolvedVectorElemSize(Type *matrixType) {
+    if (IGCLLVM::FixedVectorType *ty =
+            dyn_cast<IGCLLVM::FixedVectorType>(matrixType)) {
+      return ty->getElementType()->getScalarSizeInBits();
+    }
+    // Not a vector, just a single element.  We Use a single element instead
+    // of using a <1xTy> vector, as OpenCL does not support vector of length
+    // 1.
+    return matrixType->getScalarSizeInBits();
 }
 
 static int getSliceSize(const JointMatrixTypeDescription *desc, Type *matTy) {
-    IGCLLVM::FixedVectorType *ty = dyn_cast<IGCLLVM::FixedVectorType>(matTy);
-    IGC_ASSERT_MESSAGE(ty, "Expecting vector type in calculating slice size");
+    unsigned contribTypeWidth = getResolvedVectorElemSize(matTy);
 
-    unsigned contribTypeWidth = ty->getElementType()->getScalarSizeInBits();
     if (desc->layout == LayoutRowMajor) {
         return desc->rows;
     }
@@ -730,9 +911,16 @@ Value *JointMatrixFuncsResolutionPass::ResolveFill(CallInst *CI) {
         fillValue = builder.CreateLoad(vectorElementType, fillValue);
     }
 
-    Value *slice = UndefValue::get(matTy);
-    for (int i = 0; i < vectorSize; i++) {
-        slice = builder.CreateInsertElement(slice, fillValue, i);
+    Value *slice = fillValue;
+
+    if (IGCLLVM::FixedVectorType *ty =
+            dyn_cast<IGCLLVM::FixedVectorType>(matTy)) {
+        // We create a vector only for rows > 1, as for rows = 1, we have
+        // one signle element instead of a one-element vector.
+        slice = UndefValue::get(matTy);
+        for (int i = 0; i < vectorSize; i++) {
+            slice = builder.CreateInsertElement(slice, fillValue, i);
+        }
     }
 
     InstsToErase.insert(CI);
@@ -749,6 +937,38 @@ Value *JointMatrixFuncsResolutionPass::ResolveWILength(CallInst *CI) {
     CI->replaceAllUsesWith(lenght);
     InstsToErase.insert(CI);
     return lenght;
+}
+
+Instruction *JointMatrixFuncsResolutionPass::ResolveGetCoord(CallInst *CI) {
+    Value *jointMatArg = CI->getArgOperand(0);
+    Value *elemIdx = CI->getArgOperand(1);
+    JointMatrixTypeDescription desc;
+    ResolveType(jointMatArg->getType(), &desc);
+
+    std::string funcName = GetMatrixFuncName(
+        true, false, -1 /*placeholder*/, -1 /*placeholder*/, &desc,
+        "__builtin_spirv_OpJointMatrixGetCoordINTEL_"); // GetCoordMatrixFuncName(&desc);
+
+    IRBuilder builder(CI);
+
+    // Argument type should be a i32??
+    Type *argType = Type::getIntNTy(builder.getContext(), 32);
+    elemIdx = builder.CreateTruncOrBitCast(elemIdx, argType);
+
+    FunctionType *funcType = FunctionType::get(
+        CI->getCalledFunction()->getReturnType(), {argType}, false);
+    std::vector<Value *> Args = {elemIdx};
+
+    Module *M = CI->getParent()->getModule();
+
+    Instruction *newCall = builder.CreateCall(
+        M->getOrInsertFunction(funcName, funcType), Args, "get_coord");
+    newCall->setDebugLoc(CI->getDebugLoc());
+
+    CI->replaceAllUsesWith(newCall);
+    InstsToErase.insert(CI);
+
+    return newCall;
 }
 
 template <class BuilderT>
@@ -776,13 +996,19 @@ Value *JointMatrixFuncsResolutionPass::ResolveSliceInsert(CallInst *CI) {
 
     IRBuilder builder(CI);
     const int sliceSize = getSliceSize(&desc, rawMatTy);
-    const int vectorSize = getResolvedVectorSize(matTy);
+    const int vectorSize = getResolvedVectorSize(rawMatTy);
 
     Value *slice = nullptr;
     if (sliceSize > vectorSize) {
-        Value *element = createSliceExtract(&builder, matrix, index, &desc, rawMatTy);
+        // If rows = 1, we do not need an extract, so directly use the value.
+        Value *element = matrix;
+        if (matTy) {
+            // We have a vector e.g. a matrix with rows > 1
+            element =
+                createSliceExtract(&builder, matrix, index, &desc, rawMatTy);
+        }
         if (!isa<IntegerType>(element->getType())) {
-            unsigned vecElemSize = matTy->getElementType()->getScalarSizeInBits();
+            unsigned vecElemSize = getResolvedVectorElemSize(rawMatTy);
             element = builder.CreateBitCast(element, Type::getIntNTy(builder.getContext(), vecElemSize));
         }
 
@@ -796,7 +1022,7 @@ Value *JointMatrixFuncsResolutionPass::ResolveSliceInsert(CallInst *CI) {
             component = builder.CreateBitCast(component, Type::getIntNTy(builder.getContext(), desc.bitWidth));
         }
 
-        unsigned vecElemSize = matTy->getElementType()->getScalarSizeInBits();
+        unsigned vecElemSize = getResolvedVectorElemSize(rawMatTy);
         component = builder.CreateZExtOrBitCast(component, Type::getIntNTy(builder.getContext(), vecElemSize));
         offset = builder.CreateTruncOrBitCast(offset, Type::getIntNTy(builder.getContext(), vecElemSize));
 
@@ -811,10 +1037,14 @@ Value *JointMatrixFuncsResolutionPass::ResolveSliceInsert(CallInst *CI) {
         component = builder.CreateOr(element, component);
     }
 
-    IntegerType *vectorElementType = dyn_cast<IntegerType>(getResolvedVectorElementType(rawMatTy));
-    component = builder.CreateBitCast(component, vectorElementType);
+    if (IntegerType *vectorElementType = dyn_cast<IntegerType>(getResolvedVectorElementType(rawMatTy)))
+        component = builder.CreateBitCast(component, vectorElementType);
 
-    slice = builder.CreateInsertElement(matrix, component, index);
+    if (matTy) {
+        slice = builder.CreateInsertElement(matrix, component, index);
+    } else {
+        slice = component;
+    }
 
     InstsToErase.insert(CI);
     return slice;
@@ -828,7 +1058,14 @@ Value *JointMatrixFuncsResolutionPass::ResolveSliceExtract(CallInst *CI) {
     Type *matTy = ResolveType(CI->getArgOperand(0)->getType(), &desc);
 
     IRBuilder builder(CI);
-    Value *element = createSliceExtract(&builder, matrix, index, &desc, matTy);
+
+    // If we are dealing with a vector, extract the element, else we have a
+    // single value, we can directly use the value
+    Value *element = matrix;
+    if (IGCLLVM::FixedVectorType *ty =
+            dyn_cast<IGCLLVM::FixedVectorType>(matTy))
+        element = createSliceExtract(&builder, matrix, index, &desc, matTy);
+
     /* Unpacking: */
     const int sliceSize = getSliceSize(&desc, matTy);
     const int vectorSize = getResolvedVectorSize(matTy);
@@ -861,7 +1098,7 @@ void JointMatrixFuncsResolutionPass::InsertPlaceholder(Value *v) {
 
     Type *type = v->getType();
     if (type->isPointerTy()) {
-        type = ResolveType(v->getType(), nullptr);
+        type = ResolveTypes(v->getType());
     }
     if (type->isVoidTy()) {
         return;
@@ -882,43 +1119,45 @@ void JointMatrixFuncsResolutionPass::InsertPlaceholder(Value *v) {
 
 Value *JointMatrixFuncsResolutionPass::ResolveCall(CallInst *CI) {
     Function* func = CI->getCalledFunction();
+    IGC_ASSERT_MESSAGE(func, "Unexpected missing function.");
     if (!func)
         return nullptr;
 
-    IGC_ASSERT_MESSAGE(func, "Unexpected missing function.");
-
     Value *NewValue = nullptr;
     StringRef funcName = func->getName();
-    if (funcName.startswith(JointMatrixLoadPrefx)) {
+    if (funcName.contains(JointMatrixLoadPrefx)) {
         InsertPlaceholder(CI);
         NewValue = ResolveLoad(CI);
-    } else if (funcName.startswith(JointMatrixStorePrefx)) {
+    } else if (funcName.contains(JointMatrixStorePrefx)) {
         InsertPlaceholder(CI);
         NewValue = ResolveStore(CI);
-    } else if (funcName.startswith(JointMatrixMadPrefx)) {
+    } else if (funcName.contains(JointMatrixMadPrefx)) {
         InsertPlaceholder(CI);
         NewValue = ResolveMad(CI, MadOpSS);
-    } else if (funcName.startswith(JointMatrixSUMadPrefx)) {
+    } else if (funcName.contains(JointMatrixSUMadPrefx)) {
         InsertPlaceholder(CI);
         NewValue = ResolveMad(CI, MadOpSU);
-    } else if (funcName.startswith(JointMatrixUSMadPrefx)) {
+    } else if (funcName.contains(JointMatrixUSMadPrefx)) {
         InsertPlaceholder(CI);
         NewValue = ResolveMad(CI, MadOpUS);
-    } else if (funcName.startswith(JointMatrixUUMadPrefx)) {
+    } else if (funcName.contains(JointMatrixUUMadPrefx)) {
         InsertPlaceholder(CI);
         NewValue = ResolveMad(CI, MadOpUU);
-    } else if (funcName.startswith(JointMatrixFillPrefx)) {
+    } else if (funcName.contains(JointMatrixFillPrefx)) {
         InsertPlaceholder(CI);
         NewValue = ResolveFill(CI);
-    } else if (funcName.startswith(JointMatrixWorkItemLengthPrefx)) {
+    } else if (funcName.contains(JointMatrixWorkItemLengthPrefx)) {
         InsertPlaceholder(CI);
         NewValue = ResolveWILength(CI);
-    } else if (funcName.startswith(JointMatrixSliceInsert)) {
+    } else if (funcName.contains(JointMatrixSliceInsert)) {
         InsertPlaceholder(CI);
         NewValue = ResolveSliceInsert(CI);
-    } else if (funcName.startswith(JointMatrixSliceExtract)) {
+    } else if (funcName.contains(JointMatrixSliceExtract)) {
         InsertPlaceholder(CI);
         NewValue = ResolveSliceExtract(CI);
+    } else if (funcName.contains(JointMatrixGetCoordPrefx)) {
+        InsertPlaceholder(CI);
+        NewValue = ResolveGetCoord(CI);
     }
 
     CacheResolvedValue(CI, NewValue);
@@ -939,6 +1178,127 @@ void JointMatrixFuncsResolutionPass::CacheResolvedValue(Value *oldValue, Value *
     ResolvedValues[oldValue] = newValue;
 }
 
+void JointMatrixFuncsResolutionPass::CacheResolvedTypes(Type *oldType, Type *newType)
+{
+    IGC_ASSERT_MESSAGE(newType, "Type should not be null.");
+    if (newType == nullptr)
+        return;
+    ResolvedTypes[oldType] = newType;
+}
+
+Value *JointMatrixFuncsResolutionPass::ResolveGeneric(Instruction *OldInst)
+{
+    InsertPlaceholder(OldInst);
+    Instruction *NewInst = OldInst->clone();
+
+    for (unsigned i = 0; i < NewInst->getNumOperands(); i++)
+    {
+        Value *oldOp = NewInst->getOperand(i);
+        if (!isOrContainsMatrixType(oldOp->getType()))
+            continue;
+
+        NewInst->setOperand(i, Resolve(oldOp));
+    }
+
+    if (GetElementPtrInst *NewGEPI = dyn_cast<GetElementPtrInst>(NewInst))
+    {
+        GetElementPtrInst *OldGEPI = dyn_cast<GetElementPtrInst>(OldInst);
+        NewGEPI->setSourceElementType(ResolveTypes(OldGEPI->getSourceElementType()));
+        NewGEPI->setResultElementType(ResolveTypes(OldGEPI->getResultElementType()));
+    }
+    else if (AllocaInst *NewAlloca = dyn_cast<AllocaInst>(NewInst))
+    {
+        AllocaInst *OldAlloca = dyn_cast<AllocaInst>(OldInst);
+        NewAlloca->setAllocatedType(ResolveTypes(OldAlloca->getAllocatedType()));
+    }
+
+    NewInst->mutateType(ResolveTypes(NewInst->getType()));
+    NewInst->setName(OldInst->getName());
+    NewInst->insertBefore(OldInst);
+    NewInst->setDebugLoc(OldInst->getDebugLoc());
+
+    CacheResolvedValue(OldInst, NewInst);
+    InstsToErase.insert(OldInst);
+    return NewInst;
+}
+
+Type *JointMatrixFuncsResolutionPass::ResolveTypes(llvm::Type *t)
+{
+    if (ResolvedTypes.count(t) > 0)
+        return ResolvedTypes[t];
+
+    if (StructType *ST = dyn_cast<StructType>(t))
+        return ResolveStructType(ST);
+
+    if (ArrayType *AT = dyn_cast<ArrayType>(t))
+        return ResolveArrayType(AT);
+
+    if (PointerType *PT = dyn_cast<PointerType>(t))
+    {
+        if (isMatrixType(t))
+            return ResolveType(t, nullptr);
+        return ResolvePointerType(PT);
+    }
+
+    return t;
+}
+
+Type *JointMatrixFuncsResolutionPass::ResolveStructType(Type *oldType)
+{
+    if (ResolvedTypes.count(oldType) > 0)
+        return ResolvedTypes[oldType];
+
+    StructType *structType = dyn_cast<StructType>(oldType);
+    SmallString<28> name;
+    StructType *newType = StructType::create(oldType->getContext(),
+                                             (structType->getName() +
+                                              ".resolved")
+                                                 .toStringRef(name));
+
+    // caching now to avoid recursion, in case struct contains itself as an element
+    CacheResolvedTypes(oldType, newType);
+
+    SmallVector<Type *, 1> elements;
+    llvm::transform(structType->elements(), std::back_inserter(elements), [&](Type *t)
+                    {
+                        if (isOrContainsMatrixType(t))
+                            return ResolveTypes(t);
+                        return t; });
+    newType->setBody(elements, structType->isPacked());
+
+    return newType;
+}
+
+Type *JointMatrixFuncsResolutionPass::ResolveArrayType(Type *oldType)
+{
+    if (ResolvedTypes.count(oldType) > 0)
+        return ResolvedTypes[oldType];
+
+    ArrayType *arrayType = dyn_cast<ArrayType>(oldType);
+    Type *elemType = arrayType->getElementType();
+    if (!isOrContainsMatrixType(elemType))
+        return oldType;
+
+    Type *newType = ArrayType::get(ResolveTypes(elemType), arrayType->getNumElements());
+    CacheResolvedTypes(oldType, newType);
+    return newType;
+}
+
+Type *JointMatrixFuncsResolutionPass::ResolvePointerType(Type *oldType)
+{
+    if (ResolvedTypes.count(oldType) > 0)
+        return ResolvedTypes[oldType];
+
+    PointerType *ptrType = dyn_cast<PointerType>(oldType);
+    Type *elemType = IGCLLVM::getNonOpaquePtrEltTy(ptrType);
+    if (!isOrContainsMatrixType(elemType))
+        return oldType;
+
+    Type *newType = PointerType::get(ResolveTypes(elemType), ptrType->getAddressSpace());
+    CacheResolvedTypes(oldType, newType);
+    return newType;
+}
+
 Value *JointMatrixFuncsResolutionPass::Resolve(Value *v)
 {
     if (ResolvedValues.count(v) > 0) {
@@ -950,8 +1310,8 @@ Value *JointMatrixFuncsResolutionPass::Resolve(Value *v)
     } else if (PHINode *PN = dyn_cast<PHINode>(v)) {
         unsigned IncomingCount = PN->getNumIncomingValues();
 
-        Type *type = ResolveType(v->getType(), nullptr);
-        PHINode *NewPN = PHINode::Create(type, IncomingCount, "matrix.phi.node", PN);
+        Type *type = ResolveTypes(v->getType());
+        PHINode *NewPN = PHINode::Create(type, IncomingCount, PN->getName(), PN);
         NewPN->setDebugLoc(PN->getDebugLoc());
         CacheResolvedValue(v, NewPN);
 
@@ -963,6 +1323,8 @@ Value *JointMatrixFuncsResolutionPass::Resolve(Value *v)
 
         InstsToErase.insert(PN);
         return NewPN;
+    } else if (Instruction *I = dyn_cast<Instruction>(v)) {
+        return ResolveGeneric(I);
     } else if (isa<UndefValue>(v)) {
         Type *type = ResolveType(v->getType(), nullptr);
         return UndefValue::get(type);
@@ -978,12 +1340,157 @@ void JointMatrixFuncsResolutionPass::visitCallInst(CallInst& CI)
     if (!func)
         return;
 
+    /* Check if already resolved: */
+    if (ResolvedValues.count(&CI) > 0)
+      return;
+
     StringRef funcName = func->getName();
     /* Resolve calls to JointMatrix BIs that haven't been resolved yet. In
      * future when returning and passing matrices by argument is
      * supported also basic block terminators should be used as
      * transformation starting point */
-    if (funcName.startswith(CommonBIPrefix) && ResolvedValues.count(&CI) <= 0) {
+    if (funcName.startswith(CommonBIPrefix)) {
         ResolveCall(&CI);
+        return;
     }
+    if (funcName.startswith("_Z") && funcName.contains("__spirv_JointMatrix")) {
+        ResolveCall(&CI);
+        return;
+    }
+}
+
+void JointMatrixFuncsResolutionPass::visitAllocaInst(AllocaInst &I)
+{
+    if (ResolvedValues.count(&I) > 0)
+        return;
+
+    if (!isOrContainsMatrixType(I.getAllocatedType()))
+        return;
+
+    ResolveGeneric(&I);
+}
+
+void JointMatrixFuncsResolutionPass::visitGetElementPtrInst(GetElementPtrInst &I)
+{
+    if (ResolvedValues.count(&I) > 0)
+        return;
+
+    if (!isOrContainsMatrixType(I.getSourceElementType()))
+        return;
+
+    ResolveGeneric(&I);
+}
+
+void JointMatrixFuncsResolutionPass::visitStoreInst(StoreInst &I)
+{
+    if (ResolvedValues.count(&I) > 0)
+        return;
+
+    Value *val = I.getValueOperand();
+    if (isOrContainsMatrixType(val->getType()))
+    {
+        ResolveGeneric(&I);
+        return;
+    }
+
+    // In cases when Joint Matrix is used in arrays, front end sometimes
+    // inserts pointer manipulations, which are incorrect for
+    // pointers to matrix types. Hence, need to remove ptrtoint
+    // instruciton, which becomes invalid after matrix type resolution.
+    // For example, before resolution, this is valid:
+    // %59 = ptrtoint %intel.joint_matrix_acc_8x16_f32_t addrspace(1)* %23 to i64
+    // After resolution, this is invalid:
+    // %59 = ptrtoint <8 x float> %23 to i64
+    // Since this value is used in store, we need to replace it's usage in store.
+    // The same for bitcast which is done for the Ptr value, where the val is stored.
+    PtrToIntInst *PTI = dyn_cast<PtrToIntInst>(val);
+    BitCastInst *BC = dyn_cast<BitCastInst>(I.getPointerOperand());
+
+    if (PTI == nullptr || !isMatrixType(PTI->getPointerOperand()->getType()) ||
+        !PTI->getDestTy()->isIntegerTy(64) || BC == nullptr)
+        return;
+
+    InsertPlaceholder(&I);
+    Value *PTIOperand = PTI->getOperand(0);
+    Type *newBCElementType = ResolveTypes(
+        dyn_cast<PointerType>(PTIOperand->getType()));
+    PointerType *BCDstType = dyn_cast<PointerType>(BC->getDestTy());
+
+    BitCastInst *newBC = new BitCastInst(Resolve(BC->getOperand(0)),
+                                         PointerType::get(newBCElementType,
+                                                          BCDstType->getPointerAddressSpace()),
+                                         BC->getName(), BC);
+
+    StoreInst *newSI = new StoreInst(Resolve(PTIOperand),
+                                     newBC,
+                                     I.isVolatile(), IGCLLVM::getAlign(I),
+                                     &I);
+
+    newSI->setDebugLoc(I.getDebugLoc());
+    CacheResolvedValue(&I, newSI);
+    InstsToErase.insert(&I);
+
+    // Remove incorrect PtrToInt and BitCast instructions
+    InstsToErase.insert(PTI);
+    InstsToErase.insert(BC);
+}
+
+void JointMatrixFuncsResolutionPass::visitBitCastInst(BitCastInst &I)
+{
+    // In cases when Joint Matrix is used in arrays, front end sometimes
+    // inserts pointer manipulations, which are incorrect for
+    // pointers to matrix types. Hence, need to remove bitcast
+    // instruciton, which becomes invalid after matrix type resolution.
+    // Example:
+    // %25 = bitcast %"struct.sycl::_V1::ext::oneapi::experimental::matrix::joint_matrix.11"* %arrayidx50113.i to i64*
+    // Here we just ignore this BitCast instruction. We will replace the use of value
+    // it returns in visitStoreInst and then remove it.
+    PointerType *srcPtr = dyn_cast<PointerType>(I.getSrcTy());
+    PointerType *dstPtr = dyn_cast<PointerType>(I.getDestTy());
+    if (srcPtr != nullptr && dstPtr != nullptr)
+    {
+        Type *srcPtrType = IGCLLVM::getNonOpaquePtrEltTy(srcPtr);
+        Type *dstPtrType = IGCLLVM::getNonOpaquePtrEltTy(dstPtr);
+
+        StructType *srcStructType = dyn_cast<StructType>(srcPtrType);
+        if (srcStructType != nullptr && srcStructType->getNumElements() == 1)
+        {
+            Type *srcElemType = srcStructType->getElementType(0);
+            if (isMatrixType(srcElemType) && dstPtrType->isIntegerTy(64))
+                return;
+        }
+    }
+
+    if (ResolvedValues.count(&I) > 0)
+        return;
+
+    if (!isOrContainsMatrixType(I.getSrcTy()) && !isOrContainsMatrixType(I.getDestTy()))
+        return;
+
+    ResolveGeneric(&I);
+}
+
+void JointMatrixFuncsResolutionPass::visitPtrToIntInst(PtrToIntInst &I)
+{
+    // In cases when Joint Matrix is used in arrays, front end sometimes
+    // inserts pointer manipulations, which are incorrect for
+    // pointers to matrix types. Hence, need to remove ptrtoint
+    // instruciton, which becomes invalid after matrix type resolution.
+    // For example, before resolution, this is valid:
+    // %59 = ptrtoint %intel.joint_matrix_acc_8x16_f32_t addrspace(1)* %23 to i64
+    // After resolution, this is invalid:
+    // %59 = ptrtoint <8 x float> %23 to i64
+    // Here we just ignore this ptrtoint instruction. We will replace the use of value
+    // it returns in visitStoreInst and then remove it.
+    if (isMatrixType(I.getPointerOperand()->getType()) &&
+        I.getDestTy()->isIntegerTy(64))
+        return;
+
+    if (ResolvedValues.count(&I) > 0)
+        return;
+
+    if (!isOrContainsMatrixType(I.getSrcTy()))
+        return;
+
+    ResolveGeneric(&I);
 }

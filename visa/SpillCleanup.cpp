@@ -67,7 +67,7 @@ G4_INST *CoalesceSpillFills::generateCoalescedFill(G4_SrcRegRegion *header,
       32, "COAL_FILL_%d", kernel.Declares.size());
   auto fillDcl = kernel.fg.builder->createDeclare(
       dclName, G4_GRF, kernel.numEltPerGRF<Type_UD>(), dclSize, Type_UD,
-      DeclareType::CoalescedFill);
+      DeclareType::CoalescedSpillFill);
 
   if (evenAlignDst) {
     fillDcl->setEvenAlign();
@@ -157,7 +157,7 @@ CoalesceSpillFills::createCoalescedSpillDcl(unsigned int payloadSize) {
                                              kernel.Declares.size());
   spillDcl = kernel.fg.builder->createDeclare(
       dclName, G4_GRF, kernel.numEltPerGRF<Type_UD>(), payloadSize, Type_UD,
-      DeclareType::CoalescedSpill);
+      DeclareType::CoalescedSpillFill);
 
   spillDcl->setDoNotSpill();
 
@@ -219,6 +219,8 @@ void CoalesceSpillFills::coalesceSpills(
   f++;
 
   for (auto spill : coalesceableSpills) {
+    gra.incRA.markForIntfUpdate(
+        (*spill)->asSpillIntrinsic()->getPayload()->getTopDcl());
     bb->erase(spill);
   }
   coalesceableSpills.clear();
@@ -261,6 +263,8 @@ void CoalesceSpillFills::coalesceFills(
     vISA_ASSERT((*c)->isFillIntrinsic() &&
                     !isGRFAssigned((*c)->asFillIntrinsic()->getDst()),
                 "cannot coalesce fill with pre-assigned GRF");
+
+    gra.incRA.markForIntfUpdate(fillDst->getTopDcl());
   }
 
   auto leadInst = *coalesceableFills.front();
@@ -916,6 +920,7 @@ void CoalesceSpillFills::fills() {
     unsigned int instRP = 0;
     unsigned int numRowsFillsToCoalesce = 0;
     const auto &splitInsts = LoopVarSplit::getSplitInsts(&gra, bb);
+    bool earlyCoalesce = false;
     for (auto instIter = startIter; instIter != endIter;) {
       auto inst = (*instIter);
 
@@ -956,6 +961,12 @@ void CoalesceSpillFills::fills() {
         instRP = RP;
 
       if (inst->isSpillIntrinsic()) {
+        if (inst->asSpillIntrinsic()->isScatterSpill() &&
+            overlap(inst, fillsToCoalesce)) {
+          // If current intrinsic is scatter spill and ovelaps fills being
+          // tracked, break the coalescing chain
+          earlyCoalesce = true;
+        }
         spills.push_back(instIter);
       } else if (inst->isFillIntrinsic()) {
         // Check if coalescing is possible
@@ -987,10 +998,15 @@ void CoalesceSpillFills::fills() {
         --w;
       }
 
-      if (w == cWindowSize || maxW == cMaxWindowSize || inst == bb->back()) {
+      if (w == cWindowSize || maxW == cMaxWindowSize || inst == bb->back() ||
+          earlyCoalesce) {
         if (fillsToCoalesce.size() > 1) {
-          instIter =
+          auto nextInst =
               analyzeFillCoalescing(fillsToCoalesce, startIter, instIter, bb);
+          if (earlyCoalesce)
+            instIter++;
+          else
+            instIter = nextInst;
         } else if (w == cWindowSize) {
           startIter = instIter;
         } else if (inst == bb->back()) {
@@ -1002,7 +1018,7 @@ void CoalesceSpillFills::fills() {
         numRowsFillsToCoalesce = 0;
         fillsToCoalesce.clear();
         spills.clear();
-
+        earlyCoalesce = false;
         continue;
       }
 
@@ -1121,9 +1137,20 @@ void CoalesceSpillFills::spills() {
             bool fullOverlap = false;
             if (overlap(*instIter, *(*coalIt), fullOverlap)) {
               if (fullOverlap) {
+                gra.incRA.markForIntfUpdate((*(*coalIt))
+                                                ->asSpillIntrinsic()
+                                                ->getPayload()
+                                                ->getTopDcl());
                 // Delete earlier spill since its made redundant
                 // by current spill.
                 bb->erase(*coalIt);
+              }
+
+              if (inst->asSpillIntrinsic()->isScatterSpill()) {
+                // If current spill is scatter and overlaps with other spills,
+                // break the current coalescing chain
+                earlyCoalesce = true;
+                break;
               }
 
               coalIt = spillsToCoalesce.erase(coalIt);
@@ -1131,8 +1158,10 @@ void CoalesceSpillFills::spills() {
             }
             coalIt++;
           }
-          spillsToCoalesce.push_back(instIter);
-          numRowsSpillsToCoalesce += inst->asSpillIntrinsic()->getNumRows();
+          if (!earlyCoalesce) {
+            spillsToCoalesce.push_back(instIter);
+            numRowsSpillsToCoalesce += inst->asSpillIntrinsic()->getNumRows();
+          }
         }
       } else if (inst->isFillIntrinsic()) {
         for (auto coalIt = spillsToCoalesce.begin();
@@ -1171,8 +1200,12 @@ void CoalesceSpillFills::spills() {
       if (w == cWindowSize || maxW == cMaxWindowSize || inst == bb->back() ||
           earlyCoalesce) {
         if (spillsToCoalesce.size() > 1) {
-          instIter =
+          auto nextInst =
               analyzeSpillCoalescing(spillsToCoalesce, startIter, instIter, bb);
+          if (earlyCoalesce)
+            instIter++;
+          else
+            instIter = nextInst;
         } else if (w == cWindowSize) {
           startIter = instIter;
         } else if (inst == bb->back()) {
@@ -1220,14 +1253,12 @@ void CoalesceSpillFills::fixSendsSrcOverlap() {
   // Overlap for sends src operands is not allowed.
   //
   // Fix for following code pattern after spill/fill coalescing:
-  // send (16) COAL_FILL_373(0,0)<1>:ud r0 0xa 0x24c2001:ud{Align1, NoMask} //
-  // #??:$365:%657:&-1 // scratch read, resLen=4, msgLen=1 sends(1) null:ud
-  // COAL_FILL_373(0, 0) COAL_FILL_373(1, 0) 0x4c : ud 0x40680ff : ud{ Align1,
-  // Q1, NoMask } // #??:$365:%365:&-1 // a64 scatt ered write, resLen = 0,
-  // msgLen = 2, extMsgLen = 1
+  // clang-format off
+  // send (16)  COAL_FILL_373(0,0)<1>:ud    r0 0xa 0x24c2001:ud{Align1, NoMask} // scratch read, resLen=4, msgLen=1
+  // sends(1)   null:ud     COAL_FILL_373(0,0)  COAL_FILL_373(1,0) 0x4c:ud 0x40680ff:ud{ Align1,Q1, NoMask } // a64 scattered write, resLen=0, msgLen=2, extMsgLen=1
   //
-  // for CISA:
-  // svm_scatter.1.1 (M1_NM, 1) V441.0 V449.0 /// $365
+  // svm_scatter.1.1 (M1_NM, 1) V441.0 V449.0
+  // clang-format on
   //
   // where V441 and V449 are both scalars of type :uq and :ud respectively
   //
@@ -1260,6 +1291,7 @@ void CoalesceSpillFills::fixSendsSrcOverlap() {
           G4_Declare *copyDcl = kernel.fg.builder->createDeclare(
               dclName, G4_GRF, kernel.numEltPerGRF<Type_UD>(),
               src1->getTopDcl()->getNumRows(), Type_UD);
+          gra.incRA.markForIntfUpdate(src1->getTopDcl());
 
           unsigned int elems = copyDcl->getNumElems();
           short row = 0;
@@ -1319,12 +1351,12 @@ void CoalesceSpillFills::removeRedundantSplitMovs() {
     // as only they are candidates for this pass.
     // Without this, we might end up identifying
     // other raw movs coming from partial write like:
+    // clang-format off
     // add (8) r8.0<1>:q r20.0<4;4,1>:q r4.0<0;1,0>:ud {Align1, Q1}
-    // send(16) r27.0<1>:uw r26 0xa 0x22c1000 : ud{ Align1, NoMask } // scratch
-    // read, fill, offset = 0, resLen=2, msgLen=1 mov(8) r27.0<1> : q r8.0<4; 4,
-    // 1> : q{ Align1, Q1 } sends(16) null : uw r26 r27 0x8a : ud 0x20f1000 :
-    // ud{ Align1, NoMask } // scratch write, spill, offset = 0, resLen=0,
-    // msgLen=1, extMsgLen=2
+    // send (16) r27.0<1>:uw r26 0xa 0x22c1000 : ud{ Align1, NoMask } // scratch read, fill, offset = 0, resLen=2, msgLen=1
+    // mov (8) r27.0<1> q r8.0<4;4,1>:q{ Align1, Q1 }
+    // sends (16) null:uw r26 r27 0x8a:ud 0x20f1000:ud{ Align1, NoMask } // scratch write, spill, offset = 0, resLen=0, msgLen=1, extMsgLen=2
+    // clang-format on
     //
     // Although there is a raw mov before scratch write,
     // it has to be preserved for correctness.
@@ -1461,6 +1493,8 @@ void CoalesceSpillFills::removeRedundantSplitMovs() {
             }
 
             if (success && srcDcl) {
+              gra.incRA.markForIntfUpdate(inst->getSrc(1)->getTopDcl());
+              gra.incRA.markForIntfUpdate(srcDcl);
               // Replace src1 of send with srcDcl
               G4_SrcRegRegion *sendSrc1 = kernel.fg.builder->createSrc(
                   srcDcl->getRegVar(), base, 0,
@@ -1550,6 +1584,7 @@ void CoalesceSpillFills::spillFillCleanup() {
     auto endIt = bb->end();
     const auto &splitInsts = LoopVarSplit::getSplitInsts(&gra, bb);
     unsigned int regPressure = 0;
+    bool scatterSpillCleanup = false;
     for (auto instIt = startIt; instIt != endIt; instIt++) {
       auto inst = (*instIt);
 
@@ -1568,6 +1603,7 @@ void CoalesceSpillFills::spillFillCleanup() {
       if (inst->isFillIntrinsic()) {
         writesPerOffset.clear();
         defs.clear();
+        scatterSpillCleanup = false;
 
         // Store offset, spill inst pair
         unsigned int rowStart, numRows;
@@ -1621,15 +1657,38 @@ void CoalesceSpillFills::spillFillCleanup() {
               break;
             }
 
-            for (unsigned int pRow = pRowStart; pRow != (pRowStart + pNumRows);
-                 pRow++) {
-              auto writeIt = writesPerOffset.find(pRow);
+            bool fullOverlap = false;
+            if (overlap(pInst, inst, fullOverlap)) {
+              if (pInst->asSpillIntrinsic()->isScatterSpill()) {
+                // When a scatter spill is found and it overlaps the fill
+                // being optimized, there are paths:
+                // 1. If there are no other block spills in between, it's safe
+                //    to optimize the current scatter spill and potentially
+                //    others
+                // 2. If there are block spills in between the cleanup search
+                // stops.
+                if (writesPerOffset.empty()) {
+                  scatterSpillCleanup = true;
+                } else if (!scatterSpillCleanup) {
+                  break;
+                }
+              } else {
+                // If block spill is found but there already scatter spills in
+                // between, the cleanup search stops
+                if (scatterSpillCleanup)
+                  break;
+              }
 
-              // Check whether a more recent write was found for this row
-              if (writeIt != writesPerOffset.end())
-                continue;
+              for (unsigned int pRow = pRowStart;
+                   pRow != (pRowStart + pNumRows); pRow++) {
+                auto writeIt = writesPerOffset.find(pRow);
 
-              writesPerOffset.insert(std::make_pair(pRow, pInst));
+                // Check whether a more recent write was found for this row
+                if (writeIt != writesPerOffset.end())
+                  continue;
+
+                writesPerOffset.insert(std::make_pair(pRow, pInst));
+              }
             }
           }
 
@@ -1699,6 +1758,7 @@ void CoalesceSpillFills::spillFillCleanup() {
 
           auto write = writesPerOffset.find(row)->second;
           G4_SrcRegRegion *src1Write = write->getSrc(1)->asSrcRegRegion();
+          gra.incRA.markForIntfUpdate(src1Write->getTopDcl());
           unsigned int writeRowStart = write->asSpillIntrinsic()->getOffset();
           unsigned int diff = row - writeRowStart;
           G4_SrcRegRegion *nSrc = kernel.fg.builder->createSrc(
@@ -1707,6 +1767,8 @@ void CoalesceSpillFills::spillFillCleanup() {
 
           G4_INST *mov = kernel.fg.builder->createMov(
               execSize, nDst, nSrc, InstOpt_WriteEnable, false);
+          gra.incRA.markForIntfUpdate(nDst->getTopDcl());
+          gra.incRA.markForIntfUpdate(nSrc->getTopDcl());
           bb->insertBefore(instIt, mov);
 
           if (gra.EUFusionNoMaskWANeeded()) {
@@ -1879,6 +1941,12 @@ void CoalesceSpillFills::removeRedundantWrites() {
          !isGRFAssigned(inst->asSpillIntrinsic()->getPayload())) ||
         (inst->isFillIntrinsic() &&
          !isGRFAssigned(inst->asFillIntrinsic()->getDst()))) {
+      if (inst->isSpillIntrinsic())
+        gra.incRA.markForIntfUpdate(
+            inst->asSpillIntrinsic()->getPayload()->getTopDcl());
+      else if (inst->isFillIntrinsic())
+        gra.incRA.markForIntfUpdate(
+            inst->asFillIntrinsic()->getDst()->getTopDcl());
       bb->erase(removeSp.second.first);
     }
   }

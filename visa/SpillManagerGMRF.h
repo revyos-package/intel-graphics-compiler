@@ -356,8 +356,6 @@ private:
 
   unsigned getAddrSpillFillIndex(G4_RegVar *spilledRegVar);
 
-  G4_RegVar *getReprRegVar(G4_RegVar *regVar) const;
-
   template <class REGION_TYPE> G4_RegVar *getRegVar(REGION_TYPE *region) const;
 
   G4_RegFileKind getRFType(G4_RegVar *regvar) const;
@@ -394,8 +392,6 @@ private:
   unsigned getDisp(G4_RegVar *lRange);
 
   template <class REGION_TYPE> unsigned getRegionDisp(REGION_TYPE *region);
-
-  bool spillMemLifetimeInterfere(unsigned i, unsigned j) const;
 
   unsigned calculateSpillDisp(G4_RegVar *lRange) const;
 
@@ -588,7 +584,8 @@ private:
 
   G4_INST *createLSCSpill(G4_Declare *spillRangeDcl, G4_Declare *mRangeDcl,
                           G4_DstRegRegion *spilledRangeRegion,
-                          G4_ExecSize execSize, unsigned option);
+                          G4_ExecSize execSize, unsigned option,
+                          bool isScatter = false);
 
   G4_INST *createLSCFill(G4_Declare *fillRangeDcl, G4_Declare *mRangeDcl,
                          unsigned regOff, unsigned height, unsigned spillOff);
@@ -728,6 +725,7 @@ private:
 
   bool useLSCMsg = false;
   bool useLscNonstackCall = false;
+  bool useLscForScatterSpill = false;
 
   // Used for new fail safe RA mechanism.
   BoundedRA context;
@@ -846,8 +844,8 @@ private:
                  std::unordered_map<G4_INST *, G4_BB *> &InstBBMap);
 };
 
-bool isEOTSpill(const IR_Builder &builder, const LiveRange *lr,
-                bool isFailSafeIter);
+bool isEOTSpillWithFailSafeRA(const IR_Builder &builder, const LiveRange *lr,
+                              bool isFailSafeIter);
 
 } // namespace vISA
 

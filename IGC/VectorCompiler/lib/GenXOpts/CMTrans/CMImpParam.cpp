@@ -1,6 +1,6 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (C) 2017-2022 Intel Corporation
+Copyright (C) 2017-2023 Intel Corporation
 
 SPDX-License-Identifier: MIT
 
@@ -109,6 +109,7 @@ SPDX-License-Identifier: MIT
 #include "vc/Support/GenXDiagnostic.h"
 #include "vc/Utils/GenX/IRBuilder.h"
 #include "vc/Utils/GenX/ImplicitArgsBuffer.h"
+#include "vc/Utils/GenX/IntrinsicsWrapper.h"
 #include "vc/Utils/GenX/PredefinedVariable.h"
 #include "vc/Utils/General/DebugInfo.h"
 #include "vc/Utils/General/FunctionAttrs.h"
@@ -273,27 +274,29 @@ private:
   uint32_t MapToKind(unsigned IID) {
     using namespace vc;
     switch (IID) {
-      default:
-        return KernelMetadata::AK_NORMAL;
-      case GenXIntrinsic::genx_print_buffer:
-        return KernelMetadata::AK_NORMAL | KernelMetadata::IMP_OCL_PRINTF_BUFFER;
-      case GenXIntrinsic::genx_local_size:
-        return KernelMetadata::AK_NORMAL | KernelMetadata::IMP_LOCAL_SIZE;
-      case GenXIntrinsic::genx_local_id:
-      case GenXIntrinsic::genx_local_id16:
-        return KernelMetadata::AK_NORMAL | KernelMetadata::IMP_LOCAL_ID;
-      case GenXIntrinsic::genx_group_count:
-        return KernelMetadata::AK_NORMAL | KernelMetadata::IMP_GROUP_COUNT;
-      case GenXIntrinsic::genx_get_scoreboard_deltas:
-        return KernelMetadata::AK_NORMAL | KernelMetadata::IMP_SB_DELTAS;
-      case GenXIntrinsic::genx_get_scoreboard_bti:
-        return KernelMetadata::AK_SURFACE | KernelMetadata::IMP_SB_BTI;
-      case GenXIntrinsic::genx_get_scoreboard_depcnt:
-        return KernelMetadata::AK_SURFACE | KernelMetadata::IMP_SB_DEPCNT;
-      case PseudoIntrinsic::PrivateBase:
-        return KernelMetadata::AK_NORMAL | KernelMetadata::IMP_OCL_PRIVATE_BASE;
-      case PseudoIntrinsic::ImplicitArgsBuffer:
-        return KernelMetadata::AK_NORMAL | KernelMetadata::IMP_IMPL_ARGS_BUFFER;
+    default:
+      return KernelMetadata::AK_NORMAL;
+    case InternalIntrinsic::assert_buffer:
+      return KernelMetadata::AK_NORMAL | KernelMetadata::IMP_OCL_ASSERT_BUFFER;
+    case vc::InternalIntrinsic::print_buffer:
+      return KernelMetadata::AK_NORMAL | KernelMetadata::IMP_OCL_PRINTF_BUFFER;
+    case GenXIntrinsic::genx_local_size:
+      return KernelMetadata::AK_NORMAL | KernelMetadata::IMP_LOCAL_SIZE;
+    case GenXIntrinsic::genx_local_id:
+    case GenXIntrinsic::genx_local_id16:
+      return KernelMetadata::AK_NORMAL | KernelMetadata::IMP_LOCAL_ID;
+    case GenXIntrinsic::genx_group_count:
+      return KernelMetadata::AK_NORMAL | KernelMetadata::IMP_GROUP_COUNT;
+    case GenXIntrinsic::genx_get_scoreboard_deltas:
+      return KernelMetadata::AK_NORMAL | KernelMetadata::IMP_SB_DELTAS;
+    case GenXIntrinsic::genx_get_scoreboard_bti:
+      return KernelMetadata::AK_SURFACE | KernelMetadata::IMP_SB_BTI;
+    case GenXIntrinsic::genx_get_scoreboard_depcnt:
+      return KernelMetadata::AK_SURFACE | KernelMetadata::IMP_SB_DEPCNT;
+    case PseudoIntrinsic::PrivateBase:
+      return KernelMetadata::AK_NORMAL | KernelMetadata::IMP_OCL_PRIVATE_BASE;
+    case PseudoIntrinsic::ImplicitArgsBuffer:
+      return KernelMetadata::AK_NORMAL | KernelMetadata::IMP_IMPL_ARGS_BUFFER;
     }
     return KernelMetadata::AK_NORMAL;
   }
@@ -305,7 +308,7 @@ private:
     Type * Ty = getIntrinRetType(F->getContext(), IID);
     IGC_ASSERT(Ty);
 
-    auto IntrinsicName = GenXIntrinsic::getAnyName(IID, None);
+    auto IntrinsicName = vc::getAnyName(IID, None);
     GlobalVariable *NewVar = new GlobalVariable(
         *F->getParent(), Ty, false, GlobalVariable::InternalLinkage,
         UndefValue::get(Ty), "__imparg_" + IntrinsicName);
@@ -338,26 +341,25 @@ private:
 
   static Type *getIntrinRetType(LLVMContext &Context, unsigned IID) {
     switch (IID) {
-      case GenXIntrinsic::genx_print_buffer:
-      case PseudoIntrinsic::PrivateBase:
-      case PseudoIntrinsic::ImplicitArgsBuffer:
-        return llvm::Type::getInt64Ty(Context);
-      case GenXIntrinsic::genx_local_id:
-      case GenXIntrinsic::genx_local_size:
-      case GenXIntrinsic::genx_group_count:
-        return IGCLLVM::FixedVectorType::get(llvm::Type::getInt32Ty(Context),
-                                             3);
-      case GenXIntrinsic::genx_local_id16:
-        return IGCLLVM::FixedVectorType::get(llvm::Type::getInt16Ty(Context),
-                                             3);
-      default:
-        // Should be able to extract the type from the intrinsic
-        // directly as no overloading is required (if it is then
-        // you need to define specific type in a case statement above)
-        FunctionType *FTy = dyn_cast_or_null<FunctionType>(
-                                    GenXIntrinsic::getAnyType(Context, IID));
-        if (FTy)
-          return FTy->getReturnType();
+    case vc::InternalIntrinsic::assert_buffer:
+    case vc::InternalIntrinsic::print_buffer:
+    case PseudoIntrinsic::PrivateBase:
+    case PseudoIntrinsic::ImplicitArgsBuffer:
+      return llvm::Type::getInt64Ty(Context);
+    case GenXIntrinsic::genx_local_id:
+    case GenXIntrinsic::genx_local_size:
+    case GenXIntrinsic::genx_group_count:
+      return IGCLLVM::FixedVectorType::get(llvm::Type::getInt32Ty(Context), 3);
+    case GenXIntrinsic::genx_local_id16:
+      return IGCLLVM::FixedVectorType::get(llvm::Type::getInt16Ty(Context), 3);
+    default:
+      // Should be able to extract the type from the intrinsic
+      // directly as no overloading is required (if it is then
+      // you need to define specific type in a case statement above)
+      FunctionType *FTy = dyn_cast_or_null<FunctionType>(
+          GenXIntrinsic::getAnyType(Context, IID));
+      if (FTy)
+        return FTy->getReturnType();
     }
     return nullptr;
   }
@@ -744,7 +746,7 @@ static Value &loadArgFromIABuffer(unsigned IID, Value &ImplArgsBufferPtr,
   case GenXIntrinsic::genx_group_count:
     return loadVec3ArgFromIABuffer<GenXIntrinsic::genx_group_count>(
         ImplArgsBufferPtr, IRB);
-  case GenXIntrinsic::genx_print_buffer:
+  case vc::InternalIntrinsic::print_buffer:
     return vc::ImplicitArgs::Buffer::loadField(
         ImplArgsBufferPtr, vc::ImplicitArgs::Buffer::Indices::PrintfBufferPtr,
         IRB, "printf.buffer.ptr");
@@ -772,9 +774,10 @@ void CMImpParam::storeImplArgInFixedSignatureFunction(unsigned IID,
 // Replace the given instruction with a load from a global
 // The method erases the original call instruction.
 void CMImpParam::replaceWithGlobal(CallInst *CI) {
-  IGC_ASSERT_MESSAGE(GenXIntrinsic::isGenXIntrinsic(CI),
-                     "genx intrinsic is expected");
-  auto IID = GenXIntrinsic::getGenXIntrinsicID(CI->getCalledFunction());
+  IGC_ASSERT_MESSAGE(GenXIntrinsic::isGenXIntrinsic(CI) ||
+                         vc::InternalIntrinsic::isInternalIntrinsic(CI),
+                     "genx or vc internal intrinsic is expected");
+  auto IID = vc::getAnyIntrinsicID(CI->getCalledFunction());
   GlobalVariable *GV = getOrCreateGlobalForIID(CI->getFunction(), IID);
   LoadInst *Load = new LoadInst(IGCLLVM::getNonOpaquePtrEltTy(GV->getType()), GV, "",
                                 /* isVolatile */ false,
@@ -894,13 +897,14 @@ ArgLinearization CMImpParam::GenerateArgsLinearizationInfo(Function &F) {
 }
 
 static bool isImplicitArgIntrinsic(const Function &F, bool IsCMRT) {
-  auto IID = GenXIntrinsic::getGenXIntrinsicID(&F);
+  auto IID = vc::getAnyIntrinsicID(&F);
   switch (IID) {
   case GenXIntrinsic::genx_local_size:
   case GenXIntrinsic::genx_local_id:
   case GenXIntrinsic::genx_local_id16:
   case GenXIntrinsic::genx_group_count:
-  case GenXIntrinsic::genx_print_buffer:
+  case vc::InternalIntrinsic::assert_buffer:
+  case vc::InternalIntrinsic::print_buffer:
     return true;
   case GenXIntrinsic::genx_get_scoreboard_deltas:
   case GenXIntrinsic::genx_get_scoreboard_bti:
@@ -931,7 +935,7 @@ static ImplArgIntrSeq collectImplicitArgIntrinsics(Module &M, bool IsCMRT) {
 static IntrIDMap fillUsedIntrMap(const ImplArgIntrSeq &Workload) {
   IntrIDMap UsedIntrInfo;
   for (CallInst *CI : Workload) {
-    auto IID = GenXIntrinsic::getGenXIntrinsicID(CI->getCalledFunction());
+    auto IID = vc::getAnyIntrinsicID(CI->getCalledFunction());
     UsedIntrInfo[CI->getFunction()].insert(IID);
   }
   return UsedIntrInfo;
@@ -1051,7 +1055,7 @@ template <bool IsEntry> void CallGraphTraverser::visitFunction(Function &F) {
 
 static std::string getImplicitArgName(unsigned IID) {
   if (!isPseudoIntrinsic(IID))
-    return "impl.arg." + GenXIntrinsic::getAnyName(IID, None);
+    return "impl.arg." + vc::getAnyName(IID, None);
   switch (IID) {
   case PseudoIntrinsic::ImplicitArgsBuffer:
     return "impl.arg.impl.args.buffer";

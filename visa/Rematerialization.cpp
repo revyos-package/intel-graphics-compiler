@@ -67,9 +67,11 @@ void Rematerialization::populateRefs() {
     }
 
     // Update lastUseLexId based on BB live-out set
-    const SparseBitSet &UseOut = liveness.use_out[bb->getId()];
-    const SparseBitSet &DefOut = liveness.def_out[bb->getId()];
-    for (auto I = UseOut.and_begin(DefOut), E = UseOut.and_end(DefOut); I != E;
+    const llvm_SBitVector &UseOut = liveness.use_out[bb->getId()];
+    const llvm_SBitVector &DefOut = liveness.def_out[bb->getId()];
+    llvm_SBitVector DefUseOutAnd = UseOut & DefOut;
+    for (auto I = DefUseOutAnd.begin(), E = DefUseOutAnd.end();
+         I != E;
          ++I) {
       unsigned i = *I;
       if (liveness.isLiveAtExit(bb, i)) {
@@ -103,9 +105,11 @@ void Rematerialization::populateSamplerHeaderMap() {
         continue;
       }
 
+      const G4_SendDescRaw *descRaw = inst->getMsgDescRaw();
       if (samplerHeaderMov && inst->isSplitSend() &&
-          inst->getMsgDesc()->isSampler() &&
-          inst->getMsgDesc()->isHeaderPresent()) {
+          descRaw &&
+          descRaw->isSampler() &&
+          descRaw->isHeaderPresent()) {
         vISA_ASSERT(samplerHeaderMov->getExecSize() == 1,
                      "Unexpected sampler header");
         samplerHeaderMap.insert(std::make_pair(inst, samplerHeaderMov));
@@ -652,8 +656,9 @@ bool Rematerialization::canRematerialize(G4_SrcRegRegion *src, G4_BB *bb,
           return false;
 
         // Sampler definition to be rematerialized
-        // sends (8) V54(0,0):f samplerHeader(0,0) V53(0,0) 0x42:ud
-        // 0x24a7002:ud{Align1, Q1} resLen = 4, msgLen = 1, extMsgLen = 1
+        // clang-format off
+        // sends (8) V54(0,0):f samplerHeader(0,0) V53(0,0) 0x42:ud 0x24a7002:ud{Align1, Q1} resLen = 4, msgLen = 1, extMsgLen = 1
+        // clang-format on
         // samplerHeader can be rematerialized as it is r0.0 with modified r0.2.
         // V53 above will simply be extended since it requires extra computation
         // to rematerialize. Above sampler inst has a header. Some sampler
@@ -680,8 +685,8 @@ bool Rematerialization::canRematerialize(G4_SrcRegRegion *src, G4_BB *bb,
             uniqueDefInst->getSrc(0)->asSrcRegRegion()->getTopDcl() !=
             kernel.fg.builder->getBuiltinSamplerHeader();
 
-        if (!uniqueDefInst->getMsgDesc()->isHeaderPresent() ||
-            samplerHeaderNotUsed) {
+        const G4_SendDescRaw *descRaw = uniqueDefInst->getMsgDescRaw();
+        if (!descRaw || !descRaw->isHeaderPresent() || samplerHeaderNotUsed) {
           len += uniqueDefInst->getMsgDesc()->getSrc0LenRegs();
 
           auto msgOpnd = uniqueDefInst->getSrc(0);
@@ -826,12 +831,14 @@ G4_SrcRegRegion *Rematerialization::rematerialize(G4_SrcRegRegion *src,
 
   auto dstInst = uniqueDef->first;
   auto dst = dstInst->getDst();
+  gra.incRA.markForIntfUpdate(dst->getTopDcl());
   bool isSampler = dstInst->isSplitSend() && dstInst->getMsgDesc()->isSampler();
 
   for (unsigned int i = 0, numSrc = dstInst->getNumSrc(); i < numSrc; i++) {
     G4_Operand *src = dstInst->getSrc(i);
     if (src && src->isSrcRegRegion()) {
       incNumRemat(src->asSrcRegRegion()->getTopDcl());
+      gra.incRA.markForIntfUpdate(src->getTopDcl());
     }
   }
 
@@ -899,7 +906,6 @@ G4_SrcRegRegion *Rematerialization::rematerialize(G4_SrcRegRegion *src,
         newSrc0Dcl = kernel.fg.builder->createTempVar(
             src0TopDcl->getTotalElems(), src0TopDcl->getElemType(),
             gra.getSubRegAlign(src0TopDcl));
-
         // Clone all defining instructions for sampler's msg header
         for (unsigned int i = 0; i != (*ops).second.def.size(); i++) {
           auto &headerDefInst = (*ops).second.def[i].first;
@@ -937,7 +943,7 @@ G4_SrcRegRegion *Rematerialization::rematerialize(G4_SrcRegRegion *src,
     auto newMsgDesc = kernel.fg.builder->createGeneralMsgDesc(
         dstMsgDesc->getDesc(), dstMsgDesc->getExtendedDesc(),
         dstMsgDesc->getAccess(),
-        kernel.fg.builder->duplicateOperand(dstMsgDesc->getSurface()),
+        kernel.fg.builder->duplicateOperand(dstMsgDesc->getBti()),
         kernel.fg.builder->duplicateOperand(dstMsgDesc->getSti()));
 
     auto dupOp = kernel.fg.builder->createSplitSendInst(

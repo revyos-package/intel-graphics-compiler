@@ -64,126 +64,116 @@ bool LivenessAnalysis::isLocalVar(G4_Declare *decl) const {
   return false;
 }
 
-bool LivenessAnalysis::setGlobalVarIDs(bool verifyRA,
-                                       bool areAllPhyRegAssigned) {
-  bool phyRegAssigned = areAllPhyRegAssigned;
-
-  for (G4_Declare *decl : gra.kernel.Declares) {
-    if (!isLocalVar(decl)) {
-      /* Note that we only do local split, so there is no need to handle partial
-       * declare and splitted declare */
-      if (livenessCandidate(decl, verifyRA) &&
-          decl->getAliasDeclare() == NULL) {
-        decl->getRegVar()->setId(numGlobalVarId++);
-        if (decl->getRegVar()->getPhyReg() == NULL && !decl->getIsPartialDcl())
-          numUnassignedVarId++;
-        if (decl->getRegVar()->isPhyRegAssigned() == false) {
-          phyRegAssigned = false;
-        }
-      } else {
-        decl->getRegVar()->setId(UNDEFINED_VAL);
-      }
-    }
-  }
-
-  return phyRegAssigned;
-}
-
-bool LivenessAnalysis::setLocalVarIDs(bool verifyRA,
-                                      bool areAllPhyRegAssigned) {
-  numVarId = numGlobalVarId;
-  bool phyRegAssigned = areAllPhyRegAssigned;
-
-  for (G4_Declare *decl : gra.kernel.Declares) {
-    if (isLocalVar(decl)) {
-      if (livenessCandidate(decl, verifyRA) &&
-          decl->getAliasDeclare() == NULL) {
-        if (decl->getIsSplittedDcl()) {
-          decl->setSplitVarStartID(0);
-        }
-        if (decl->getIsPartialDcl()) {
-          auto declSplitDcl = gra.getSplittedDeclare(decl);
-          if (declSplitDcl && declSplitDcl->getIsSplittedDcl()) {
-            if (numSplitStartID == 0) {
-              numSplitStartID = numVarId;
-            }
-
-            if (declSplitDcl->getSplitVarStartID() == 0) {
-              declSplitDcl->setSplitVarStartID(numVarId);
-            }
-            numSplitVar++;
-          } else {
-            vISA_ASSERT_UNREACHABLE("Found child declare without parent");
-          }
-        }
-
-        decl->getRegVar()->setId(numVarId++);
-        if (decl->getRegVar()->getPhyReg() == NULL && !decl->getIsPartialDcl())
-          numUnassignedVarId++;
-        if (decl->getRegVar()->isPhyRegAssigned() == false) {
-          phyRegAssigned = false;
-        }
-      } else {
-        decl->getRegVar()->setId(UNDEFINED_VAL);
-      }
-    }
-  }
-
-  return phyRegAssigned;
-}
-
 bool LivenessAnalysis::setVarIDs(bool verifyRA, bool areAllPhyRegAssigned) {
   bool phyRegAssigned = areAllPhyRegAssigned;
-  for (G4_Declare *decl : gra.kernel.Declares) {
+  bool hasStackCall = fg.getHasStackCalls() || fg.getIsStackCallFunc();
+  bool flag = (selectedRF & G4_GRF) &&
+              !fg.builder->getOption(vISA_GlobalSendVarSplit) && !hasStackCall;
 
-    if (livenessCandidate(decl, verifyRA) && decl->getAliasDeclare() == NULL) {
-      if (decl->getIsSplittedDcl()) {
-        decl->setSplitVarStartID(0);
+  auto handleSplitId = [&](G4_Declare *decl) {
+    if (decl->getIsSplittedDcl()) {
+      decl->setSplitVarStartID(0);
+    }
+    if (decl->getIsPartialDcl()) {
+      auto declSplitDcl = gra.getSplittedDeclare(decl);
+      if (declSplitDcl && declSplitDcl->getIsSplittedDcl()) {
+        if (numSplitStartID == 0) {
+          numSplitStartID = numVarId;
+        }
+
+        if (declSplitDcl->getSplitVarStartID() == 0) {
+          declSplitDcl->setSplitVarStartID(numVarId);
+        }
+        numSplitVar++;
+      } else {
+        vISA_ASSERT_UNREACHABLE("Found child declare without parent");
       }
-      if (decl->getIsPartialDcl()) {
-        auto declSplitDcl = gra.getSplittedDeclare(decl);
-        if (declSplitDcl->getIsSplittedDcl()) {
-          if (numSplitStartID == 0) {
-            numSplitStartID = numVarId;
-          }
+    }
+  };
 
-          if (declSplitDcl->getSplitVarStartID() == 0) {
-            declSplitDcl->setSplitVarStartID(numVarId);
-          }
-          numSplitVar++;
-        } else {
-          vISA_ASSERT(false, "Found child declare without parent");
+  bool incRAVerify = false;
+  auto incRACheck = gra.incRA.isEnabled();
+  if (incRACheck) {
+    // New variables get id assignment from numVarId whereas old
+    // variables reuse their ids.
+    numVarId = gra.incRA.getNextVarId(selectedRF);
+    incRAVerify = gra.incRA.isEnabledWithVerification();
+    gra.incRA.unassignedVars.clear();
+  }
+  for (G4_Declare *decl : gra.kernel.Declares) {
+    if (livenessCandidate(decl, verifyRA) && decl->getAliasDeclare() == NULL) {
+      // Flag that indicates whether old id was assigned to current decl or
+      // a fresh id is assigned in current iteration.
+      bool useOldId = false;
+      unsigned int varId = numVarId;
+      if (incRACheck) {
+        // If incremental RA is enabled then:
+        // 1. First, check whether dcl had an id assigned from earlier iteration.
+        //    If it did, then reuse the id.
+        // 2. If dcl wasn't seen in earlier iteration then assign a fresh id to
+        //    it beginning from numVarId.
+        auto prevIterId = gra.incRA.getIdFromPrevIter(decl);
+        if (prevIterId.first) {
+          varId = prevIterId.second;
+          useOldId = true;
+        }
+        else
+          gra.incRA.recordVarId(decl, varId);
+      }
+      if (flag) {
+        bool isLocal = isLocalVar(decl);
+        if (isLocal)
+          handleSplitId(decl);
+        else
+          globalVars.set(varId);
+      } else {
+        handleSplitId(decl);
+        // All variables are treated as global in stack call
+        globalVars.set(varId);
+      }
+
+      if(incRACheck && !gra.incRA.getLRs().empty()) {
+        // Incremental RA requires that variables preserve their
+        // RA id. So this sanity check is crucial for incremental
+        // RA correctness.
+        auto id = decl->getRegVar()->getId();
+        vISA_ASSERT(id == varId || id == UNDEFINED_VAL,
+                    "different id assigned to G4_RegVar");
+        if (gra.incRA.getLRs().size() > id) {
+          vISA_ASSERT(gra.incRA.getLRs()[id]->getDcl() == decl,
+                      "some other decl found for same id");
         }
       }
 
-      // participate liveness analysis
-      decl->getRegVar()->setId(numVarId++);
+      if (!useOldId) {
+        // Actual id assignment to G4_Declare::G4_RegVar is done
+        // only for new variables. It's assumed that older variables
+        // preserve their ids.
+        decl->getRegVar()->setId(varId);
+      }
 
-      if (decl->getRegVar()->getPhyReg() == NULL && !decl->getIsPartialDcl())
+      // If new id was assigned then increment numVarId for next fresh variable
+      if (!useOldId)
+        numVarId++;
+      if (!decl->getRegVar()->getPhyReg() && !decl->getIsPartialDcl()) {
         numUnassignedVarId++;
 
-      //
-      // dump Reg Var info for debugging
-      //
+        if (incRAVerify) {
+          // Store list of unassigned variables. This list is pruned later in
+          // determineColorOrdering() to verify that all unallocated ranges
+          // are coloring candidates. Note this is only to aid debugging and
+          // verification of incremental RA.
+          gra.incRA.unassignedVars.insert(decl);
+        }
 
+      }
       if (decl->getRegVar()->isPhyRegAssigned() == false) {
         phyRegAssigned = false;
       }
-      VISA_DEBUG_VERBOSE({
-        decl->getRegVar()->emit(std::cout);
-        std::cout << " id = " << decl->getRegVar()->getId() << "\n";
-      });
-    }
-    //
-    // those reg vars that are not candidates, set their id to
-    // undefined value
-    //
-    else {
+    } else {
       decl->getRegVar()->setId(UNDEFINED_VAL);
     }
   }
-
-  numGlobalVarId = numVarId;
 
   return phyRegAssigned;
 }
@@ -200,15 +190,8 @@ LivenessAnalysis::LivenessAnalysis(GlobalRA &g, unsigned char kind,
   // Go over each reg var if it's a liveness candidate, assign id for bitset.
   //
   bool areAllPhyRegAssigned = !forceRun;
-  bool hasStackCall = fg.getHasStackCalls() || fg.getIsStackCallFunc();
 
-  if ((selectedRF & G4_GRF) &&
-      !fg.builder->getOption(vISA_GlobalSendVarSplit) && !hasStackCall) {
-    areAllPhyRegAssigned = setGlobalVarIDs(verifyRA, areAllPhyRegAssigned);
-    areAllPhyRegAssigned = setLocalVarIDs(verifyRA, areAllPhyRegAssigned);
-  } else {
-    areAllPhyRegAssigned = setVarIDs(verifyRA, areAllPhyRegAssigned);
-  }
+  areAllPhyRegAssigned = setVarIDs(verifyRA, areAllPhyRegAssigned);
 
   // For Alias Dcl
   for (auto decl : gra.kernel.Declares) {
@@ -254,16 +237,6 @@ LivenessAnalysis::LivenessAnalysis(GlobalRA &g, unsigned char kind,
   use_gen.resize(numBBId);
   use_kill.resize(numBBId);
   indr_use.resize(numBBId);
-
-  for (unsigned i = 0; i < numBBId; i++) {
-    def_in[i] = SparseBitSet(numVarId);
-    def_out[i] = SparseBitSet(numVarId);
-    use_in[i] = SparseBitSet(numVarId);
-    use_out[i] = SparseBitSet(numVarId);
-    use_gen[i] = SparseBitSet(numVarId);
-    use_kill[i] = SparseBitSet(numVarId);
-    indr_use[i] = SparseBitSet(numVarId);
-  }
 }
 
 LivenessAnalysis::~LivenessAnalysis() {
@@ -318,12 +291,12 @@ bool LivenessAnalysis::livenessCandidate(const G4_Declare *decl,
 }
 
 void LivenessAnalysis::updateKillSetForDcl(
-    G4_Declare *dcl, SparseBitSet *curBBGen, SparseBitSet *curBBKill,
-    G4_BB *curBB, SparseBitSet *entryBBGen, SparseBitSet *entryBBKill,
+    G4_Declare *dcl, llvm_SBitVector *curBBGen, llvm_SBitVector *curBBKill,
+    G4_BB *curBB, llvm_SBitVector *entryBBGen, llvm_SBitVector *entryBBKill,
     G4_BB *entryBB, unsigned scopeID) {
   if (scopeID != 0 && scopeID != UINT_MAX && dcl->getScopeID() == scopeID) {
-    entryBBKill->set(dcl->getRegVar()->getId(), true);
-    entryBBGen->set(dcl->getRegVar()->getId(), false);
+    entryBBKill->set(dcl->getRegVar()->getId());
+    entryBBGen->reset(dcl->getRegVar()->getId());
     VISA_DEBUG_VERBOSE(std::cout
                        << "Killed sub-routine scope " << dcl->getName()
                        << " at bb with id = " << entryBB->getId() << "\n");
@@ -337,10 +310,10 @@ void LivenessAnalysis::updateKillSetForDcl(
 // killed in the bb it appears and a sub-routine local variable is killed in
 // entry block of the sub-routine. No error check is performed currently so if
 // variable scoping information is incorrect then generated code will be so too.
-void LivenessAnalysis::performScoping(SparseBitSet *curBBGen,
-                                      SparseBitSet *curBBKill, G4_BB *curBB,
-                                      SparseBitSet *entryBBGen,
-                                      SparseBitSet *entryBBKill,
+void LivenessAnalysis::performScoping(llvm_SBitVector *curBBGen,
+                                      llvm_SBitVector *curBBKill, G4_BB *curBB,
+                                      llvm_SBitVector *entryBBGen,
+                                      llvm_SBitVector *entryBBKill,
                                       G4_BB *entryBB) {
   unsigned scopeID = curBB->getScopeID();
   for (G4_INST *inst : *curBB) {
@@ -446,6 +419,55 @@ void LivenessAnalysis::detectNeverDefinedVarRows() {
   }
 }
 
+// #1 - (P166) sel (M1, 8) V2(0,0)<1> 0x1:d 0x0:d
+// #2 - (W) mov(M1, 8) V1(0,0)<1> 0x0:ud
+// #3 - (W) mov (M1, 1) V3 0x1:ud
+// #4 - add (M1, 8) V1(0,0)<1> V2(0,0)<1;1,0> V3(0,0)<0;1,0>
+//
+// In above 3d program, V1 is written once using WriteEnable and and once without
+// WriteEnable. A var must be treated as KILLED only for widest def. In this case,
+// widest def of V1 is one with WriteEnable set. Although def of V1 in inst# 4
+// writes all enabled channels, it may not be as wide as WriteEnable in inst#1.
+// Marking #4 as KILL allows RA to use same register for V1 and V3 which can be
+// incorrect if all but lowest channel are enabled. Because in this case lowest
+// channel data would be overwritten by V3 def.
+//
+// In this method, we gather all variables written with WriteEnable and refer to
+// this list when computing pseudo_kill. Note that WriteEnable takes effect only
+// in divergent context. In other words, for ESIMD target, all channels are enabled
+// at thread dispatch. Whereas for 3d, even entry BB is considered to be divergent.
+void LivenessAnalysis::collectNoMaskVars() {
+  for (auto bb : gra.kernel.fg) {
+    for (auto inst : *bb) {
+      if (!inst->isWriteEnableInst())
+        continue;
+
+      auto inDivergentContext = [&]() {
+        // 3d is always in divergent context
+        // ESIMD is divergent only in BBs that are explicitly divergent
+        return fg.getKernel()->getInt32KernelAttr(Attributes::ATTR_Target) ==
+                   VISA_3D ||
+               !bb->isAllLaneActive();
+      };
+
+      G4_Operand *opnd = nullptr;
+      if (livenessClass(G4_GRF))
+        opnd = inst->getDst();
+      else if (livenessClass(G4_FLAG))
+        opnd = inst->getCondMod();
+
+      if (opnd && opnd->getBase() && opnd->getBase()->isRegAllocPartaker() &&
+          inDivergentContext()) {
+        defWriteEnable.insert(opnd->getTopDcl());
+      }
+    }
+  }
+}
+
+bool LivenessAnalysis::doesVarNeedNoMaskForKill(const G4_Declare* dcl) const {
+  return defWriteEnable.count(dcl) == 0 ? false : true;
+}
+
 //
 // compute liveness of reg vars
 // Each reg var indicates a region within the register file. As such, the case
@@ -471,8 +493,8 @@ void LivenessAnalysis::computeLiveness() {
   // mark input arguments live at the entry of kernel
   // mark output arguments live at the exit of kernel
   //
-  SparseBitSet inputDefs(numVarId);
-  SparseBitSet outputUses(numVarId);
+  llvm_SBitVector inputDefs;
+  llvm_SBitVector outputUses;
 
   for (unsigned i = 0; i < numVarId; i++) {
     bool setLiveIn = false;
@@ -494,7 +516,7 @@ void LivenessAnalysis::computeLiveness() {
       setLiveIn = true;
 
     if (setLiveIn) {
-      inputDefs.set(i, true);
+      inputDefs.set(i);
       VISA_DEBUG_VERBOSE(std::cout << "First def input = " << decl->getName()
                                    << "\n");
     }
@@ -511,7 +533,7 @@ void LivenessAnalysis::computeLiveness() {
       setLiveOut = true;
 
     if (setLiveOut) {
-      outputUses.set(i, true);
+      outputUses.set(i);
       VISA_DEBUG_VERBOSE(
           std::cout << "First def output    = " << decl->getName() << "\n");
     }
@@ -525,6 +547,7 @@ void LivenessAnalysis::computeLiveness() {
     def_out[i].clear();
   }
 
+  collectNoMaskVars();
   if (livenessClass(G4_GRF))
     detectNeverDefinedVarRows();
 
@@ -546,8 +569,8 @@ void LivenessAnalysis::computeLiveness() {
   }
 
   G4_BB *subEntryBB = NULL;
-  SparseBitSet *subEntryKill = NULL;
-  SparseBitSet *subEntryGen = NULL;
+  llvm_SBitVector *subEntryKill = NULL;
+  llvm_SBitVector *subEntryGen = NULL;
 
   if (fg.getKernel()->getInt32KernelAttr(Attributes::ATTR_Target) == VISA_CM) {
     //
@@ -583,7 +606,7 @@ void LivenessAnalysis::computeLiveness() {
       const REGVAR_VECTOR &grfVec =
           pointsToAnalysis.getIndrUseVectorForBB(bb->getId());
       for (const pointInfo addrTaken : grfVec) {
-        indr_use[bb->getId()].set(addrTaken.var->getId(), true);
+        indr_use[bb->getId()].set(addrTaken.var->getId());
         addr_taken.set(addrTaken.var->getId(), true);
       }
     }
@@ -806,13 +829,13 @@ void LivenessAnalysis::useAnalysis(FuncInfo *subroutine) {
       if (changed) {
         // no need to update changed, save a copy
         use_in[bbid] = use_out[bbid];
-        use_in[bbid] -= use_kill[bbid];
+        use_in[bbid] = use_in[bbid] - use_kill[bbid];
         use_in[bbid] |= use_gen[bbid];
       } else {
-        SparseBitSet oldUseIn = use_in[bbid];
+        llvm_SBitVector oldUseIn = use_in[bbid];
 
         use_in[bbid] = use_out[bbid];
-        use_in[bbid] -= use_kill[bbid];
+        use_in[bbid] = use_in[bbid] - use_kill[bbid];
         use_in[bbid] |= use_gen[bbid];
 
         if (!(bb->getBBType() & G4_BB_INIT_TYPE) && oldUseIn != use_in[bbid]) {
@@ -829,8 +852,8 @@ void LivenessAnalysis::useAnalysis(FuncInfo *subroutine) {
 //
 void LivenessAnalysis::useAnalysisWithArgRetVal(
     FuncInfo *subroutine,
-    const std::unordered_map<FuncInfo *, SparseBitSet> &args,
-    const std::unordered_map<FuncInfo *, SparseBitSet> &retVal) {
+    const std::unordered_map<FuncInfo *, llvm_SBitVector> &args,
+    const std::unordered_map<FuncInfo *, llvm_SBitVector> &retVal) {
   bool changed = false;
   do {
     changed = false;
@@ -854,7 +877,7 @@ void LivenessAnalysis::useAnalysisWithArgRetVal(
         use_out[bbid] |= (*BVIt).second;
         BVIt = retVal.find(callee);
         vISA_ASSERT(BVIt != retVal.end(), "Missing entry in map");
-        use_out[bbid] -= (*BVIt).second;
+        use_out[bbid] = use_out[bbid] - (*BVIt).second;
       } else {
         for (auto succ : bb->Succs) {
           use_out[bbid] |= use_in[succ->getId()];
@@ -864,13 +887,13 @@ void LivenessAnalysis::useAnalysisWithArgRetVal(
       if (changed) {
         // no need to update changed, save a copy
         use_in[bbid] = use_out[bbid];
-        use_in[bbid] -= use_kill[bbid];
+        use_in[bbid] = use_in[bbid] - use_kill[bbid];
         use_in[bbid] |= use_gen[bbid];
       } else {
-        SparseBitSet oldUseIn = use_in[bbid];
+        llvm_SBitVector oldUseIn = use_in[bbid];
 
         use_in[bbid] = use_out[bbid];
-        use_in[bbid] -= use_kill[bbid];
+        use_in[bbid] = use_in[bbid] - use_kill[bbid];
         use_in[bbid] |= use_gen[bbid];
 
         if (!(bb->getBBType() & G4_BB_INIT_TYPE) && oldUseIn != use_in[bbid]) {
@@ -896,7 +919,7 @@ void LivenessAnalysis::defAnalysis(FuncInfo *subroutine) {
     changed = false;
     for (auto &&bb : subroutine->getBBList()) {
       uint32_t bbid = bb->getId();
-      std::optional<SparseBitSet> defInOrNull = std::nullopt;
+      std::optional<llvm_SBitVector> defInOrNull = std::nullopt;
       if (!changed) {
         defInOrNull = def_in[bbid];
       }
@@ -928,13 +951,13 @@ void LivenessAnalysis::defAnalysis(FuncInfo *subroutine) {
   } while (changed);
 }
 
-void LivenessAnalysis::hierarchicalIPA(const SparseBitSet &kernelInput,
-                                       const SparseBitSet &kernelOutput) {
+void LivenessAnalysis::hierarchicalIPA(const llvm_SBitVector &kernelInput,
+                                       const llvm_SBitVector &kernelOutput) {
 
   vISA_ASSERT(fg.sortedFuncTable.size() > 0,
               "topological sort must already be performed");
-  std::unordered_map<FuncInfo *, SparseBitSet> args;
-  std::unordered_map<FuncInfo *, SparseBitSet> retVal;
+  std::unordered_map<FuncInfo *, llvm_SBitVector> args;
+  std::unordered_map<FuncInfo *, llvm_SBitVector> retVal;
 
 #ifdef _DEBUG
   auto verifyFuncTable = [&]() {
@@ -981,7 +1004,8 @@ void LivenessAnalysis::hierarchicalIPA(const SparseBitSet &kernelInput,
     useAnalysis(subroutine);
     if (subroutine != fg.kernelInfo) {
       retVal[subroutine] = use_out[subroutine->getExitBB()->getId()];
-      retVal[subroutine] -= use_in[subroutine->getInitBB()->getId()];
+      retVal[subroutine] =
+          retVal[subroutine] - use_in[subroutine->getInitBB()->getId()];
     }
     for (auto &&bb : subroutine->getBBList()) {
       if (bb->getBBType() & G4_BB_CALL_TYPE) {
@@ -1005,7 +1029,8 @@ void LivenessAnalysis::hierarchicalIPA(const SparseBitSet &kernelInput,
     useAnalysisWithArgRetVal(subroutine, args, retVal);
     if (subroutine != fg.kernelInfo) {
       args[subroutine] = use_in[subroutine->getInitBB()->getId()];
-      args[subroutine] -= use_out[subroutine->getExitBB()->getId()];
+      args[subroutine] =
+          args[subroutine] - use_out[subroutine->getExitBB()->getId()];
     }
   }
 
@@ -1075,7 +1100,7 @@ void LivenessAnalysis::hierarchicalIPA(const SparseBitSet &kernelInput,
     }
     for (auto subroutine : fg.sortedFuncTable)
     {
-        auto printVal = [&idToDecl](const SparseBitSet& bs)
+        auto printVal = [&idToDecl](const llvm_SBitVector& bs)
         {
             for (int i = 0, size = (int)bs.getSize(); i < size; ++i)
             {
@@ -1098,7 +1123,7 @@ void LivenessAnalysis::hierarchicalIPA(const SparseBitSet &kernelInput,
             printVal(retVal[subroutine]);
             std::cerr << "\n";
             std::cerr << "\tLiveThrough: ";
-            SparseBitSet liveThrough = use_in[subroutine->getInitBB()->getId()];
+            llvm_SBitVector liveThrough = use_in[subroutine->getInitBB()->getId()];
             liveThrough &= use_out[subroutine->getExitBB()->getId()];
             printVal(liveThrough);
             //std::cerr << "\n";
@@ -1187,6 +1212,9 @@ bool LivenessAnalysis::writeWholeRegion(const G4_BB *bb, const G4_INST *inst,
     return false;
   }
 
+  if (doesVarNeedNoMaskForKill(primaryDcl) && !inst->isWriteEnableInst())
+    return false;
+
   return true;
 }
 
@@ -1216,7 +1244,8 @@ void LivenessAnalysis::footprintDst(const G4_BB *bb, const G4_INST *i,
                                     BitSet *dstfootprint) const {
   if (dstfootprint && !(i->isPartialWrite()) &&
       ((bb->isAllLaneActive() || i->isWriteEnableInst() == true) ||
-       gra.kernel.getInt32KernelAttr(Attributes::ATTR_Target) == VISA_3D)) {
+       (gra.kernel.getInt32KernelAttr(Attributes::ATTR_Target) == VISA_3D &&
+        !doesVarNeedNoMaskForKill(opnd->getTopDcl())))) {
     // Bitwise OR left-bound/right-bound with dst footprint to indicate
     // bytes that are written in to
     opnd->updateFootPrint(*dstfootprint, true, *fg.builder);
@@ -1231,8 +1260,8 @@ void LivenessAnalysis::footprintSrc(const G4_INST *i, G4_Operand *opnd,
 }
 
 void LivenessAnalysis::computeGenKillandPseudoKill(
-    G4_BB *bb, SparseBitSet &def_out, SparseBitSet &use_in,
-    SparseBitSet &use_gen, SparseBitSet &use_kill) const {
+    G4_BB *bb, llvm_SBitVector &def_out, llvm_SBitVector &use_in,
+    llvm_SBitVector &use_gen, llvm_SBitVector &use_kill) const {
   //
   // Mark each fcall as using all globals and arg pre-defined var
   //
@@ -1246,16 +1275,16 @@ void LivenessAnalysis::computeGenKillandPseudoKill(
     if (arg->getByteSize() != 0) {
       // arg var is a use and a kill at each fcall
       if (fcall->getArgSize() != 0) {
-        use_gen.set(arg->getRegVar()->getId(), true);
+        use_gen.set(arg->getRegVar()->getId());
       }
-      use_kill.set(arg->getRegVar()->getId(), true);
+      use_kill.set(arg->getRegVar()->getId());
     }
 
     if (ret->getByteSize() != 0) {
       // ret var is a kill at each fcall
-      use_kill.set(ret->getRegVar()->getId(), true);
+      use_kill.set(ret->getRegVar()->getId());
       if (fcall->getRetSize() != 0) {
-        def_out.set(ret->getRegVar()->getId(), true);
+        def_out.set(ret->getRegVar()->getId());
       }
     }
   }
@@ -1280,8 +1309,8 @@ void LivenessAnalysis::computeGenKillandPseudoKill(
         unsigned id = topdcl->getRegVar()->getId();
         if (i->isPseudoKill()) {
           // Mark kill, reset gen
-          use_kill.set(id, true);
-          use_gen.set(id, false);
+          use_kill.set(id);
+          use_gen.reset(id);
 
           continue;
         }
@@ -1324,24 +1353,24 @@ void LivenessAnalysis::computeGenKillandPseudoKill(
         }
 
         if (dstrgn->getRegAccess() == Direct) {
-          def_out.set(id, true);
+          def_out.set(id);
           //
           // if the inst writes the whole region the var declared, we set
           // use_kill so that use of var will not pass through (i.e., var's
           // interval starts at this instruction.
           //
           if (writeWholeRegion(bb, i, dstrgn, fg.builder->getOptions())) {
-            use_kill.set(id, true);
-            use_gen.set(id, false);
+            use_kill.set(id);
+            use_gen.reset(id);
 
             dstfootprint->setAll();
           } else {
             footprintDst(bb, i, dstrgn, dstfootprint);
 
-            use_gen.set(id, true);
+            use_gen.set(id);
           }
         } else {
-          use_gen.set(id, true);
+          use_gen.set(id);
         }
       } else if ((selectedRF & G4_GRF) && dst->isIndirect()) {
         // conservatively add each variable potentially accessed by dst to gen
@@ -1349,7 +1378,7 @@ void LivenessAnalysis::computeGenKillandPseudoKill(
             pointsToAnalysis.getAllInPointsToOrIndrUse(dst, bb);
         for (auto pt : pointsToSet) {
           if (pt.var->isRegAllocPartaker()) {
-            use_gen.set(pt.var->getId(), true);
+            use_gen.set(pt.var->getId());
           }
         }
       }
@@ -1396,7 +1425,7 @@ void LivenessAnalysis::computeGenKillandPseudoKill(
             footprintSrc(i, src->asSrcRegRegion(), srcfootprint);
           }
 
-          use_gen.set(static_cast<const G4_RegVar *>(base)->getId(), true);
+          use_gen.set(static_cast<const G4_RegVar *>(base)->getId());
         }
 
         if ((selectedRF & G4_GRF) && src->isIndirect()) {
@@ -1411,7 +1440,7 @@ void LivenessAnalysis::computeGenKillandPseudoKill(
             // assume entire grf is sourced
             // Also add grf to the gen set as it may be potentially used
             unsigned int id = grf->getId();
-            use_gen.set(id, true);
+            use_gen.set(id);
             BitSet *srcfootprint = &footprints[id];
 
             if (srcfootprint->getSize() != 0) {
@@ -1432,8 +1461,8 @@ void LivenessAnalysis::computeGenKillandPseudoKill(
         G4_RegVar *reg = static_cast<G4_AddrExp *>(src)->getRegVar();
         if (reg->isRegAllocPartaker() && !reg->isRegVarTmp()) {
           unsigned srcId = reg->getId();
-          use_gen.set(srcId, true);
-          def_out.set(srcId, true);
+          use_gen.set(srcId);
+          def_out.set(srcId);
         }
       }
     }
@@ -1466,16 +1495,16 @@ void LivenessAnalysis::computeGenKillandPseudoKill(
             }
           }
 
-          def_out.set(id, true);
+          def_out.set(id);
 
           if (writeWholeRegion(bb, i, flagReg)) {
-            use_kill.set(id, true);
-            use_gen.set(id, false);
+            use_kill.set(id);
+            use_gen.reset(id);
 
             dstfootprint->setAll();
           } else {
             footprintDst(bb, i, mod, dstfootprint);
-            use_gen.set(id, true);
+            use_gen.set(id);
           }
         }
       } else {
@@ -1512,7 +1541,7 @@ void LivenessAnalysis::computeGenKillandPseudoKill(
           footprintSrc(i, predicate, srcfootprint);
         }
 
-        use_gen.set(static_cast<const G4_RegVar *>(flagReg)->getId(), true);
+        use_gen.set(static_cast<const G4_RegVar *>(flagReg)->getId());
       }
     }
 
@@ -1580,10 +1609,10 @@ void LivenessAnalysis::computeGenKillandPseudoKill(
           }
 
           // Reset gen
-          use_gen.set(dst->getBase()->asRegVar()->getId(), false);
+          use_gen.reset(dst->getBase()->asRegVar()->getId());
 
           // Set kill
-          use_kill.set(dst->getBase()->asRegVar()->getId(), true);
+          use_kill.set(dst->getBase()->asRegVar()->getId());
           VISA_DEBUG_VERBOSE({
             std::cout << "Found kill at inst ";
             INST_LIST_ITER fwdIter = rit.base();
@@ -1619,10 +1648,10 @@ void LivenessAnalysis::computeGenKillandPseudoKill(
           pseudoKills.emplace_back(topdcl, rit);
 
           // Reset gen
-          use_gen.set(flagReg->asRegVar()->getId(), false);
+          use_gen.reset(flagReg->asRegVar()->getId());
 
           // Set kill
-          use_kill.set(flagReg->asRegVar()->getId(), true);
+          use_kill.set(flagReg->asRegVar()->getId());
           VISA_DEBUG_VERBOSE({
             std::cout << "Found kill at inst ";
             INST_LIST_ITER fwdIter = rit.base();
@@ -1682,7 +1711,7 @@ bool LivenessAnalysis::contextFreeUseAnalyze(G4_BB *bb, bool isChanged) {
     }
     changed = true;
   } else {
-    SparseBitSet old = use_out[bbid];
+    llvm_SBitVector old = use_out[bbid];
     for (auto succBB : bb->Succs) {
       use_out[bbid] |= use_in[succBB->getId()];
     }
@@ -1694,7 +1723,7 @@ bool LivenessAnalysis::contextFreeUseAnalyze(G4_BB *bb, bool isChanged) {
   // in = gen + (out - kill)
   //
   use_in[bbid] = use_out[bbid];
-  use_in[bbid] -= use_kill[bbid];
+  use_in[bbid] = use_in[bbid] - use_kill[bbid];
   use_in[bbid] |= use_gen[bbid];
 
   return changed;
@@ -1717,7 +1746,7 @@ bool LivenessAnalysis::contextFreeDefAnalyze(G4_BB *bb, bool isChanged) {
     }
     changed = true;
   } else {
-    SparseBitSet old = def_in[bbid];
+    llvm_SBitVector old = def_in[bbid];
     for (auto predBB : bb->Preds) {
       def_in[bbid] |= def_out[predBB->getId()];
     }
@@ -1884,12 +1913,12 @@ void LivenessAnalysis::dumpLive(BitSet &live) const {
 // dump which vars are live at the entry of BB
 //
 void LivenessAnalysis::dumpGlobalVarNum() const {
-  SparseBitSet global_def_out(numVarId);
-  SparseBitSet global_use_in(numVarId);
+  llvm_SBitVector global_def_out;
+  llvm_SBitVector global_use_in;
 
   for (auto bb : fg) {
-    SparseBitSet global_in = use_in[bb->getId()];
-    SparseBitSet global_out = def_out[bb->getId()];
+    llvm_SBitVector global_in = use_in[bb->getId()];
+    llvm_SBitVector global_out = def_out[bb->getId()];
     global_in &= def_in[bb->getId()];
     global_use_in |= global_in;
     global_out &= use_out[bb->getId()];
@@ -1899,8 +1928,8 @@ void LivenessAnalysis::dumpGlobalVarNum() const {
   int global_var_num = 0;
   for (auto var : vars) {
     if (var->isRegAllocPartaker()) {
-      if (global_use_in.isSet(var->getId()) ||
-          global_def_out.isSet(var->getId())) {
+      if (global_use_in.test(var->getId()) ||
+          global_def_out.test(var->getId())) {
         global_var_num++;
       }
     }
@@ -1930,7 +1959,7 @@ void LivenessAnalysis::reportUndefinedUses() const {
     if (!isUseIn(fg.getEntryBB(), var->getId()))
       continue;
     // Skip if the var is in def_in of BB0
-    if (def_in[fg.getEntryBB()->getId()].isSet(var->getId()))
+    if (def_in[fg.getEntryBB()->getId()].test(var->getId()))
       continue;
 
     if (count++ % 10 == 0)
@@ -1948,43 +1977,43 @@ bool LivenessAnalysis::isEmptyLiveness() const { return numBBId == 0; }
 // live range
 //
 bool LivenessAnalysis::isLiveAtEntry(const G4_BB *bb, unsigned var_id) const {
-  return use_in[bb->getId()].isSet(var_id) && def_in[bb->getId()].isSet(var_id);
+  return use_in[bb->getId()].test(var_id) && def_in[bb->getId()].test(var_id);
 }
 //
 // return true if var is live at the exit of bb
 //
 bool LivenessAnalysis::isLiveAtExit(const G4_BB *bb, unsigned var_id) const {
-  return use_out[bb->getId()].isSet(var_id) &&
-         def_out[bb->getId()].isSet(var_id);
+  return use_out[bb->getId()].test(var_id) &&
+         def_out[bb->getId()].test(var_id);
 }
 
 //
 // return true if var is user through the bb
 //
 bool LivenessAnalysis::isUseOut(const G4_BB *bb, unsigned var_id) const {
-  return use_out[bb->getId()].isSet(var_id);
+  return use_out[bb->getId()].test(var_id);
 }
 
 //
 // return true if var is user through the bb
 //
 bool LivenessAnalysis::isUseIn(const G4_BB *bb, unsigned var_id) const {
-  return use_in[bb->getId()].isSet(var_id);
+  return use_in[bb->getId()].test(var_id);
 }
 
 //
 // return true if var is user through the bb
 //
 bool LivenessAnalysis::isUseThrough(const G4_BB *bb, unsigned var_id) const {
-  return use_in[bb->getId()].isSet(var_id) &&
-         use_out[bb->getId()].isSet(var_id);
+  return use_in[bb->getId()].test(var_id) &&
+         use_out[bb->getId()].test(var_id);
 }
 //
 // return true if var is live at the exit of bb
 //
 bool LivenessAnalysis::isDefThrough(const G4_BB *bb, unsigned var_id) const {
-  return def_in[bb->getId()].isSet(var_id) &&
-         def_out[bb->getId()].isSet(var_id);
+  return def_in[bb->getId()].test(var_id) &&
+         def_out[bb->getId()].test(var_id);
 }
 
 void GlobalRA::markBlockLocalVar(G4_RegVar *var, unsigned bbId) {
@@ -2123,6 +2152,7 @@ void GlobalRA::markBlockLocalVars() {
 }
 
 void GlobalRA::resetGlobalRAStates() {
+  auto origDclSize = kernel.Declares.size();
   if (builder.getOption(vISA_LocalDeclareSplitInGlobalRA)) {
     // remove partial decls
     auto isPartialDcl = [](G4_Declare *dcl) { return dcl->getIsPartialDcl(); };
@@ -2131,6 +2161,8 @@ void GlobalRA::resetGlobalRAStates() {
                                          kernel.Declares.end(), isPartialDcl),
                           kernel.Declares.end());
   }
+
+  incRA.reduceMaxDclId(origDclSize - kernel.Declares.size());
 
   for (auto dcl : kernel.Declares) {
     // Reset all the local live ranges
@@ -2142,6 +2174,7 @@ void GlobalRA::resetGlobalRAStates() {
         dcl->setIsSplittedDcl(false);
         clearSubDcl(dcl);
       }
+      incRA.markForIntfUpdate(dcl);
     }
 
     // Remove the bank assignment
@@ -2537,7 +2570,7 @@ void GlobalRA::verifyRA(LivenessAnalysis &liveAnalysis) {
                 liveOutRegMapIt != liveOutRegMap.end(),
                 "RA verification error: Invalid entry in liveOutRegMap!");
             if (liveOutRegVec[idx] != varID) {
-              const SparseBitSet &indr_use = liveAnalysis.indr_use[bb->getId()];
+              const llvm_SBitVector &indr_use = liveAnalysis.indr_use[bb->getId()];
 
               if (strstr(dcl->getName(), GlobalRA::StackCallStr) != nullptr) {
                 vISA_ASSERT(false,
@@ -2545,7 +2578,7 @@ void GlobalRA::verifyRA(LivenessAnalysis &liveAnalysis) {
                             "stackCall variable: %s and %s assigned to r%d.%d",
                             dcl->getName(), liveOutRegMapIt->second->getName(),
                             regNum, regOff);
-              } else if (indr_use.isSet(liveOutRegVec[idx]) == true) {
+              } else if (indr_use.test(liveOutRegVec[idx]) == true) {
                 vISA_ASSERT(false,
                             "RA verification error: Found conflicting indirect "
                             "variables %s and %s assigned to r%d.%d",
@@ -2703,7 +2736,7 @@ void GlobalRA::verifyRA(LivenessAnalysis &liveAnalysis) {
             liveOutRegMap.emplace(idx, dcl);
           } else {
             if (liveOutRegVec[idx] != varID) {
-              const SparseBitSet &indr_use = liveAnalysis.indr_use[bb->getId()];
+              const llvm_SBitVector &indr_use = liveAnalysis.indr_use[bb->getId()];
 
               if (dcl->isInput()) {
                 vISA_ASSERT(false,
@@ -2720,7 +2753,7 @@ void GlobalRA::verifyRA(LivenessAnalysis &liveAnalysis) {
                             "stackCall variables: %s and %s assigned to r%d.%d",
                             dcl->getName(), liveOutRegMapIt->second->getName(),
                             regNum, regOff);
-              } else if (indr_use.isSet(liveOutRegVec[idx]) == true) {
+              } else if (indr_use.test(liveOutRegVec[idx]) == true) {
                 vISA_ASSERT(false,
                             "RA verification error: Found conflicting indirect "
                             "variables: %s and %s assigned to r %d.%d",
@@ -2837,7 +2870,7 @@ void GlobalRA::verifyRA(LivenessAnalysis &liveAnalysis) {
                 liveOutRegMap.emplace(idx, dcl);
               } else {
                 if (liveOutRegVec[idx] != varID) {
-                  const SparseBitSet &indr_use =
+                  const llvm_SBitVector &indr_use =
                       liveAnalysis.indr_use[bb->getId()];
 
                   if (dcl->isInput()) {
@@ -2849,7 +2882,7 @@ void GlobalRA::verifyRA(LivenessAnalysis &liveAnalysis) {
                                 regOff);
                     liveOutRegVec[idx] = varID;
                     liveOutRegMapIt->second = dcl;
-                  } else if (indr_use.isSet(liveOutRegVec[idx]) == true) {
+                  } else if (indr_use.test(liveOutRegVec[idx]) == true) {
                     vISA_ASSERT(
                         false,
                         "RA verification error: Found conflicting indirect "
@@ -3092,15 +3125,13 @@ int regAlloc(IR_Builder &builder, PhyRegPool &regPool, G4_Kernel &kernel) {
     }
   }
 
-  if (!gra.isReRAPass()) {
-    // propagate address takens to gtpin info
-    std::unordered_map<G4_Declare *, std::vector<G4_Declare *>> addrTakenMap;
-    pointsToAnalysis.getPointsToMap(addrTakenMap);
-    auto gtpinData = kernel.getGTPinData();
-    for (auto &indirRef : addrTakenMap) {
-      for (auto target : indirRef.second)
-        gtpinData->addIndirRef(indirRef.first, target);
-    }
+  // propagate address takens to gtpin info
+  std::unordered_map<G4_Declare *, std::vector<G4_Declare *>> addrTakenMap;
+  pointsToAnalysis.getPointsToMap(addrTakenMap);
+  auto gtpinData = kernel.getGTPinData();
+  for (auto &indirRef : addrTakenMap) {
+    for (auto target : indirRef.second)
+      gtpinData->addIndirRef(indirRef.first, target);
   }
 
   if (status != VISA_SUCCESS) {
@@ -3117,11 +3148,12 @@ int regAlloc(IR_Builder &builder, PhyRegPool &regPool, G4_Kernel &kernel) {
     // written in the setup. That may cause gen is not blocked by the setup
     // inst, and the verifier might wrongly report a conflict assignment.
     //
+    // clang-format off
     //   .declare M9 (2547)  rf=r size=32 type=ud align=16 words
     //
     //   (W) mov (1)              M9(0,2)<1>:ud  0xe0:uw // $211:
-    //   (W) send (8)             V0173(0,0)<1>:d M9(0,0) 0x2184200:ud
-    //       //$213:; unaligned oword block read, dstLen=1, src0Len=1
+    //   (W) send (8)             V0173(0,0)<1>:d M9(0,0) 0x2184200:ud unaligned oword block read, dstLen=1, src0Len=1
+    // clang-format on
     gra.markGraphBlockLocalVars();
     LivenessAnalysis liveAnalysis(gra, G4_GRF | G4_INPUT, true);
     liveAnalysis.computeLiveness();

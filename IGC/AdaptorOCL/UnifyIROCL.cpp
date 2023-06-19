@@ -32,6 +32,7 @@ SPDX-License-Identifier: MIT
 #include "common/LLVMWarningsPop.hpp"
 
 #include "AdaptorCommon/AddImplicitArgs.hpp"
+#include "AdaptorCommon/FreezeIntDiv.hpp"
 #include "AdaptorCommon/ProcessFuncAttributes.h"
 #include "AdaptorCommon/LegalizeFunctionSignatures.h"
 #include "AdaptorCommon/TypesLegalizationPass.hpp"
@@ -92,6 +93,8 @@ SPDX-License-Identifier: MIT
 #include "Compiler/Optimizer/OpenCLPasses/TransformUnmaskedFunctionsPass.h"
 #include "Compiler/Optimizer/OpenCLPasses/StatelessToStateful/StatelessToStateful.hpp"
 #include "Compiler/Optimizer/OpenCLPasses/KernelFunctionCloning.h"
+#include "Compiler/Optimizer/OpenCLPasses/NontemporalLoadsAndStoresInAssert/NontemporalLoadsAndStoresInAssert.hpp"
+#include "Compiler/Optimizer/OpenCLPasses/HandleDevicelibAssert/HandleDevicelibAssert.hpp"
 #include "Compiler/Legalizer/TypeLegalizerPass.h"
 #include "Compiler/Optimizer/OpenCLPasses/Image3dToImage2darray/Image3dToImage2darray.hpp"
 #include "Compiler/Optimizer/OpenCLPasses/RewriteLocalSize/RewriteLocalSize.hpp"
@@ -206,6 +209,7 @@ static void CommonOCLBasedPasses(
     pContext->metrics.CollectFunctions(pContext->getModule());
 
     unify_opt_PreProcess(pContext);
+    pContext->m_checkFastFlagPerInstructionInCustomUnsafeOptPass = true;
 
     DumpLLVMIR(pContext, "beforeUnification");
 
@@ -377,6 +381,8 @@ static void CommonOCLBasedPasses(
 
     mpm.add(new ReduceOptPass());
 
+    mpm.add(new HandleDevicelibAssert());
+
     mpm.add(new NamedBarriersResolution(pContext->platform.getPlatformInfo().eRenderCoreFamily));
     mpm.add(new PreBIImportAnalysis());
     mpm.add(createTimeStatsCounterPass(pContext, TIME_Unify_BuiltinImport, STATS_COUNTER_START));
@@ -405,6 +411,9 @@ static void CommonOCLBasedPasses(
         Mask.setFast();
         Mask.setNoSignedZeros(false);
         mpm.add(new SetFastMathFlags(Mask, true));
+
+        // mark load and stores inside assert calls as nontemporal to avoid caching.
+        mpm.add(new NontemporalLoadsAndStoresInAssert());
 
         // Report undef references after setting func attribs for import linking
         mpm.add(new UndefinedReferencesPass());
@@ -564,6 +573,10 @@ static void CommonOCLBasedPasses(
             mpm.add(createSimplifyConstantPass());
             mpm.add(createPromoteConstantPass());
         }
+        // For LLVM 14+, make sure to freeze potential UB-causing instructions
+        // before running InstructionCombining that would propagate resulting
+        // poison/undef values.
+        mpm.add(createFreezeIntDivPass());
         mpm.add(createIGCInstructionCombiningPass());
 
         // Instcombine can create constant expressions, which are not handled by the program scope constant resolution pass

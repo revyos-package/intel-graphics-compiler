@@ -1,6 +1,6 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (C) 2017-2021 Intel Corporation
+Copyright (C) 2017-2023 Intel Corporation
 
 SPDX-License-Identifier: MIT
 
@@ -129,49 +129,58 @@ bool ProgramScopeConstantAnalysis::runOnModule(Module& M)
         }
 
         DataVector* inlineProgramScopeBuffer = nullptr;
-        if (AS == ADDRESS_SPACE_GLOBAL)
-        {
-            if (!hasInlineGlobalBuffer)
-            {
-                InlineProgramScopeBuffer ilpsb;
-                ilpsb.alignment = 0;
-                ilpsb.allocSize = 0;
-                m_pModuleMd->inlineGlobalBuffers.push_back(ilpsb);
-                hasInlineGlobalBuffer = true;
-            }
-            inlineProgramScopeBuffer = &m_pModuleMd->inlineGlobalBuffers.back().Buffer;
+        auto initInlineGlobalBuffer = [&]() {
+            InlineProgramScopeBuffer ilpsb;
+            ilpsb.alignment = 0;
+            ilpsb.allocSize = 0;
+            m_pModuleMd->inlineGlobalBuffers.push_back(ilpsb);
+            hasInlineGlobalBuffer = true;
+        };
+        auto initInlineConstantBuffer = [&]() {
+            // General constants
+            InlineProgramScopeBuffer ilpsb;
+            ilpsb.alignment = 0;
+            ilpsb.allocSize = 0;
+            m_pModuleMd->inlineConstantBuffers.push_back(ilpsb);
 
+            // String literals
+            InlineProgramScopeBuffer ilpsbString;
+            ilpsbString.alignment = 0;
+            ilpsbString.allocSize = 0;
+            m_pModuleMd->inlineConstantBuffers.push_back(ilpsbString);
+            hasInlineConstantBuffer = true;
+        };
+
+        // When ZeBin is enabled, constant variables that are string literals
+        // used only by printf will be stored in the second constant buffer.
+        ConstantDataSequential* cds = dyn_cast<ConstantDataSequential>(initializer);
+        bool isZebinPrintfStringConst = Ctx->enableZEBinary() &&
+            cds && (cds->isCString() || cds->isString()) &&
+            OpenCLPrintfAnalysis::isPrintfOnlyStringConstant(globalVar);
+        // Here we follow SPV_EXT_relaxed_printf_string_address_space to relax
+        // the address space requirement of printf strings and accept
+        // non-constant address space printf strings. However, we expect it is
+        // the only exception and FE should produce a IGC input that satisfies
+        // any other OpenCL printf restrictions.
+        if (isZebinPrintfStringConst)
+        {
+            if (!hasInlineConstantBuffer)
+                initInlineConstantBuffer();
+            m_pModuleMd->stringConstants.insert(globalVar);
+            inlineProgramScopeBuffer = &m_pModuleMd->inlineConstantBuffers[1].Buffer;
         }
         else
         {
-            if (!hasInlineConstantBuffer)
+            if (AS == ADDRESS_SPACE_GLOBAL)
             {
-                // General constants
-                InlineProgramScopeBuffer ilpsb;
-                ilpsb.alignment = 0;
-                ilpsb.allocSize = 0;
-                m_pModuleMd->inlineConstantBuffers.push_back(ilpsb);
-
-                // String literals
-                InlineProgramScopeBuffer ilpsbString;
-                ilpsbString.alignment = 0;
-                ilpsbString.allocSize = 0;
-                m_pModuleMd->inlineConstantBuffers.push_back(ilpsbString);
-                hasInlineConstantBuffer = true;
-            }
-
-            // When ZeBin is enabled, constant variables that are string literals
-            // used only by printf will be stored in the second const buffer.
-            ConstantDataSequential* cds = dyn_cast<ConstantDataSequential>(initializer);
-            bool isPrintfStringConst = cds && (cds->isCString() || cds->isString()) &&
-                OpenCLPrintfAnalysis::isPrintfOnlyStringConstant(globalVar);
-            if (Ctx->enableZEBinary() && isPrintfStringConst)
-            {
-                m_pModuleMd->stringConstants.insert(globalVar);
-                inlineProgramScopeBuffer = &m_pModuleMd->inlineConstantBuffers[1].Buffer;
+                if (!hasInlineGlobalBuffer)
+                    initInlineGlobalBuffer();
+                inlineProgramScopeBuffer = &m_pModuleMd->inlineGlobalBuffers.back().Buffer;
             }
             else
             {
+                if (!hasInlineConstantBuffer)
+                    initInlineConstantBuffer();
                 inlineProgramScopeBuffer = &m_pModuleMd->inlineConstantBuffers[0].Buffer;
             }
         }
@@ -226,7 +235,7 @@ bool ProgramScopeConstantAnalysis::runOnModule(Module& M)
     for (auto globalVar : zeroInitializedGlobals)
     {
         unsigned AS = cast<PointerType>(globalVar->getType())->getAddressSpace();
-        unsigned &offset = (AS == ADDRESS_SPACE_GLOBAL) ? m_pModuleMd->inlineGlobalBuffers.back().allocSize : m_pModuleMd->inlineConstantBuffers[0].allocSize;
+        size_t &offset = (AS == ADDRESS_SPACE_GLOBAL) ? m_pModuleMd->inlineGlobalBuffers.back().allocSize : m_pModuleMd->inlineConstantBuffers[0].allocSize;
 #if LLVM_VERSION_MAJOR < 11
         offset = iSTD::Align(offset, m_DL->getPreferredAlignment(globalVar));
 #else
@@ -259,17 +268,17 @@ bool ProgramScopeConstantAnalysis::runOnModule(Module& M)
     // implicit arguments to prevent const vars getting promoted
     // at statelessToStateful pass. In zebin path, stateful promotion
     // of const vars can't work well with printf strings.
-    bool skipConstBuffer =
-        Ctx->enableZEBinary() && !m_pModuleMd->stringConstants.empty();
+    bool skipConstAndGlobalBaseArgs =
+             Ctx->enableZEBinary() && !m_pModuleMd->stringConstants.empty();
 
-    if (!skipConstBuffer && hasInlineConstantBuffer)
+    if (!skipConstAndGlobalBaseArgs && hasInlineConstantBuffer)
     {
         for (auto& pFunc : M)
         {
             if (pFunc.isDeclaration()) continue;
 
             // Skip functions called from function marked with stackcall attribute
-            if (AddImplicitArgs::hasStackCallInCG(&pFunc, *Ctx)) continue;
+            if (AddImplicitArgs::hasStackCallInCG(&pFunc)) continue;
 
             // Always add for kernels and subroutines
             SmallVector<ImplicitArg::ArgType, 1> implicitArgs;
@@ -278,13 +287,13 @@ bool ProgramScopeConstantAnalysis::runOnModule(Module& M)
         }
     }
 
-    if (hasInlineGlobalBuffer)
+    if (!skipConstAndGlobalBaseArgs && hasInlineGlobalBuffer)
     {
         for (auto& pFunc : M)
         {
             if (pFunc.isDeclaration()) continue;
             // Skip functions called from function marked with stackcall attribute
-            if (AddImplicitArgs::hasStackCallInCG(&pFunc, *Ctx)) continue;
+            if (AddImplicitArgs::hasStackCallInCG(&pFunc)) continue;
 
             // Always add for kernels and subroutines
             SmallVector<ImplicitArg::ArgType, 1> implicitArgs;
@@ -407,10 +416,20 @@ void ProgramScopeConstantAnalysis::addData(Constant* initializer,
     DataVector& inlineProgramScopeBuffer,
     PointerOffsetInfoList& pointerOffsetInfoList,
     BufferOffsetMap& inlineProgramScopeOffsets,
-    unsigned addressSpace)
+    unsigned addressSpace,
+    bool forceAlignmentOne)
 {
     // Initial alignment padding before insert the current constant into the buffer.
-    alignBuffer(inlineProgramScopeBuffer, m_DL->getABITypeAlignment(initializer->getType()));
+    alignment_t typeAlignment = forceAlignmentOne ? 1 : m_DL->getABITypeAlignment(initializer->getType());
+    alignBuffer(inlineProgramScopeBuffer, typeAlignment);
+
+    // If the initializer is packed struct make sure, that every variable inside
+    // will have also align 1
+    if (StructType* s = dyn_cast<StructType>(initializer->getType()))
+    {
+        if (cast<StructType>(s)->isPacked())
+            forceAlignmentOne = true;
+    }
 
     // We need to do extra work with pointers here: we don't know their actual addresses
     // at compile time so we find the offset from the base of the buffer they point to
@@ -596,7 +615,7 @@ void ProgramScopeConstantAnalysis::addData(Constant* initializer,
             Constant* C = initializer->getAggregateElement(i);
             IGC_ASSERT_MESSAGE(C, "getAggregateElement returned null, unsupported constant");
             // Since the type may not be primitive, extra alignment is required.
-            addData(C, inlineProgramScopeBuffer, pointerOffsetInfoList, inlineProgramScopeOffsets, addressSpace);
+            addData(C, inlineProgramScopeBuffer, pointerOffsetInfoList, inlineProgramScopeOffsets, addressSpace, forceAlignmentOne);
         }
     }
     // And, finally, we have to handle base types - ints and floats.
@@ -627,5 +646,5 @@ void ProgramScopeConstantAnalysis::addData(Constant* initializer,
 
     // final padding.  This gets used by the vec3 types that will insert zero padding at the
     // end after inserting the actual vector contents (this is due to sizeof(vec3) == 4 * sizeof(scalarType)).
-    alignBuffer(inlineProgramScopeBuffer, m_DL->getABITypeAlignment(initializer->getType()));
+    alignBuffer(inlineProgramScopeBuffer, typeAlignment);
 }

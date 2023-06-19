@@ -90,6 +90,9 @@ namespace IGC
 {
     namespace Debug
     {
+
+#if defined( IGC_DEBUG_VARIABLES )
+
         EnumStr IGC_DEBUG_API_CALL str(DebugFlag value)
         {
 #define CASE(x) case DebugFlag::x: return STRINGIFY(x)
@@ -161,7 +164,6 @@ namespace IGC
 
         void IGC_DEBUG_API_CALL SetCompilerOption(OptionFlag flag, debugString s)
         {
-#if defined(IGC_DEBUG_VARIABLES)
             switch(flag)
             {
 #define DECLARE_IGC_REGKEY(dataType, regkeyName, defaultValue, description, releaseMode) \
@@ -173,12 +175,10 @@ namespace IGC
             default:
                 break;
             }
-#endif
         }
 
         void IGC_DEBUG_API_CALL SetCompilerOption( OptionFlag flag, int value )
         {
-#if defined(IGC_DEBUG_VARIABLES)
             switch(flag)
             {
 #define DECLARE_IGC_REGKEY(dataType, regkeyName, defaultValue, description, releaseMode) \
@@ -190,12 +190,10 @@ namespace IGC
             default:
                 break;
             }
-#endif
         }
 
         extern "C" void IGC_DEBUG_API_CALL SetCompilerOptionValue( const char* flagName, int value )
         {
-#if defined(IGC_DEBUG_VARIABLES)
             if (!flagName)
             {
                 return;
@@ -213,12 +211,10 @@ namespace IGC
                     break;
                 }
             }
-#endif
         }
 
         extern "C" void IGC_DEBUG_API_CALL SetCompilerOptionString( const char* flagName, debugString s )
         {
-#if defined(IGC_DEBUG_VARIABLES)
             if (!flagName)
             {
                 return;
@@ -236,7 +232,6 @@ namespace IGC
                     break;
                 }
             }
-#endif
         }
 
         void IGC_DEBUG_API_CALL SetDebugFlag( DebugFlag flag, bool enabled )
@@ -244,20 +239,13 @@ namespace IGC
             IGC_ASSERT_EXIT_MESSAGE((0 <= static_cast<int>(flag)), "range sanity check");
             IGC_ASSERT_EXIT_MESSAGE((static_cast<int>(flag) < static_cast<int> (DebugFlag::END)), "range sanity check");
 
-#if defined( _DEBUG ) || defined( _INTERNAL )
             g_debugFlags[ static_cast<int>( flag ) ] = enabled;
-#else
-            (void) flag;
-            (void) enabled;
-#endif
         }
 
         bool IGC_DEBUG_API_CALL GetDebugFlag( DebugFlag flag )
         {
             IGC_ASSERT_EXIT_MESSAGE((0 <= static_cast<int>(flag)), "range sanity check");
             IGC_ASSERT_EXIT_MESSAGE((static_cast<int>(flag) < static_cast<int> (DebugFlag::END)), "range sanity check");
-
-#if defined( _DEBUG ) || defined( _INTERNAL )
 
 #if defined(_WIN32 )|| defined( _WIN64 )
             //Disable Dump  for OS Applications
@@ -274,10 +262,6 @@ namespace IGC
             }
 #endif
             return g_debugFlags[ static_cast<int>(flag) ];
-#else
-            (void) flag;
-            return false;
-#endif
         }
 
         void IGC_DEBUG_API_CALL SetDumpFlag( DumpType type, DumpLoc loc, bool enabled )
@@ -285,26 +269,18 @@ namespace IGC
             IGC_ASSERT_EXIT_MESSAGE((0 <= static_cast<int>(type)), "range sanity check");
             IGC_ASSERT_EXIT_MESSAGE((static_cast<int>(type) < static_cast<int> (DumpType::END)), "range sanity check");
 
-#if defined( _DEBUG ) || defined( _INTERNAL )
             switch (loc)
             {
             case DumpLoc::ODS  : g_dumpFlags[ static_cast<int>(type) ].dumpODS  = enabled; break;
             case DumpLoc::FILE : g_dumpFlags[ static_cast<int>(type) ].dumpFile = enabled; break;
             default            : IGC_ASSERT_EXIT_MESSAGE(0, "unreachable"); break;
             }
-#else
-            (void) type;
-            (void) loc;
-            (void) enabled;
-#endif
         }
 
         bool IGC_DEBUG_API_CALL GetDumpFlag( DumpType type, DumpLoc loc )
         {
             IGC_ASSERT_EXIT_MESSAGE((0 <= static_cast<int>(type)), "range sanity check");
             IGC_ASSERT_EXIT_MESSAGE((static_cast<int>(type) < static_cast<int> (DumpType::END)), "range sanity check");
-
-#if defined( _DEBUG ) || defined( _INTERNAL )
 
 #if defined(_WIN32 )|| defined( _WIN64 )
             //Disable Dump  for OS Applications
@@ -319,47 +295,29 @@ namespace IGC
             case DumpLoc::FILE : return g_dumpFlags[ static_cast<int>(type) ].dumpFile;
             default            : IGC_ASSERT_EXIT_MESSAGE(0, "unreachable"); return false;
             }
-#else
-            (void) type;
-            (void) loc;
-            return false;
-#endif
         }
 
         void IGC_DEBUG_API_CALL SetShaderCorpusName( CorpusName name )
         {
-#if defined( _DEBUG ) || defined( _INTERNAL )
             g_shaderCorpusName = name;
-#else
-            (void) name;
-#endif
         }
 
         CorpusName IGC_DEBUG_API_CALL GetShaderCorpusName()
         {
-#if defined( _DEBUG ) || defined( _INTERNAL )
             return g_shaderCorpusName.c_str();
-#else
-            return "";
-#endif
         }
 
         void IGC_DEBUG_API_CALL SetShaderOutputFolder( OutputFolderName name )
         {
-#if defined(IGC_DEBUG_VARIABLES)
             g_shaderOutputFolder = name;
-#endif
         }
         void IGC_DEBUG_API_CALL SetShaderOutputName( OutputName name )
         {
-#if defined(IGC_DEBUG_VARIABLES)
             g_shaderOutputName = name;
-#endif
         }
 
         OutputFolderName IGC_DEBUG_API_CALL GetBaseIGCOutputFolder()
         {
-#if defined(IGC_DEBUG_VARIABLES)
             static std::mutex m;
             std::lock_guard<std::mutex> lck(m);
             static std::string IGCBaseFolder;
@@ -375,6 +333,7 @@ namespace IGC
                     IGC_IS_FLAG_ENABLED(EnableCosDump) ||
                     IGC_IS_FLAG_ENABLED(EnableVISAOutput) ||
                     IGC_IS_FLAG_ENABLED(EnableVISABinary) ||
+                    IGC_IS_FLAG_ENABLED(EnableVISADumpCombinedCISA) ||
                     IGC_IS_FLAG_ENABLED(EnableVISADumpCommonISA) ||
                     GetDebugFlag(DebugFlag::DUMP_AFTER_PASSES) ||
                     GetDebugFlag(DebugFlag::VISA_OUTPUT) ||
@@ -467,9 +426,6 @@ namespace IGC
         }
 #endif
             return IGCBaseFolder.c_str();
-#else
-            return "";
-#endif
         }
 
         std::string& GetShaderOverridePathString()
@@ -504,7 +460,6 @@ namespace IGC
 
         OutputFolderName IGC_DEBUG_API_CALL GetShaderOutputFolder()
         {
-#if defined(IGC_DEBUG_VARIABLES)
             static std::mutex m;
             std::lock_guard<std::mutex> lck(m);
             if(g_shaderOutputFolder != "")
@@ -572,6 +527,7 @@ namespace IGC
                     IGC_IS_FLAG_ENABLED(EnableCosDump) ||
                     IGC_IS_FLAG_ENABLED(EnableVISAOutput) ||
                     IGC_IS_FLAG_ENABLED(EnableVISABinary) ||
+                    IGC_IS_FLAG_ENABLED(EnableVISADumpCombinedCISA) ||
                     IGC_IS_FLAG_ENABLED(EnableVISADumpCommonISA) ||
                     GetDebugFlag(DebugFlag::DUMP_AFTER_PASSES) ||
                     GetDebugFlag(DebugFlag::VISA_OUTPUT) ||
@@ -608,9 +564,6 @@ namespace IGC
 
 #endif
             return g_shaderOutputFolder.c_str();
-#else
-            return "";
-#endif
         }
 
         OutputName IGC_DEBUG_API_CALL GetFunctionDebugFile()
@@ -631,16 +584,19 @@ namespace IGC
 
         OutputName IGC_DEBUG_API_CALL GetShaderOutputName()
         {
-#if defined(IGC_DEBUG_VARIABLES)
             return g_shaderOutputName.c_str();
-#else
-            return "";
-#endif
         }
 
         VersionInfo IGC_DEBUG_API_CALL GetVersionInfo()
         {
             return g_cBuildInfo;
         }
+#else  // defined( IGC_DEBUG_VARIABLES )
+        // C extern inline needs extern definition
+        extern "C" void IGC_DEBUG_API_CALL SetCompilerOptionValue(const char* flagName, int value);
+        extern "C" void IGC_DEBUG_API_CALL SetCompilerOptionString(const char* flagName, debugString s);
+
+
+#endif // defined( IGC_DEBUG_VARIABLES )
     }
 }

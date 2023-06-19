@@ -63,18 +63,18 @@ namespace IGC
         return m_ProfilingTimerResolution;
     }
 
-    uint32_t OpenCLProgramContext::getNumThreadsPerEU() const
+    int32_t OpenCLProgramContext::getNumThreadsPerEU() const
     {
         if (m_Options.IntelRequiredEUThreadCount)
         {
             return m_Options.requiredEUThreadCount;
         }
-        if (m_InternalOptions.IntelNumThreadPerEU || m_InternalOptions.Intel256GRFPerThread)
+        if (m_InternalOptions.IntelNumThreadPerEU)
         {
             return m_InternalOptions.numThreadsPerEU;
         }
 
-        return 0;
+        return -1;
     }
 
     uint32_t OpenCLProgramContext::getExpGRFSize() const {
@@ -374,13 +374,11 @@ namespace IGC
             else if (suffix.equals("-128-GRF-per-thread"))
             {
                 Intel128GRFPerThread = true;
-                numThreadsPerEU = 8;
             }
             else if (suffix.equals("-256-GRF-per-thread") ||
                 suffix.equals("-large-register-file"))
             {
                 Intel256GRFPerThread = true;
-                numThreadsPerEU = 4;
             }
             else if (suffix.equals("-num-thread-per-eu"))
             {
@@ -391,7 +389,11 @@ namespace IGC
                 size_t valStart = opts.find_first_not_of(' ', ePos + 1);
                 size_t valEnd = opts.find_first_of(' ', valStart);
                 llvm::StringRef valStr = opts.substr(valStart, valEnd - valStart);
-                if (valStr.getAsInteger(10, numThreadsPerEU))
+                if (valStr.equals("auto"))
+                {
+                    numThreadsPerEU = 0;
+                }
+                else if (valStr.getAsInteger(10, numThreadsPerEU))
                 {
                     IGC_ASSERT(0);
                 }
@@ -700,13 +702,13 @@ namespace IGC
 
         m_regularGRFRequested = false;
         m_largeGRFRequested = false;
-        m_annotatedNumThreads = 0;
+        m_annotatedNumThreads = -1;
         if (m_Platform->supportsStaticRegSharing())
         {
             // Obtain number of threads from user annotations if it is set
             auto& FuncInfo = m_Context->getModuleMetaData()->FuncMD[pFunc];
-            unsigned numThreads = extractAnnotatedNumThreads(FuncInfo);
-            if (numThreads > 0 && m_Platform->isValidNumThreads(numThreads))
+            int numThreads = extractAnnotatedNumThreads(FuncInfo);
+            if (numThreads >= 0 && m_Platform->isValidNumThreads(numThreads))
             {
                 m_annotatedNumThreads = numThreads;
             }
@@ -821,7 +823,7 @@ namespace IGC
             else
             {
                 auto WalkOrder = getWalkOrder(WO.dim0, WO.dim1);
-                if (WalkOrder != WO_XYZ)
+                if (WalkOrder != CS_WALK_ORDER::WO_XYZ)
                 {
                     IGC_ASSERT_MESSAGE(0, "unhandled walk order!");
                 }
@@ -1729,6 +1731,12 @@ namespace IGC
         case KernelArg::ArgType::IMPLICIT_RT_GLOBAL_BUFFER:
             zebin::ZEInfoBuilder::addPayloadArgumentImplicit(m_kernelInfo.m_zePayloadArgs,
                 zebin::PreDefinedAttrGetter::ArgType::rt_global_buffer,
+                payloadPosition, kernelArg->getAllocateSize());
+            break;
+
+        case KernelArg::ArgType::IMPLICIT_ASSERT_BUFFER:
+            zebin::ZEInfoBuilder::addPayloadArgumentImplicit(m_kernelInfo.m_zePayloadArgs,
+                zebin::PreDefinedAttrGetter::ArgType::assert_buffer,
                 payloadPosition, kernelArg->getAllocateSize());
             break;
 
@@ -2669,7 +2677,7 @@ namespace IGC
         {
             m_kernelInfo.m_threadPayload.generateLocalID = true;
             m_kernelInfo.m_threadPayload.emitLocalMask = m_emitMask;
-            m_kernelInfo.m_threadPayload.walkOrder = m_walkOrder;
+            m_kernelInfo.m_threadPayload.walkOrder = static_cast<unsigned int>(m_walkOrder);
             m_kernelInfo.m_threadPayload.tileY = (m_ThreadIDLayout == ThreadIDLayout::TileY);
         }
 
@@ -2901,7 +2909,9 @@ namespace IGC
         }
 
         // Disable EU Fusion.
-        if (IGC_IS_FLAG_ENABLED(DisableEuFusion) || m_Context->m_InternalOptions.DisableEUFusion)
+        if (IGC_IS_FLAG_ENABLED(DisableEuFusion) ||
+            m_Context->m_InternalOptions.DisableEUFusion ||
+            m_Context->getModuleMetaData()->compOpt.DisableEUFusion)
         {
             m_kernelInfo.m_executionEnvironment.RequireDisableEUFusion = true;
         }
@@ -3420,6 +3430,10 @@ namespace IGC
         return pShader && pShader->GetEncoder().IsVisaCompiledSuccessfully();
     }
 
+    bool COpenCLKernel::IsVisaCompileStatusFailureForShader(COpenCLKernel *pShader) {
+        return pShader && pShader->GetEncoder().IsVisaCompileStatusFailure();
+    }
+
     enum class RetryType
     {
         NO_Retry,
@@ -3545,11 +3559,14 @@ namespace IGC
             }
         };
 
-        if (simd8Shader)
+        // Need to check if simd* shader is not nullptr and its vISA compile status,
+        // since it may be created without going through full vISA compilation and
+        // the spill size record may be invalid
+        if (simd8Shader && !COpenCLKernel::IsVisaCompileStatusFailureForShader(simd8Shader))
           verify(simd8Shader);
-        else if (simd16Shader)
+        else if (simd16Shader && !COpenCLKernel::IsVisaCompileStatusFailureForShader(simd16Shader))
           verify(simd16Shader);
-        else if (simd32Shader)
+        else if (simd32Shader && !COpenCLKernel::IsVisaCompileStatusFailureForShader(simd32Shader))
           verify(simd32Shader);
     }
 
@@ -3747,6 +3764,7 @@ namespace IGC
                     GatherDataForDriver(ctx, simd16Shader, std::move(pKernel), pFunc, pMdUtils, SIMDMode::SIMD16);
                 if (COpenCLKernel::IsValidShader(simd8Shader))
                     GatherDataForDriver(ctx, simd8Shader, std::move(pKernel), pFunc, pMdUtils, SIMDMode::SIMD8);
+                // TODO: check if we need to invoke verifyOOBScratch(...) here
             }
             else if (ctx->m_InternalOptions.EmitVisaOnly)
             {
@@ -3816,15 +3834,6 @@ namespace IGC
                 COpenCLKernel* shader = static_cast<COpenCLKernel*>(m_parent->GetShader(mode));
                 if (COpenCLKernel::IsVisaCompiledSuccessfullyForShader(shader))
                     return false;
-            }
-        }
-
-        {
-            // If stack calls are present, disable simd32 in order to do wa in visa
-            bool needCallWA = (IGC_IS_FLAG_ENABLED(EnableCallWA) && m_Context->platform.hasFusedEU());
-            if (needCallWA && simdMode == SIMDMode::SIMD32  && HasStackCalls())
-            {
-                return false;
             }
         }
 
@@ -3920,36 +3929,21 @@ namespace IGC
             simd_size = funcInfoMD->getSubGroupSize()->getSIMD_size();
         }
 
-        bool hasStackCall = m_FGA && m_FGA->getGroup(&F) && m_FGA->getGroup(&F)->hasStackCall();
-        bool isIndirectGroup = m_FGA && m_FGA->getGroup(&F) && IGC::isIntelSymbolTableVoidProgram(m_FGA->getGroupHead(&F));
-        bool hasSubroutine = m_FGA && m_FGA->getGroup(&F) && !m_FGA->getGroup(&F)->isSingle() && !hasStackCall && !isIndirectGroup;
+        auto FG = m_FGA ? m_FGA->getGroup(&F) : nullptr;
+        bool hasStackCall = FG && FG->hasStackCall();
+        bool isIndirectGroup = FG && m_FGA->isIndirectCallGroup(FG);
+        bool hasSubroutine = FG && !FG->isSingle() && !hasStackCall && !isIndirectGroup;
         bool forceLowestSIMDForStackCalls = IGC_IS_FLAG_ENABLED(ForceLowestSIMDForStackCalls) && (hasStackCall || isIndirectGroup);
 
-        if (hasStackCall || isIndirectGroup || hasSubroutine)
+        if (simd_size == 0)
         {
-            if (!PVCLSCEnabled())
-            {
-                // Only support simd32 for function calls if LSC is enabled
-                if (simdMode == SIMDMode::SIMD32)
-                {
-                    pCtx->SetSIMDInfo(SIMD_SKIP_HW, simdMode, ShaderDispatchMode::NOT_APPLICABLE);
-                    return SIMDStatus::SIMD_FUNC_FAIL;
-                }
-
-                // Must force simd16 with LSC disabled
-                pCtx->getModuleMetaData()->csInfo.forcedSIMDSize = (unsigned char)numLanes(SIMDMode::SIMD16);
-            }
-
             if (hasSubroutine &&
-                simd_size == 0 &&
                 simdMode != SIMDMode::SIMD16)
             {
                 pCtx->SetSIMDInfo(SIMD_SKIP_HW, simdMode, ShaderDispatchMode::NOT_APPLICABLE);
                 return SIMDStatus::SIMD_FUNC_FAIL;
             }
-
             if (forceLowestSIMDForStackCalls &&
-                simd_size == 0 &&
                 simdMode != SIMDMode::SIMD16)
             {
                 pCtx->SetSIMDInfo(SIMD_SKIP_HW, simdMode, ShaderDispatchMode::NOT_APPLICABLE);
@@ -4040,7 +4034,7 @@ namespace IGC
         return SIMDStatus::SIMD_PASS;
     }
 
-    unsigned COpenCLKernel::getAnnotatedNumThreads() {
+    int COpenCLKernel::getAnnotatedNumThreads() {
         return m_annotatedNumThreads;
     }
 
@@ -4107,24 +4101,35 @@ namespace IGC
             }
         }
 
-        bool hasStackCall = m_FGA && m_FGA->getGroup(&F) && m_FGA->getGroup(&F)->hasStackCall();
-        bool isIndirectGroup = m_FGA && m_FGA->getGroup(&F) && IGC::isIntelSymbolTableVoidProgram(m_FGA->getGroupHead(&F));
-        bool hasSubroutine = m_FGA && m_FGA->getGroup(&F) && !m_FGA->getGroup(&F)->isSingle() && !hasStackCall && !isIndirectGroup;
+        auto FG = m_FGA ? m_FGA->getGroup(&F) : nullptr;
+        bool hasStackCall = FG && FG->hasStackCall();
+        bool isIndirectGroup = FG && m_FGA->isIndirectCallGroup(FG);
+        bool hasSubroutine = FG && !FG->isSingle() && !hasStackCall && !isIndirectGroup;
 
-        // Cannot compile simd32 for function calls due to slicing
-        if (hasStackCall || hasSubroutine || isIndirectGroup)
+        // If stack calls are present, disable simd32 in order to do CallWA in visa
+        if (pCtx->platform.requireCallWA() && simdMode == SIMDMode::SIMD32)
         {
-            // Fail on SIMD32 for all groups with function calls
-            if (simdMode == SIMDMode::SIMD32)
+            bool hasNestedCall = FG && FG->hasNestedCall();
+            bool hasIndirectCall = FG && FG->hasIndirectCall();
+            if (hasNestedCall || hasIndirectCall || isIndirectGroup)
             {
+                // If sub_group_size is set to 32, resize it to 16 so SIMD16 compilation will still succeed
+                if (simd_size == 32)
+                {
+                    llvm::Function* Kernel = FG->getHead();
+                    funcInfoMD = pMdUtils->getFunctionsInfoItem(Kernel);
+                    funcInfoMD->getSubGroupSize()->setSIMD_size(16);
+                }
                 pCtx->SetSIMDInfo(SIMD_SKIP_HW, simdMode, ShaderDispatchMode::NOT_APPLICABLE);
                 return SIMDStatus::SIMD_FUNC_FAIL;
             }
+        }
 
+        if (simd_size == 0)
+        {
             // Default to lowest SIMD mode for stack calls/indirect calls
             if (IGC_IS_FLAG_ENABLED(ForceLowestSIMDForStackCalls) &&
                 (hasStackCall || isIndirectGroup) &&
-                simd_size == 0 &&
                 simdMode != SIMDMode::SIMD8)
             {
                 pCtx->SetSIMDInfo(SIMD_SKIP_HW, simdMode, ShaderDispatchMode::NOT_APPLICABLE);
@@ -4133,7 +4138,6 @@ namespace IGC
 
             // Just subroutines and subgroup size is not set, default to SIMD8
             if (hasSubroutine &&
-                simd_size == 0 &&
                 simdMode != SIMDMode::SIMD8)
             {
                 pCtx->SetSIMDInfo(SIMD_SKIP_HW, simdMode, ShaderDispatchMode::NOT_APPLICABLE);

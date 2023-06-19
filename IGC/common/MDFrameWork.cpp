@@ -1,6 +1,6 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (C) 2017-2021 Intel Corporation
+Copyright (C) 2017-2023 Intel Corporation
 
 SPDX-License-Identifier: MIT
 
@@ -45,6 +45,8 @@ template<typename Key, typename Value>
 MDNode* CreateNode(const MapVector<Key, Value> &FuncMD, Module* module, StringRef name);
 template<typename Key>
 MDNode* CreateNode(const std::set<Key> &FuncMD, Module* module, StringRef name);
+template<typename Key>
+MDNode* CreateNode(const SetVector<Key> &FuncMD, Module* module, StringRef name);
 MDNode* CreateNode(const std::string &s, Module* module, StringRef name);
 MDNode* CreateNode(char* i, Module* module, StringRef name);
 
@@ -73,6 +75,8 @@ template<typename Key, typename Value>
 void readNode(MapVector<Key, Value> &funcMD, MDNode* node);
 template<typename Key>
 void readNode(std::set<Key> &funcMD, MDNode* node);
+template<typename Key>
+void readNode(SetVector<Key> &funcMD, MDNode* node);
 
 template<typename T>
 void readNode(T &t, MDNode* node, StringRef name);
@@ -177,7 +181,7 @@ MDNode* CreateNode(const std::vector<val> &vec, Module* module, StringRef name)
 {
     std::vector<Metadata*> nodes;
     nodes.push_back(MDString::get(module->getContext(), name));
-    int i = 0;
+    size_t i = 0;
     for (auto it = vec.begin(); it != vec.end(); ++it)
     {
         nodes.push_back(CreateNode(*(it), module, name.str() + "Vec[" + std::to_string(i++) + "]"));
@@ -294,6 +298,20 @@ MDNode* CreateNode(const std::set<Key> &FuncMD, Module* module, StringRef name)
     nodes.push_back(MDString::get(module->getContext(), name));
     int i = 0;
     for ( auto it = FuncMD.begin(); it != FuncMD.end(); ++it)
+    {
+        nodes.push_back(CreateNode(*it, module, name.str() + "Set[" + std::to_string(i++) + "]"));
+    }
+    MDNode* node = MDNode::get(module->getContext(), nodes);
+    return node;
+}
+
+template<typename Key>
+MDNode* CreateNode(const SetVector<Key> &FuncMD, Module* module, StringRef name)
+{
+    std::vector<Metadata*> nodes;
+    nodes.push_back(MDString::get(module->getContext(), name));
+    int i = 0;
+    for (auto it = FuncMD.begin(); it != FuncMD.end(); ++it)
     {
         nodes.push_back(CreateNode(*it, module, name.str() + "Set[" + std::to_string(i++) + "]"));
     }
@@ -462,6 +480,18 @@ void readNode(std::set<Key> &keyMD, MDNode* node)
     return;
 }
 
+template<typename Key>
+void readNode(SetVector<Key> &keyMD, MDNode* node)
+{
+    for (unsigned k = 1; k < node->getNumOperands(); k++)
+    {
+        Key key;
+        readNode(key, cast<MDNode>(node->getOperand(k)));
+        keyMD.insert(key);
+    }
+    return;
+}
+
 template<typename T>
 void readNode(T &t, MDNode* node, StringRef name)
 {
@@ -514,17 +544,24 @@ bool IGC::isCallStackHandler(const IGC::FunctionMetaData &funcMD)
     return funcMD.rtInfo.callableShaderType == IGC::CallStackHandler;
 }
 
-unsigned IGC::extractAnnotatedNumThreads(const IGC::FunctionMetaData& funcMD)
+int IGC::extractAnnotatedNumThreads(const IGC::FunctionMetaData& funcMD)
 {
-    unsigned numThreadsPerEU = 0;
-    for (std::string annotation : funcMD.UserAnnotations)
+    static constexpr const char* searchedString = "num-thread-per-eu";
+    static constexpr auto searchedStringLength = std::char_traits<char>::length(searchedString);
+
+    for (const auto& annotation : funcMD.UserAnnotations)
     {
-        if (const char* op = strstr(annotation.c_str(), "num-thread-per-eu"))
+        auto index = annotation.find(searchedString);
+        if (index != std::string::npos)
         {
-            numThreadsPerEU = atoi(op + strlen("num-thread-per-eu"));
-            break;
+            std::string value = annotation.substr(index + searchedStringLength);
+
+            // Remove whitespaces - if they are present
+            value.erase(std::remove_if(value.begin(), value.end(), ::isspace), value.end());
+
+            return value == "auto" ? 0 : std::stoi(value);
         }
     }
 
-    return numThreadsPerEU;
+    return -1;
 }

@@ -18,6 +18,7 @@ SPDX-License-Identifier: MIT
 #include "Compiler/CISACodeGen/VariableReuseAnalysis.hpp"
 #include "Compiler/CISACodeGen/OpenCLKernelCodeGen.hpp"
 #include "Compiler/CISACodeGen/VectorProcess.hpp"
+#include "Compiler/CISACodeGen/EmitVISAPass.hpp"
 #include "Compiler/MetaDataApi/MetaDataApi.h"
 #include "common/secure_mem.h"
 #include "Probe/Assertion.h"
@@ -41,6 +42,7 @@ CShader::CShader(Function* pFunc, CShaderProgram* pProgram)
     m_DL = nullptr;
     m_FGA = nullptr;
     m_VRA = nullptr;
+    m_EmitPass = nullptr;
     m_shaderStats = nullptr;
     m_constantBufferMask = 0;
     m_constantBufferLoaded = 0;
@@ -719,21 +721,25 @@ void  CShader::CreateConstantBufferOutput(SKernelProgram* pKernelProgram)
     }
 }
 
-void CShader::CreateFunctionSymbol(llvm::Function* pFunc)
+CVariable* CShader::CreateFunctionSymbol(llvm::Function* pFunc)
 {
     // Functions with uses in this module requires relocation
     CVariable* funcAddr = GetSymbol(pFunc);
     std::string funcName = pFunc->getName().str();
     encoder.AddVISASymbol(funcName, funcAddr);
     encoder.Push();
+
+    return funcAddr;
 }
 
-void CShader::CreateGlobalSymbol(llvm::GlobalVariable* pGlobal)
+CVariable* CShader::CreateGlobalSymbol(llvm::GlobalVariable* pGlobal)
 {
     CVariable* globalAddr = GetSymbol(pGlobal);
     std::string globalName = pGlobal->getName().str();
     encoder.AddVISASymbol(globalName, globalAddr);
     encoder.Push();
+
+    return globalAddr;
 }
 
 void CShader::CacheArgumentsList()
@@ -846,10 +852,20 @@ void CShader::RemoveBitRange(CVariable*& src, unsigned removebit, unsigned range
     encoder.Push();
     encoder.IShr(leftHalf, src, ImmToVariable(range, ISA_TYPE_D));
     encoder.Push();
-    encoder.And(leftHalf, leftHalf, ImmToVariable(~mask, ISA_TYPE_D));
-    encoder.Push();
-    encoder.Or(src, rightHalf, leftHalf);
-    encoder.Push();
+
+    if (IGC_IS_FLAG_ENABLED(EnableBfn) &&
+        m_Platform->supportBfnInstruction()) {
+        // src = leftHalf & ~mask | rightHalf;
+        // Hardcoded bfn control "s0&s1|s2": 0xF8
+        encoder.Bfn(0xF8, src, leftHalf, ImmToVariable(~mask, ISA_TYPE_D),
+                      rightHalf);
+        encoder.Push();
+    } else {
+        encoder.And(leftHalf, leftHalf, ImmToVariable(~mask, ISA_TYPE_D));
+        encoder.Push();
+        encoder.Or(src, rightHalf, leftHalf);
+        encoder.Push();
+    }
 }
 
 CVariable* CShader::GetHWTID()
@@ -1974,14 +1990,16 @@ CVariable* CShader::GetStructVariable(llvm::Value* v)
     }
 
     bool isUniform = m_WI->isUniform(v);
+    const uint16_t Instances = isUniform ? 1 : m_numberInstance;
     StructType* sTy = cast<StructType>(v->getType());
     auto& DL = entry->getParent()->getDataLayout();
     const StructLayout* SL = DL.getStructLayout(sTy);
 
     // Represent the struct as a vector of BYTES
     unsigned structSizeInBytes = (unsigned)SL->getSizeInBytes();
-    unsigned lanes = isUniform ? 1 : numLanes(m_dispatchSize);
-    CVariable* cVar = GetNewVariable(structSizeInBytes * lanes, ISA_TYPE_B, EALIGN_GRF, isUniform, "StructV");
+    unsigned lanes = isUniform ? 1 : numLanes(m_SIMDSize);
+    CVariable* cVar = GetNewVariable(structSizeInBytes * lanes,
+        ISA_TYPE_B, EALIGN_GRF, isUniform, Instances, "StructV");
 
     // Initialize the struct default value if it has one
     Constant* C = dyn_cast<Constant>(v);
@@ -1993,10 +2011,9 @@ CVariable* CShader::GetStructVariable(llvm::Value* v)
             if (!elementSrc->IsUndef())
             {
                 unsigned elementOffset = (unsigned)SL->getElementOffset(i);
-                CVariable* elementDst = GetNewAlias(cVar, elementSrc->GetType(),
-                    elementOffset * lanes, elementSrc->GetNumberElement() * lanes);
-                GetEncoder().Copy(elementDst, elementSrc);
-                GetEncoder().Push();
+                Type* elementType = sTy->getElementType(i);
+                m_EmitPass->emitMayUnalignedVectorCopy(
+                    cVar, elementOffset, elementSrc, 0, elementType);
             }
         }
     }

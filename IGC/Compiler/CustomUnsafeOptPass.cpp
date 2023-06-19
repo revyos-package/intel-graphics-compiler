@@ -90,6 +90,13 @@ static bool allowUnsafeMathOpt(CodeGenContext* ctx, llvm::BinaryOperator& op)
         return true;
     }
 
+    // then check compiler options in metadata
+    if (!ctx->m_checkFastFlagPerInstructionInCustomUnsafeOptPass &&
+        ctx->getModuleMetaData()->compOpt.FastRelaxedMath)
+    {
+        return true;
+    }
+
     if (IGC_IS_FLAG_ENABLED(EnableFastMath))
     {
         return true;
@@ -109,7 +116,8 @@ CustomUnsafeOptPass::CustomUnsafeOptPass()
 
 bool CustomUnsafeOptPass::runOnFunction(Function& F)
 {
-    if (IGC_IS_FLAG_ENABLED(DisableCustomUnsafeOpt))
+    if (getAnalysis<MetaDataUtilsWrapper>().getModuleMetaData()->compOpt.disableCustomUnsafeOpts ||
+        IGC_IS_FLAG_ENABLED(DisableCustomUnsafeOpt))
     {
         return false;
     }
@@ -1207,11 +1215,15 @@ bool CustomUnsafeOptPass::visitBinaryOperatorNegateMultiply(BinaryOperator& I)
             // otherwise replace mul src0 with the negate
             if (!replaced)
             {
-                fmulInst->setOperand(0, copyIRFlags(BinaryOperator::CreateFSub(ConstantFP::get(fmulInst->getType(), 0), fmulInst->getOperand(0), "", fmulInst), &I));
+                BinaryOperator* fsub = BinaryOperator::CreateFSub(ConstantFP::get(fmulInst->getType(), 0), fmulInst->getOperand(0), "", fmulInst);
+                if (m_ctx->m_checkFastFlagPerInstructionInCustomUnsafeOptPass)
+                {
+                    fsub = copyIRFlags(fsub, &I);
+                }
+                fmulInst->setOperand(0, fsub);
 
                 // DIExpression in debug variable instructions must be extended with additional DWARF opcode:
                 // DW_OP_neg
-                Value* fsub = fmulInst->getOperand(0);
                 if (auto fsubInstr = dyn_cast<Instruction>(fsub)) {
                     Value* fsubOp0 = fsubInstr->getOperand(1);
                     if (auto fsubOp0Instr = dyn_cast<Instruction>(fsubOp0)) {
@@ -1483,7 +1495,12 @@ bool CustomUnsafeOptPass::visitBinaryOperatorAddDiv(BinaryOperator& I)
         {
             if (faddInst->getOperand(i) == I.getOperand(1))
             {
-                Value* div = copyIRFlags(BinaryOperator::CreateFDiv(faddInst->getOperand(1 - i), I.getOperand(1), "", faddInst), &I);
+                BinaryOperator* div = BinaryOperator::CreateFDiv(faddInst->getOperand(1 - i), I.getOperand(1), "", faddInst);
+                if (m_ctx->m_checkFastFlagPerInstructionInCustomUnsafeOptPass)
+                {
+                    div = copyIRFlags(div, &I);
+                }
+
                 const DebugLoc& DL = faddInst->getDebugLoc();
                 if (Instruction* divInst = dyn_cast<Instruction>(div))
                     divInst->setDebugLoc(DL);
@@ -1607,13 +1624,6 @@ void CustomUnsafeOptPass::visitBinaryOperator(BinaryOperator& I)
 
     if (allowUnsafeMathOpt(m_ctx, I))
     {
-        if (!m_ctx->platform.supportLRPInstruction())
-        {
-            // Optimize mix operation if detected.
-            // Mix is computed as: x*(1 - a) + y*a
-            matchMixOperation(I);
-        }
-
         Value* op0 = I.getOperand(0);
         Value* op1 = I.getOperand(1);
         if (op0->getType()->isFPOrFPVectorTy() && op1->getType()->isFPOrFPVectorTy())
@@ -1840,6 +1850,14 @@ void CustomUnsafeOptPass::visitBinaryOperator(BinaryOperator& I)
                     ++Stat_FloatRemoved;
                     m_isChanged = true;
                 }
+                else if (op0 == op1)
+                {
+                    // X / X = 1
+                    I.replaceAllUsesWith(ConstantFP::get(opType, 1.0));
+                    collectForErase(I);
+                    ++Stat_FloatRemoved;
+                    m_isChanged = true;
+                }
                 else
                 {
                     // a = 1 / b
@@ -1860,6 +1878,42 @@ void CustomUnsafeOptPass::visitBinaryOperator(BinaryOperator& I)
                         patternFound = visitBinaryOperatorDivRsq(I);
                     }
 
+                    // a = x Opcode y
+                    // b = x Opcode y
+                    // c = a / b
+                    //    =>
+                    // c = 1
+                    if (!patternFound)
+                    {
+                        llvm::Instruction* prevInst0 = llvm::dyn_cast<llvm::Instruction>(I.getOperand(0));
+                        llvm::Instruction* prevInst1 = llvm::dyn_cast<llvm::Instruction>(I.getOperand(1));
+                        if (prevInst0 && prevInst1 &&
+                            prevInst0->getOpcode() == prevInst1->getOpcode())
+                        {
+                            const unsigned numOpInst0 = prevInst0->getNumOperands();
+                            const unsigned numOpInst1 = prevInst1->getNumOperands();
+                            if (numOpInst0 == numOpInst1)
+                            {
+                                bool bAllOperandsEqual = true;
+                                for (unsigned i = 0; i < numOpInst0; i++)
+                                {
+                                    if (prevInst0->getOperand(i) != prevInst1->getOperand(i))
+                                    {
+                                        bAllOperandsEqual = false;
+                                        break;
+                                    }
+                                }
+                                if (bAllOperandsEqual)
+                                {
+                                    I.replaceAllUsesWith(ConstantFP::get(opType, 1.0));
+                                    collectForErase(I);
+                                    ++Stat_FloatRemoved;
+                                    patternFound = true;
+                                }
+                            }
+                        }
+                    }
+
                     // skip for double type.
                     if (opType->getTypeID() == llvm::Type::FloatTyID || opType->getTypeID() == llvm::Type::HalfTyID)
                     {
@@ -1874,7 +1928,8 @@ void CustomUnsafeOptPass::visitBinaryOperator(BinaryOperator& I)
                         }
 
                         // FDIV to FMUL+INV
-                        if (!patternFound)
+                        if (!patternFound &&
+                            !m_ctx->getCompilerOption().DisableFDivToFMulInvOpt)
                         {
                             if (!(fp0 && fp0->isExactlyValue(1.0)))
                             {
@@ -2368,9 +2423,14 @@ void CustomUnsafeOptPass::strengthReducePowOrExpLog(
 void CustomUnsafeOptPass::visitIntrinsicInst(IntrinsicInst& I)
 {
     const Intrinsic::ID ID = I.getIntrinsicID();
+    auto modMD = getAnalysis<MetaDataUtilsWrapper>().getModuleMetaData();
+
     if (ID == Intrinsic::pow)
     {
-        strengthReducePowOrExpLog(&I, I.getOperand(0), I.getOperand(1), true /* isPow */);
+        if (!modMD->compOpt.disableReducePow && IGC_IS_FLAG_DISABLED(DisableReducePow))
+        {
+            strengthReducePowOrExpLog(&I, I.getOperand(0), I.getOperand(1), true /* isPow */);
+        }
     }
     else if (ID == Intrinsic::exp2)
     {
@@ -2451,166 +2511,6 @@ void CustomUnsafeOptPass::visitIntrinsicInst(IntrinsicInst& I)
                 // replace
                 I.replaceAllUsesWith(I.getArgOperand(2));
                 collectForErase(I);
-            }
-        }
-    }
-}
-
-// Optimize mix operation if detected.
-// Mix is computed as x*(1 - a) + y*a
-// Replace it with a*(y - x) + x to save one instruction ('add' ISA, 'sub' in IR).
-// This pattern also optimizes a similar operation:
-// x*(a - 1) + y*a which can be replaced with a(x + y) - x
-void CustomUnsafeOptPass::matchMixOperation(BinaryOperator& I)
-{
-    // Pattern Mix check step 1: find a FSub instruction with a constant value of 1.
-    if (I.getOpcode() == BinaryOperator::FSub)
-    {
-        unsigned int fSubOpIdx = 0;
-        while (fSubOpIdx < 2 && !llvm::isa<llvm::ConstantFP>(I.getOperand(fSubOpIdx)))
-        {
-            fSubOpIdx++;
-        }
-        if ((fSubOpIdx == 1) ||
-            ((fSubOpIdx == 0) && !llvm::isa<llvm::ConstantFP>(I.getOperand(1))))
-        {
-            llvm::ConstantFP* fSubOpConst = llvm::dyn_cast<llvm::ConstantFP>(I.getOperand(fSubOpIdx));
-            const APFloat& APF = fSubOpConst->getValueAPF();
-            bool isInf = APF.isInfinity();
-            bool isNaN = APF.isNaN();
-            double val = 0.0;
-            if (!isInf && !isNaN)
-            {
-                if (&APF.getSemantics() == &APFloat::IEEEdouble())
-                {
-                    val = APF.convertToDouble();
-                }
-                else if (&APF.getSemantics() == &APFloat::IEEEsingle())
-                {
-                    val = (double)APF.convertToFloat();
-                }
-            }
-            if (val == 1.0)
-            {
-                bool doNotOptimize = false;
-                bool matchFound = false;
-                SmallVector<std::pair<Instruction*, Instruction*>, 3> fMulInsts;
-                SmallVector<Instruction*, 3> fAddInsts;
-
-                // Pattern Mix check step 2: there should be only FMul users of this FSub instruction
-                for (User* subU : I.users())
-                {
-                    matchFound = false;
-                    Instruction* fMul = dyn_cast_or_null<Instruction>(subU);
-                    if (fMul && fMul->getOpcode() == BinaryOperator::FMul)
-                    {
-                        // Pattern Mix check step 3: there should be only fAdd users for such an FMul instruction
-                        for (User* mulU : fMul->users())
-                        {
-                            Instruction* fAdd = dyn_cast_or_null<Instruction>(mulU);
-                            if (fAdd && fAdd->getOpcode() == BinaryOperator::FAdd)
-                            {
-                                // Pattern Mix check step 4: fAdd should be a user of two FMul instructions
-                                unsigned int opIdx = 0;
-                                while (opIdx < 2 && fMul != fAdd->getOperand(opIdx))
-                                {
-                                    opIdx++;
-                                }
-
-                                if (opIdx < 2)
-                                {
-                                    opIdx = 1 - opIdx; // 0 -> 1 or 1 -> 0
-                                    Instruction* fMul2nd = dyn_cast_or_null<Instruction>(fAdd->getOperand(opIdx));
-
-                                    // Pattern Mix check step 5: Second fMul should be a user of the same,
-                                    // other than a value of 1.0, operand as fSub instruction
-                                    if (fMul2nd && fMul2nd->getOpcode() == BinaryOperator::FMul)
-                                    {
-                                        unsigned int fSubNon1OpIdx = 1 - fSubOpIdx; // 0 -> 1 or 1 -> 0
-                                        unsigned int fMul2OpIdx = 0;
-                                        while (fMul2OpIdx < 2 && fMul2nd->getOperand(fMul2OpIdx) != I.getOperand(fSubNon1OpIdx))
-                                        {
-                                            fMul2OpIdx++;
-                                        }
-
-                                        if (fMul2OpIdx < 2)
-                                        {
-                                            fMulInsts.push_back(std::make_pair(fMul, fMul2nd));
-                                            fAddInsts.push_back(fAdd);
-                                            matchFound = true;  // Pattern Mix (partially) detected.
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    if (!matchFound)
-                    {
-                        doNotOptimize = true; // To optimize both FMul instructions and FAdd must be found
-                    }
-                }
-
-                if (!doNotOptimize && !fMulInsts.empty())
-                {
-                    // Pattern Mix fully detected. Replace sequence of detected instructions with new ones.
-                    IGC_ASSERT_MESSAGE(
-                        fMulInsts.size() == fAddInsts.size(),
-                        "Incorrect pattern match data");
-                    // If Pattern Mix with 1-a in the first instruction was detected then create
-                    // this sequence of new instructions: FSub, FMul, FAdd.
-                    // But if Pattern Mix with a-1 in the first instruction was detected then create
-                    // this sequence of new instructions: FAdd, FMul, FSub.
-                    Instruction::BinaryOps newFirstInstType = (fSubOpIdx == 0) ? Instruction::FSub : Instruction::FAdd;
-                    Instruction::BinaryOps newLastInstType = (fSubOpIdx == 0) ? Instruction::FAdd : Instruction::FSub;
-
-                    fSubOpIdx = 1 - fSubOpIdx; // 0 -> 1 or 1 -> 0, i.e. get another FSub operand
-                    Value* r = I.getOperand(fSubOpIdx);
-
-                    while (!fMulInsts.empty())
-                    {
-                        std::pair<Instruction*, Instruction*> fMulPair = fMulInsts.back();
-                        fMulInsts.pop_back();
-
-                        Instruction* fAdd = fAddInsts.back();
-                        fAddInsts.pop_back();
-
-                        unsigned int fMul2OpToFirstInstIdx = (r == fMulPair.second->getOperand(0)) ? 1 : 0;
-                        Value* newFirstInstOp = fMulPair.second->getOperand(fMul2OpToFirstInstIdx);
-                        Value* fSubVal = cast<Value>(&I);
-                        unsigned int fMul1OpToTakeIdx = (fSubVal == fMulPair.first->getOperand(0)) ? 1 : 0;
-
-                        Instruction* newFirstInst = BinaryOperator::Create(
-                            newFirstInstType, newFirstInstOp, fMulPair.first->getOperand(fMul1OpToTakeIdx), "", fAdd);
-                        newFirstInst->copyFastMathFlags(fMulPair.first);
-                        DILocation* DL1st = I.getDebugLoc();
-                        if (DL1st)
-                        {
-                            newFirstInst->setDebugLoc(DL1st);
-                        }
-
-                        Instruction* newFMul = BinaryOperator::CreateFMul(
-                            fMulPair.second->getOperand((fMul2OpToFirstInstIdx + 1) % 2), newFirstInst, "", fAdd);
-                        newFMul->copyFastMathFlags(fMulPair.second);
-                        DILocation* DL2nd = fMulPair.second->getDebugLoc();
-                        if (DL2nd)
-                        {
-                            newFMul->setDebugLoc(DL2nd);
-                        }
-
-                        Instruction* newLastInst = BinaryOperator::Create(
-                            newLastInstType, newFMul, fMulPair.first->getOperand(fMul1OpToTakeIdx), "", fAdd);
-                        newLastInst->copyFastMathFlags(fAdd);
-                        DILocation* DL3rd = fAdd->getDebugLoc();
-                        if (DL3rd)
-                        {
-                            newLastInst->setDebugLoc(DL3rd);
-                        }
-
-                        fAdd->replaceAllUsesWith(newLastInst);
-                        m_isChanged = true;
-                    }
-                }
             }
         }
     }

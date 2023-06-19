@@ -1,6 +1,6 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (C) 2020-2021 Intel Corporation
+Copyright (C) 2020-2023 Intel Corporation
 
 SPDX-License-Identifier: MIT
 
@@ -71,6 +71,11 @@ int IR_Builder::translateVISAArithmeticInst(
       predOpnd = nullptr;
     }
 
+    if (opcode == ISA_MADW) {
+      vISA_ASSERT_INPUT(exsize <= 16,
+                        "Unsupported execution size for madw");
+    }
+
     // do not check type of sources, float and integer are supported
     auto inst = createInst(predOpnd, GetGenOpcodeFromVISAOpcode(opcode),
                            condMod, saturate, exsize, dstOpnd, src0Opnd,
@@ -101,6 +106,12 @@ int IR_Builder::translateVISAArithmeticInst(
                     dstOpnd->getType());
 
       createMov(exsize, carryBorrow, accSrcOpnd, instOpt, true);
+    } else if (opcode == ISA_PLANE) {
+      const RegionDesc *rd = createRegionDesc(0, 4, 1);
+      auto src0 = inst->getSrc(0);
+      vISA_ASSERT(src0->isSrcRegRegion(),
+                  " Src0 of plane inst is not regregion.");
+      src0->asSrcRegRegion()->setRegion(*this, rd);
     }
   }
 

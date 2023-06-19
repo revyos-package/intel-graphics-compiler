@@ -297,10 +297,17 @@ void CustomSafeOptPass::visitShuffleIndex(llvm::CallInst* I)
 
     /*
     Pattern match
-    %simdLaneId = call i16 @llvm.genx.GenISA.simdLaneId()
-    %xor = xor i16 %simdLaneId, 1
+    %simdLaneId16 = call i16 @llvm.genx.GenISA.simdLaneId()
+    %xor = xor i16 %simdLaneId16, 1
     %xor.i = zext i16 %xor to i32
     %simdShuffle = call i32 @llvm.genx.GenISA.WaveShuffleIndex.i32(i32 %x, i32 %xor.i, i32 0)
+
+    or
+
+    %simdLaneId16 = call i16 @llvm.genx.GenISA.simdLaneId()
+    %simdLaneId = zext i16 %simdLaneId16 to i32
+    %xor = xor i32 %simdLaneId, 2
+    %simdShuffle.2 = call i32 @llvm.genx.GenISA.WaveShuffleIndex.i32(i32 %x, i32 %xor, i32 0)
     */
 
     ConstantInt* enableHelperLanes = dyn_cast<ConstantInt>(I->getOperand(2));
@@ -309,7 +316,9 @@ void CustomSafeOptPass::visitShuffleIndex(llvm::CallInst* I)
     }
 
     if (match(I->getOperand(1),
-              m_ZExt(m_c_Xor(m_Value(simdLaneId), m_ConstantInt(xorValueConstant)))))
+              m_ZExt(m_c_Xor(m_Value(simdLaneId), m_ConstantInt(xorValueConstant)))) ||
+        match(I->getOperand(1),
+              m_c_Xor(m_ZExt(m_Value(simdLaneId)), m_ConstantInt(xorValueConstant))))
     {
         if (CallInst* CI = dyn_cast<CallInst>(simdLaneId))
         {
@@ -1299,6 +1308,165 @@ void CustomSafeOptPass::matchDp4a(BinaryOperator &I) {
     I.replaceAllUsesWith(Res);
 }
 
+// Optimize mix operation if detected.
+// Mix is computed as x*(1 - a) + y*a
+// Replace it with a*(y - x) + x to save one instruction ('add' ISA, 'sub' in IR).
+// This pattern also optimizes a similar operation:
+// x*(a - 1) + y*a which can be replaced with a(x + y) - x
+void CustomSafeOptPass::matchMixOperation(BinaryOperator& I)
+{
+    // Pattern Mix check step 1: find a FSub instruction with a constant value of 1.
+    if (I.getOpcode() == BinaryOperator::FSub)
+    {
+        unsigned int fSubOpIdx = 0;
+        while (fSubOpIdx < 2 && !llvm::isa<llvm::ConstantFP>(I.getOperand(fSubOpIdx)))
+        {
+            fSubOpIdx++;
+        }
+        if ((fSubOpIdx == 1) ||
+            ((fSubOpIdx == 0) && !llvm::isa<llvm::ConstantFP>(I.getOperand(1))))
+        {
+            llvm::ConstantFP* fSubOpConst = llvm::dyn_cast<llvm::ConstantFP>(I.getOperand(fSubOpIdx));
+            const APFloat& APF = fSubOpConst->getValueAPF();
+            bool isInf = APF.isInfinity();
+            bool isNaN = APF.isNaN();
+            double val = 0.0;
+            if (!isInf && !isNaN)
+            {
+                if (&APF.getSemantics() == &APFloat::IEEEdouble())
+                {
+                    val = APF.convertToDouble();
+                }
+                else if (&APF.getSemantics() == &APFloat::IEEEsingle())
+                {
+                    val = (double)APF.convertToFloat();
+                }
+            }
+            if (val == 1.0)
+            {
+                bool doNotOptimize = false;
+                bool matchFound = false;
+                SmallVector<std::pair<Instruction*, Instruction*>, 3> fMulInsts;
+                SmallVector<Instruction*, 3> fAddInsts;
+
+                // Pattern Mix check step 2: there should be only FMul users of this FSub instruction
+                for (User* subU : I.users())
+                {
+                    matchFound = false;
+                    Instruction* fMul = dyn_cast_or_null<Instruction>(subU);
+                    if (fMul && fMul->getOpcode() == BinaryOperator::FMul)
+                    {
+                        // Pattern Mix check step 3: there should be only fAdd users for such an FMul instruction
+                        for (User* mulU : fMul->users())
+                        {
+                            Instruction* fAdd = dyn_cast_or_null<Instruction>(mulU);
+                            if (fAdd && fAdd->getOpcode() == BinaryOperator::FAdd)
+                            {
+                                // Pattern Mix check step 4: fAdd should be a user of two FMul instructions
+                                unsigned int opIdx = 0;
+                                while (opIdx < 2 && fMul != fAdd->getOperand(opIdx))
+                                {
+                                    opIdx++;
+                                }
+
+                                if (opIdx < 2)
+                                {
+                                    opIdx = 1 - opIdx; // 0 -> 1 or 1 -> 0
+                                    Instruction* fMul2nd = dyn_cast_or_null<Instruction>(fAdd->getOperand(opIdx));
+
+                                    // Pattern Mix check step 5: Second fMul should be a user of the same,
+                                    // other than a value of 1.0, operand as fSub instruction
+                                    if (fMul2nd && fMul2nd->getOpcode() == BinaryOperator::FMul)
+                                    {
+                                        unsigned int fSubNon1OpIdx = 1 - fSubOpIdx; // 0 -> 1 or 1 -> 0
+                                        unsigned int fMul2OpIdx = 0;
+                                        while (fMul2OpIdx < 2 && fMul2nd->getOperand(fMul2OpIdx) != I.getOperand(fSubNon1OpIdx))
+                                        {
+                                            fMul2OpIdx++;
+                                        }
+
+                                        if (fMul2OpIdx < 2)
+                                        {
+                                            fMulInsts.push_back(std::make_pair(fMul, fMul2nd));
+                                            fAddInsts.push_back(fAdd);
+                                            matchFound = true;  // Pattern Mix (partially) detected.
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if (!matchFound)
+                    {
+                        doNotOptimize = true; // To optimize both FMul instructions and FAdd must be found
+                    }
+                }
+
+                if (!doNotOptimize && !fMulInsts.empty())
+                {
+                    // Pattern Mix fully detected. Replace sequence of detected instructions with new ones.
+                    IGC_ASSERT_MESSAGE(
+                        fMulInsts.size() == fAddInsts.size(),
+                        "Incorrect pattern match data");
+                    // If Pattern Mix with 1-a in the first instruction was detected then create
+                    // this sequence of new instructions: FSub, FMul, FAdd.
+                    // But if Pattern Mix with a-1 in the first instruction was detected then create
+                    // this sequence of new instructions: FAdd, FMul, FSub.
+                    Instruction::BinaryOps newFirstInstType = (fSubOpIdx == 0) ? Instruction::FSub : Instruction::FAdd;
+                    Instruction::BinaryOps newLastInstType = (fSubOpIdx == 0) ? Instruction::FAdd : Instruction::FSub;
+
+                    fSubOpIdx = 1 - fSubOpIdx; // 0 -> 1 or 1 -> 0, i.e. get another FSub operand
+                    Value* r = I.getOperand(fSubOpIdx);
+
+                    while (!fMulInsts.empty())
+                    {
+                        std::pair<Instruction*, Instruction*> fMulPair = fMulInsts.back();
+                        fMulInsts.pop_back();
+
+                        Instruction* fAdd = fAddInsts.back();
+                        fAddInsts.pop_back();
+
+                        unsigned int fMul2OpToFirstInstIdx = (r == fMulPair.second->getOperand(0)) ? 1 : 0;
+                        Value* newFirstInstOp = fMulPair.second->getOperand(fMul2OpToFirstInstIdx);
+                        Value* fSubVal = cast<Value>(&I);
+                        unsigned int fMul1OpToTakeIdx = (fSubVal == fMulPair.first->getOperand(0)) ? 1 : 0;
+
+                        Instruction* newFirstInst = BinaryOperator::Create(
+                            newFirstInstType, newFirstInstOp, fMulPair.first->getOperand(fMul1OpToTakeIdx), "", fAdd);
+                        newFirstInst->copyFastMathFlags(fMulPair.first);
+                        DILocation* DL1st = I.getDebugLoc();
+                        if (DL1st)
+                        {
+                            newFirstInst->setDebugLoc(DL1st);
+                        }
+
+                        Instruction* newFMul = BinaryOperator::CreateFMul(
+                            fMulPair.second->getOperand((fMul2OpToFirstInstIdx + 1) % 2), newFirstInst, "", fAdd);
+                        newFMul->copyFastMathFlags(fMulPair.second);
+                        DILocation* DL2nd = fMulPair.second->getDebugLoc();
+                        if (DL2nd)
+                        {
+                            newFMul->setDebugLoc(DL2nd);
+                        }
+
+                        Instruction* newLastInst = BinaryOperator::Create(
+                            newLastInstType, newFMul, fMulPair.first->getOperand(fMul1OpToTakeIdx), "", fAdd);
+                        newLastInst->copyFastMathFlags(fAdd);
+                        DILocation* DL3rd = fAdd->getDebugLoc();
+                        if (DL3rd)
+                        {
+                            newLastInst->setDebugLoc(DL3rd);
+                        }
+
+                        fAdd->replaceAllUsesWith(newLastInst);
+                    }
+                }
+            }
+        }
+    }
+}
+
 void CustomSafeOptPass::hoistDp3(BinaryOperator& I)
 {
     if (I.getOpcode() != Instruction::BinaryOps::FAdd)
@@ -1678,6 +1846,13 @@ void CustomSafeOptPass::visitBinaryOperator(BinaryOperator& I)
     matchDp4a(I);
 
     CodeGenContext* pContext = getAnalysis<CodeGenContextWrapper>().getCodeGenContext();
+
+    if (!pContext->platform.supportLRPInstruction())
+    {
+        // Optimize mix operation if detected.
+        // Mix is computed as x*(1 - a) + y*a
+        matchMixOperation(I);
+    }
 
     // move immediate value in consecutive integer adds to the last added value.
     // this can allow more chance of doing CSE and memopt.
@@ -6753,20 +6928,26 @@ void InsertBranchOpt::atomicSpiltOpt(Function& F)
         {
             if (GenIntrinsicInst* inst = dyn_cast<GenIntrinsicInst>(II))
             {
+                Instruction* src = nullptr;
+                ConstantInt* op = nullptr;
                 if (inst->getIntrinsicID() == GenISAIntrinsic::GenISA_intatomictyped)
                 {
-                    Instruction* src = dyn_cast<Instruction>(inst->getOperand(4));
-                    ConstantInt* op = dyn_cast<ConstantInt>(inst->getOperand(5));
+                    src = dyn_cast<Instruction>(inst->getOperand(4));
+                    op = dyn_cast<ConstantInt>(inst->getOperand(5));
+                }
+                else if (inst->getIntrinsicID() == GenISAIntrinsic::GenISA_intatomicraw)
+                {
+                    src = dyn_cast<Instruction>(inst->getOperand(2));
+                    op = dyn_cast<ConstantInt>(inst->getOperand(3));
+                }
+                if (!src || !op)
+                    continue;
 
-                    if (!src || !op)
-                        continue;
-
-                    if (op->getZExtValue() == AtomicOp::EATOMIC_IADD ||
-                        op->getZExtValue() == AtomicOp::EATOMIC_SUB ||
-                        op->getZExtValue() == AtomicOp::EATOMIC_UMAX)
-                    {
-                        atomicSplit.push_back(inst);
-                    }
+                if (op->getZExtValue() == AtomicOp::EATOMIC_IADD ||
+                    op->getZExtValue() == AtomicOp::EATOMIC_SUB ||
+                    op->getZExtValue() == AtomicOp::EATOMIC_UMAX)
+                {
+                    atomicSplit.push_back(inst);
                 }
             }
         }
@@ -6775,27 +6956,64 @@ void InsertBranchOpt::atomicSpiltOpt(Function& F)
     for (auto iter : atomicSplit)
     {
         Instruction* inst = &(*iter);
+        bool isTyped = false;
+        int srcID = 2;
+        if (cast<GenIntrinsicInst>(inst)->getIntrinsicID() == GenISAIntrinsic::GenISA_intatomictyped)
+        {
+            isTyped = true;
+            srcID = 4;
+        }
+
         // Create an if-then-else structure.
         // if (cond!=0)
         //    use the original atomic add inst
         // else
-        //    use typedread
+        //    use typedread or load
         IRBuilder<> builder(inst);
-        Instruction* src = dyn_cast<Instruction>(inst->getOperand(4));
+        Instruction* src = dyn_cast<Instruction>(inst->getOperand(srcID));
         Instruction* condInst = dyn_cast<Instruction>(builder.CreateICmp(ICmpInst::ICMP_NE, src, builder.getInt32(0)));
-        Function* pLdIntrinsic = llvm::GenISAIntrinsic::getDeclaration(
-            inst->getModule(),
-            GenISAIntrinsic::GenISA_typedread,
-            inst->getOperand(0)->getType());
+        CallInst* NewInst = nullptr;
+        Constant *zero = ConstantInt::get(inst->getType(), 0);
+        if (isTyped)
+        {
+            Function* pLdIntrinsic = llvm::GenISAIntrinsic::getDeclaration(
+                inst->getModule(),
+                GenISAIntrinsic::GenISA_typedread,
+                inst->getOperand(0)->getType());
 
-        SmallVector<Value*, 5> ld_FunctionArgList(5);
-        ld_FunctionArgList[0] = inst->getOperand(0);
-        ld_FunctionArgList[1] = inst->getOperand(1);
-        ld_FunctionArgList[2] = inst->getOperand(2);
-        ld_FunctionArgList[3] = ConstantInt::get(inst->getType(), 0);
-        ld_FunctionArgList[4] = ConstantInt::get(inst->getType(), 0);
+            SmallVector<Value*, 5> ld_FunctionArgList(5);
+            ld_FunctionArgList[0] = inst->getOperand(0);
+            ld_FunctionArgList[1] = inst->getOperand(1);
+            ld_FunctionArgList[2] = inst->getOperand(2);
+            ld_FunctionArgList[3] = zero;
+            ld_FunctionArgList[4] = zero;
+            NewInst = builder.CreateCall(pLdIntrinsic, ld_FunctionArgList);
+        }
+        else
+        {
+            std::vector<Type*> types;
+            std::vector<Value*> ld_FunctionArgList;
 
-        CallInst* NewInst = builder.CreateCall(pLdIntrinsic, ld_FunctionArgList);
+            Value* resourcePtr = inst->getOperand(0);
+            types.push_back(IGCLLVM::FixedVectorType::get(builder.getFloatTy(), 4));
+            types.push_back(resourcePtr->getType());//Resource
+
+
+            Function* pLdIntrinsic = GenISAIntrinsic::getDeclaration(
+                inst->getModule(),
+                GenISAIntrinsic::GenISA_ldptr,
+                types);
+
+            ld_FunctionArgList.push_back(inst->getOperand(1));    //coordinates x
+            ld_FunctionArgList.push_back(zero);                   //coordinates y
+            ld_FunctionArgList.push_back(zero);                   //coordinates z
+            ld_FunctionArgList.push_back(zero);                   //lod
+            ld_FunctionArgList.push_back(inst->getOperand(0));    //src buffer
+            ld_FunctionArgList.push_back(zero);                   //immediate offset u
+            ld_FunctionArgList.push_back(zero);                   //immediate offset v
+            ld_FunctionArgList.push_back(zero);                   //immediate offset w
+            NewInst = builder.CreateCall(pLdIntrinsic, ld_FunctionArgList);
+        }
         Value* ExtractE = builder.CreateExtractElement(NewInst, (uint64_t)0);
         Value* castI = builder.CreateBitCast(ExtractE, inst->getType());
 

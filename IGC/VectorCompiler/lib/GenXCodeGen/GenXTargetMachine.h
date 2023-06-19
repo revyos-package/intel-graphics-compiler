@@ -212,6 +212,7 @@ void initializeGenXCategoryWrapperPass(PassRegistry &);
 void initializeGenXCFSimplificationPass(PassRegistry &);
 void initializeGenXCisaBuilderWrapperPass(PassRegistry &);
 void initializeGenXCoalescingWrapperPass(PassRegistry &);
+void initializeGenXGVClobberCheckerWrapperPass(PassRegistry &);
 void initializeGenXDeadVectorRemovalPass(PassRegistry &);
 void initializeGenXDepressurizerWrapperPass(PassRegistry &);
 void initializeGenXEarlySimdCFConformancePass(PassRegistry &);
@@ -219,8 +220,10 @@ void initializeGenXEmulationImportPass(PassRegistry &);
 void initializeGenXEmulatePass(PassRegistry &);
 void initializeGenXExtractVectorizerPass(PassRegistry &);
 void initializeGenXFuncBalingPass(PassRegistry &);
+void initializeGenXFuncLiveElementsPass(PassRegistry &);
 void initializeGenXGEPLoweringPass(PassRegistry &);
 void initializeGenXGroupBalingWrapperPass(PassRegistry &);
+void initializeGenXGroupLiveElementsWrapperPass(PassRegistry &);
 void initializeGenXIMadPostLegalizationPass(PassRegistry &);
 void initializeGenXLateSimdCFConformanceWrapperPass(PassRegistry &);
 void initializeGenXLegalizationPass(PassRegistry &);
@@ -244,7 +247,7 @@ void initializeGenXRematerializationWrapperPass(PassRegistry &);
 void initializeGenXTidyControlFlowPass(PassRegistry &);
 void initializeGenXUnbalingWrapperPass(PassRegistry &);
 void initializeGenXVisaRegAllocWrapperPass(PassRegistry &);
-void initializeTransformPrivMemPass(PassRegistry &);
+void initializeGenXPromoteArrayPass(PassRegistry &);
 void initializeGenXLowerJmpTableSwitchPass(PassRegistry &);
 void initializeGenXGlobalValueLoweringPass(PassRegistry &);
 void initializeGenXAggregatePseudoLoweringPass(PassRegistry &);
@@ -261,6 +264,7 @@ void initializeGenXFixInvalidFuncNamePass(PassRegistry &);
 void initializeGenXGASCastWrapperPass(PassRegistry &);
 void initializeGenXGASDynamicResolutionPass(PassRegistry &);
 void initializeGenXInitBiFConstantsPass(PassRegistry &);
+void initializeGenXFinalizerPass(PassRegistry &);
 } // End llvm namespace
 
 #endif

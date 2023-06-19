@@ -12,6 +12,7 @@ SPDX-License-Identifier: MIT
 #include "LinearScanRA.h"
 #include "LocalRA.h"
 #include "PhyRegUsage.h"
+#include "llvm/ADT/SparseBitVector.h"
 
 namespace vISA {
 
@@ -50,7 +51,6 @@ struct VarRangeListPackage {
 
 class LivenessAnalysis {
   unsigned numVarId = 0;           // the var count
-  unsigned numGlobalVarId = 0;     // the global var count
   unsigned numSplitVar = 0;        // the split var count
   unsigned numSplitStartID = 0;    // the split var count
   unsigned numUnassignedVarId = 0; // the unassigned var count
@@ -61,10 +61,11 @@ class LivenessAnalysis {
       0; // the selected reg file kind for performing liveness
   const PointsToAnalysis &pointsToAnalysis;
   std::unordered_map<G4_Declare *, BitSet> neverDefinedRows;
+  std::unordered_set<const G4_Declare *> defWriteEnable;
 
-  void computeGenKillandPseudoKill(G4_BB *bb, SparseBitSet &def_out,
-                                   SparseBitSet &use_in, SparseBitSet &use_gen,
-                                   SparseBitSet &use_kill) const;
+  void computeGenKillandPseudoKill(G4_BB *bb, llvm_SBitVector &def_out,
+                                   llvm_SBitVector &use_in, llvm_SBitVector &use_gen,
+                                   llvm_SBitVector &use_kill) const;
 
   bool contextFreeUseAnalyze(G4_BB *bb, bool isChanged);
   bool contextFreeDefAnalyze(G4_BB *bb, bool isChanged);
@@ -75,15 +76,17 @@ class LivenessAnalysis {
   void dump_fn_vector(char *vname, std::vector<FuncInfo *> &fns,
                       std::vector<BitSet> &vec);
 
-  void updateKillSetForDcl(G4_Declare *dcl, SparseBitSet *curBBGen,
-                           SparseBitSet *curBBKill, G4_BB *curBB,
-                           SparseBitSet *entryBBGen, SparseBitSet *entryBBKill,
+  void updateKillSetForDcl(G4_Declare *dcl, llvm_SBitVector *curBBGen,
+                           llvm_SBitVector *curBBKill, G4_BB *curBB,
+                           llvm_SBitVector *entryBBGen, llvm_SBitVector *entryBBKill,
                            G4_BB *entryBB, unsigned scopeID);
   void footprintDst(const G4_BB *bb, const G4_INST *i, G4_Operand *opnd,
                     BitSet *dstfootprint) const;
   static void footprintSrc(const G4_INST *i, G4_Operand *opnd,
                            BitSet *srcfootprint);
   void detectNeverDefinedVarRows();
+  void collectNoMaskVars();
+  bool doesVarNeedNoMaskForKill(const G4_Declare* dcl) const;
 
 public:
   GlobalRA &gra;
@@ -94,18 +97,19 @@ public:
   //
   // Bitsets used for data flow.
   //
-  std::vector<SparseBitSet> def_in;
-  std::vector<SparseBitSet> def_out;
-  std::vector<SparseBitSet> use_in;
-  std::vector<SparseBitSet> use_out;
-  std::vector<SparseBitSet> use_gen;
-  std::vector<SparseBitSet> use_kill;
-  std::vector<SparseBitSet> indr_use;
-  std::unordered_map<FuncInfo *, SparseBitSet> subroutineMaydef;
+  std::vector<llvm_SBitVector> def_in;
+  std::vector<llvm_SBitVector> def_out;
+  std::vector<llvm_SBitVector> use_in;
+  std::vector<llvm_SBitVector> use_out;
+  std::vector<llvm_SBitVector> use_gen;
+  std::vector<llvm_SBitVector> use_kill;
+  std::vector<llvm_SBitVector> indr_use;
+  std::unordered_map<FuncInfo *, llvm_SBitVector> subroutineMaydef;
+
+  // Hold variables known to be globals
+  llvm::SparseBitVector<> globalVars;
 
   bool isLocalVar(G4_Declare *decl) const;
-  bool setGlobalVarIDs(bool verifyRA, bool areAllPhyRegAssigned);
-  bool setLocalVarIDs(bool verifyRA, bool areAllPhyRegAssigned);
   bool setVarIDs(bool verifyRA, bool areAllPhyRegAssigned);
   LivenessAnalysis(GlobalRA &gra, unsigned char kind, bool verifyRA = false,
                    bool forceRun = false);
@@ -123,11 +127,15 @@ public:
   {
     return addr_taken.isSet(num);
   }
+  unsigned int getSelectedRF() const { return selectedRF; }
+  static bool livenessClass(G4_RegFileKind kind1, G4_RegFileKind kind2) {
+    return (kind1 & kind2) != 0;
+  }
   bool livenessClass(G4_RegFileKind regKind) const {
-    return (selectedRF & regKind) != 0;
+    return livenessClass((G4_RegFileKind)selectedRF, regKind);
   }
   unsigned getNumSelectedVar() const { return numVarId; }
-  unsigned getNumSelectedGlobalVar() const { return numGlobalVarId; }
+  unsigned getNumSelectedGlobalVar() const { return globalVars.count(); }
   unsigned getNumSplitVar() const { return numSplitVar; }
   unsigned getNumSplitStartID() const { return numSplitStartID; }
   unsigned getNumUnassignedVar() const { return numUnassignedVarId; }
@@ -143,17 +151,17 @@ public:
   bool writeWholeRegion(const G4_BB *bb, const G4_INST *prd,
                         const G4_VarBase *flagReg) const;
 
-  void performScoping(SparseBitSet *curBBGen, SparseBitSet *curBBKill,
-                      G4_BB *curBB, SparseBitSet *entryBBGen,
-                      SparseBitSet *entryBBKill, G4_BB *entryBB);
+  void performScoping(llvm_SBitVector *curBBGen, llvm_SBitVector *curBBKill,
+                      G4_BB *curBB, llvm_SBitVector *entryBBGen,
+                      llvm_SBitVector *entryBBKill, G4_BB *entryBB);
 
-  void hierarchicalIPA(const SparseBitSet &kernelInput,
-                       const SparseBitSet &kernelOutput);
+  void hierarchicalIPA(const llvm_SBitVector &kernelInput,
+                       const llvm_SBitVector &kernelOutput);
   void useAnalysis(FuncInfo *subroutine);
   void useAnalysisWithArgRetVal(
       FuncInfo *subroutine,
-      const std::unordered_map<FuncInfo *, SparseBitSet> &args,
-      const std::unordered_map<FuncInfo *, SparseBitSet> &retVal);
+      const std::unordered_map<FuncInfo *, llvm_SBitVector> &args,
+      const std::unordered_map<FuncInfo *, llvm_SBitVector> &retVal);
   void defAnalysis(FuncInfo *subroutine);
   void maydefAnalysis();
 

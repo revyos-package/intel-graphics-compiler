@@ -36,6 +36,8 @@ SPDX-License-Identifier: MIT
 #include <string>
 #include <string_view>
 
+#include <llvm/Support/Path.h>
+
 using namespace vISA;
 
 #define IS_GEN_PATH (mBuildOption == VISA_BUILDER_GEN)
@@ -48,15 +50,9 @@ using namespace vISA;
 CISA_IR_Builder::~CISA_IR_Builder() {
   m_cisaBinary->~CisaBinary();
 
-  std::list<VISAKernelImpl *>::iterator iter_start =
-      m_kernelsAndFunctions.begin();
-  std::list<VISAKernelImpl *>::iterator iter_end = m_kernelsAndFunctions.end();
-
-  while (iter_start != iter_end) {
-    VISAKernelImpl *kernel = *iter_start;
-    iter_start++;
+  for (auto k : m_kernelsAndFunctions) {
     // don't call delete since vISAKernelImpl is allocated in memory pool
-    kernel->~VISAKernelImpl();
+    k->~VISAKernelImpl();
   }
 
   if (needsToFreeWATable) {
@@ -164,6 +160,10 @@ static const WA_TABLE *CreateVisaWaTable(TARGET_PLATFORM platform,
   if (platform == GENX_ICLLP && (step == Step_A || step == Step_B)) {
     VISA_WA_ENABLE(pWaTable, Wa_2201674230);
   }
+
+  if (platform >= Xe_PVC)
+    VISA_WA_ENABLE(pWaTable, Wa_13010473643);
+
   switch (platform) {
   case GENX_ICLLP:
     VISA_WA_ENABLE(pWaTable, Wa_1406950495);
@@ -171,6 +171,7 @@ static const WA_TABLE *CreateVisaWaTable(TARGET_PLATFORM platform,
   case GENX_TGLLP:
     VISA_WA_ENABLE(pWaTable, Wa_1406950495);
     VISA_WA_ENABLE(pWaTable, Wa_16013338947);
+    VISA_WA_ENABLE(pWaTable, Wa_14018126777);
     break;
   case Xe_XeHPSDV:
     VISA_WA_ENABLE(pWaTable, Wa_1406950495);
@@ -485,11 +486,17 @@ G4_Kernel *CISA_IR_Builder::GetCallerKernel(G4_INST *inst) {
 
 G4_Kernel *CISA_IR_Builder::GetCalleeKernel(G4_INST *fcall) {
   vASSERT(fcall->opcode() == G4_pseudo_fcall);
-  std::string funcName = fcall->getSrc(0)->asLabel()->getLabel();
+  auto asLabel = fcall->getSrc(0)->asLabel();
+  if (!asLabel) {
+    return nullptr;
+  }
+  std::string funcName = asLabel->getLabel();
   auto iter = functionsNameMap.find(funcName);
-  vISA_ASSERT(iter != functionsNameMap.end(),
-         "can't find function with given name");
-  return iter->second;
+  if (iter != functionsNameMap.end()) {
+    return iter->second;
+  } else {
+    return nullptr;
+  }
 }
 
 void CISA_IR_Builder::ResetHasStackCall(
@@ -554,7 +561,7 @@ void CISA_IR_Builder::CheckHazardFeatures(
 }
 
 void CISA_IR_Builder::CollectCallSites(
-    std::list<VISAKernelImpl *> &functions,
+    KernelListTy &functions,
     std::unordered_map<G4_Kernel *, std::list<std::list<G4_INST *>::iterator>>
         &callSites,
     std::list<std::list<vISA::G4_INST *>::iterator> &sgInvokeList) {
@@ -582,8 +589,9 @@ void CISA_IR_Builder::CollectCallSites(
       G4_INST *fcall = *it;
       vASSERT(fcall->opcode() == G4_pseudo_fcall);
       // When callee is a invoke_simd target
-      if (GetCalleeKernel(fcall)->getBoolKernelAttr(
-              Attributes::ATTR_LTOInvokeOptTarget)) {
+      auto callee = GetCalleeKernel(fcall);
+      if (callee && callee->fg.builder && callee->getBoolKernelAttr(
+          Attributes::ATTR_LTOInvokeOptTarget)) {
         sgInvokeList.push_back(it);
       }
     }
@@ -591,22 +599,17 @@ void CISA_IR_Builder::CollectCallSites(
 }
 
 void CISA_IR_Builder::RemoveOptimizingFunction(
-    std::list<VISAKernelImpl *> &functions,
     const std::list<std::list<vISA::G4_INST *>::iterator> &sgInvokeList) {
   std::set<G4_Kernel *> removeList;
   for (auto &it : sgInvokeList) {
     G4_INST *fcall = *it;
     removeList.insert(GetCalleeKernel(fcall));
   }
-  std::list<VISAKernelImpl *>::iterator i = functions.begin();
-  while (i != functions.end()) {
-    auto func = *i;
-    if (!removeList.count(func->getKernel())) {
-      ++i;
-    } else {
-      functions.erase(i++);
-    }
-  }
+
+  llvm::erase_if(m_kernelsAndFunctions, [&](VISAKernelImpl *k) {
+    return removeList.count(k->getKernel());
+  });
+
 }
 
 void CISA_IR_Builder::ProcessSgInvokeList(
@@ -917,8 +920,7 @@ void CISA_IR_Builder::LinkTimeOptimization(
                 defInst[dst->getTopDcl()] = callerIt;
                 DEBUG_PRINT("(" << stackPointers[dst->getTopDcl()] << ") ");
                 DEBUG_UTIL(inst->dump());
-              } else if (inst->opcode() == G4_sends ||
-                         inst->opcode() == G4_send) {
+              } else if (inst->isSendUnconditional()) {
                 vASSERT(i == 0);
                 // Start adding argument stores to the list
                 storeList.push_back(callerIt);
@@ -974,8 +976,7 @@ void CISA_IR_Builder::LinkTimeOptimization(
                 defInst[dst->getTopDcl()] = thisIt;
                 DEBUG_PRINT("(" << stackPointers[dst->getTopDcl()] << ") ");
                 DEBUG_UTIL(inst->dump());
-              } else if (inst->opcode() == G4_sends ||
-                         inst->opcode() == G4_send) {
+              } else if (inst->isSendUnconditional()) {
                 if (storeList.empty()) {
                   // store prevFP to the callee's frame
                   if (stackPointers[callerBuilder->getFE_SP()] ==
@@ -1479,6 +1480,8 @@ int CISA_IR_Builder::ParseVISAText(const std::string &visaFile) {
 
 }
 
+// TODO: Update nameInput to the path to the combined .isaasm file in the
+// compilation. Currently it is a .isa file.
 // TODO: Remove the ostream parameter used to emit visa binary.
 // default size of the kernel mem manager in bytes
 int CISA_IR_Builder::Compile(const char *nameInput, std::ostream *os,
@@ -1518,8 +1521,18 @@ int CISA_IR_Builder::Compile(const char *nameInput, std::ostream *os,
       return status;
     }
 
-    if (m_options.getOption(vISA_GenerateISAASM)) {
-      status = m_cisaBinary->isaDump(m_kernelsAndFunctions, &m_options);
+    llvm::SmallString<64> combinedIsaasmName;
+    if (m_options.getOption(vISA_GenerateCombinedISAASM) &&
+        !m_options.getOption(vISA_ISAASMToConsole)) {
+      // Translate .isa to .isaasm before the nameInput is updated. Use
+      // .isaasm extension to avoid conflict with the existing .visaasm for
+      // a kernel.
+      combinedIsaasmName = nameInput;
+      llvm::sys::path::replace_extension(combinedIsaasmName, ".isaasm");
+    }
+    if (m_options.getOption(vISA_GenerateISAASM) ||
+        m_options.getOption(vISA_GenerateCombinedISAASM)) {
+      status = isaDump(combinedIsaasmName.c_str());
       if (status != VISA_SUCCESS) {
         // Treat VISA_EARLY_EXIT as VISA_SUCCESS.
         return status == VISA_EARLY_EXIT ? VISA_SUCCESS : status;
@@ -1568,7 +1581,7 @@ int CISA_IR_Builder::Compile(const char *nameInput, std::ostream *os,
 
       ResetHasStackCall(sgInvokeList, callSites);
 
-      RemoveOptimizingFunction(m_kernelsAndFunctions, sgInvokeList);
+      RemoveOptimizingFunction(sgInvokeList);
 
       std::unordered_map<G4_Kernel *,
                          std::list<std::list<vISA::G4_INST *>::iterator>>
@@ -1578,42 +1591,6 @@ int CISA_IR_Builder::Compile(const char *nameInput, std::ostream *os,
       // Copy callees' context to callers and convert to subroutine calls
       LinkTimeOptimization(callee2Callers,
                            m_options.getuInt32Option(vISA_Linker));
-    }
-  }
-  const char *rawStr = m_options.getOptionCstr(vISA_ForceAssignRhysicalReg);
-  if (rawStr && *rawStr != '\0') {
-    std::vector<int> token;
-    std::map<int, int> forceAssign;
-    const char *DELIMITERS = ":, ";
-    std::string line(rawStr);
-    std::size_t pos = 0;
-    std::size_t found;
-    for (; (found = line.find_first_of(DELIMITERS, pos)) != std::string::npos;
-         ++pos) {
-      // Skip consecutive whitespaces.
-      if (found == pos)
-        continue;
-      token.push_back(std::stoi(line.substr(pos, found - pos)));
-      pos = found;
-    }
-    if (pos < line.length())
-      token.push_back(std::stoi(line.substr(pos)));
-
-    for (unsigned int i = 0; i < token.size() - 1; i += 2) {
-      forceAssign[token[i]] = token[i + 1];
-    }
-
-    for (G4_Declare *dcl :
-         m_kernelsAndFunctions.front()->getKernel()->Declares) {
-      if (forceAssign.find(dcl->getDeclId()) != forceAssign.end()) {
-        std::cerr << "Force assigning DeclId : " << dcl->getDeclId() << " to r"
-                  << forceAssign[dcl->getDeclId()] << "\n";
-        dcl->getRegVar()->setPhyReg(
-            m_kernelsAndFunctions.front()->getIRBuilder()->phyregpool.getGreg(
-                forceAssign[dcl->getDeclId()]),
-            0);
-        dcl->dump();
-      }
     }
   }
 
@@ -1627,9 +1604,9 @@ int CISA_IR_Builder::Compile(const char *nameInput, std::ostream *os,
     uint32_t localScheduleEndKernelId =
         m_options.getuInt32Option(vISA_LocalScheduleingEndKernel);
     VISAKernelImpl *mainKernel = nullptr;
-    std::list<VISAKernelImpl *>::iterator iter = m_kernelsAndFunctions.begin();
-    std::list<VISAKernelImpl *>::iterator end = m_kernelsAndFunctions.end();
-    for (int i = 0; iter != end; iter++, i++) {
+    KernelListTy::iterator iter = kernel_begin();
+    KernelListTy::iterator iend = kernel_end();
+    for (int i = 0; iter != iend; iter++, i++) {
       VISAKernelImpl *kernel = (*iter);
       if ((uint32_t)i < localScheduleStartKernelId ||
           (uint32_t)i > localScheduleEndKernelId) {
@@ -1721,7 +1698,7 @@ int CISA_IR_Builder::Compile(const char *nameInput, std::ostream *os,
           func->setType(VISA_BUILD_TYPE::KERNEL);
         }
       }
-      m_kernelsAndFunctions.pop_front();
+      m_kernelsAndFunctions.erase(m_kernelsAndFunctions.begin());
       if (isInPatchingMode) {
         m_kernelsAndFunctions.push_back(m_prevKernel);
       } else {
@@ -1778,9 +1755,9 @@ int CISA_IR_Builder::Compile(const char *nameInput, std::ostream *os,
 
     // mainFunctions: functions or kernels those will be stitched by others
     // These functions/kernels will be the unit of compilePostOptimize
-    VISAKernelImpl::VISAKernelImplListTy mainFunctions;
+    KernelListTy mainFunctions;
     // subFunctions: functions those will stitch to others
-    VISAKernelImpl::VISAKernelImplListTy subFunctions;
+    KernelListTy subFunctions;
     std::map<std::string, G4_Kernel *> subFunctionsNameMap;
     // For functions those will be stitch to others, create table to map their
     // name to G4_Kernel
@@ -1929,8 +1906,8 @@ int CISA_IR_Builder::Compile(const char *nameInput, std::ostream *os,
 }
 
 void CISA_IR_Builder::summarizeFunctionInfo(
-    VISAKernelImplListTy &mainFunctions,
-    VISAKernelImplListTy &subFunction) {
+    KernelListTy &mainFunctions,
+    KernelListTy &subFunction) {
 
   // Set usesBarrier property for each kernel and function appropriately.
   // resursively propagate barrier information from callees to their caller.
@@ -3886,7 +3863,7 @@ bool CISA_IR_Builder::CISA_create_lsc_untyped_block2d_inst(
     VISA_Exec_Size execSize, VISA_EMask_Ctrl emask,
     LSC_DATA_SHAPE_BLOCK2D dataShape2d, VISA_opnd *dstData,
     VISA_opnd *src0AddrsOps[LSC_BLOCK2D_ADDR_PARAMS], VISA_opnd *src1Data,
-    int lineNum) {
+    int xImmOffset, int yImmOffset, int lineNum) {
   VISA_VectorOpnd *src0Addrs[LSC_BLOCK2D_ADDR_PARAMS]{
       static_cast<VISA_VectorOpnd *>(src0AddrsOps[0]),
       static_cast<VISA_VectorOpnd *>(src0AddrsOps[1]),
@@ -3898,7 +3875,8 @@ bool CISA_IR_Builder::CISA_create_lsc_untyped_block2d_inst(
   VISA_CALL_TO_BOOL(AppendVISALscUntypedBlock2DInst, opcode, sfid,
                     static_cast<VISA_PredOpnd *>(pred), execSize, emask,
                     caching, dataShape2d, static_cast<VISA_RawOpnd *>(dstData),
-                    src0Addrs, static_cast<VISA_RawOpnd *>(src1Data));
+                    src0Addrs, xImmOffset, yImmOffset,
+                    static_cast<VISA_RawOpnd *>(src1Data));
   return true;
 }
 

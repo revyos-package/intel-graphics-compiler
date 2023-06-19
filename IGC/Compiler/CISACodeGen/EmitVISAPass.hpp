@@ -146,6 +146,10 @@ public:
     void emitReturn(llvm::ReturnInst* inst);
     void EmitInsertValueToStruct(llvm::InsertValueInst* II);
     void EmitExtractValueFromStruct(llvm::ExtractValueInst* EI);
+    void EmitInsertValueToLayoutStruct(llvm::InsertValueInst* II);
+    void emitVectorCopyToAOS(uint32_t AOSBytes,
+        CVariable* Dst, CVariable* Src, uint32_t nElts,
+        uint32_t DstSubRegOffset = 0, uint32_t SrcSubRegOffset = 0);
 
     /// stack-call code-gen functions
     void emitStackCall(llvm::CallInst* inst);
@@ -154,10 +158,11 @@ public:
     void InitializeKernelStack(llvm::Function* pKernel);
 
     /// stack-call functions for reading and writing argument/retval data to stack
-    typedef SmallVector<std::tuple<CVariable*, uint32_t, uint32_t, uint32_t>, 8> StackDataBlocks;
+    typedef SmallVector<std::tuple<CVariable*, uint32_t, uint32_t, uint32_t, bool>, 8> StackDataBlocks;
     uint CalculateStackDataBlocks(StackDataBlocks& blkData, std::vector<CVariable*>& Args);
     void ReadStackDataBlocks(StackDataBlocks& blkData, uint offsetS);
     void WriteStackDataBlocks(StackDataBlocks& blkData, uint offsetS);
+    void emitCopyGRFBlock(CVariable* Dst, CVariable* Src, Type* type, uint32_t BlkOffset, unsigned numInstance, bool isWriteToBlk);
 
     // emits the visa relocation instructions for function/global symbols
     void emitSymbolRelocation(llvm::Function& F);
@@ -165,11 +170,15 @@ public:
     void emitOutput(llvm::GenIntrinsicInst* inst);
 
     // TODO: unify the functions below and clean up
-    void emitStore(llvm::StoreInst* inst, llvm::Value* varOffset, llvm::ConstantInt* immOffset);
+    void emitStore(llvm::StoreInst *inst, llvm::Value *varOffset,
+                   llvm::ConstantInt *immOffset
+    );
     void emitStore3D(llvm::StoreInst* inst, llvm::Value* elemIdxV);
     void emitStore3DInner(llvm::Value* pllValToStore, llvm::Value* pllDstPtr, llvm::Value* pllElmIdx);
 
-    void emitLoad(llvm::LoadInst* inst, llvm::Value* varOffset, llvm::ConstantInt* immOffset);   // single load, no pattern
+    void emitLoad(llvm::LoadInst *inst, llvm::Value *varOffset,
+                  llvm::ConstantInt *immOffset
+    ); // single load, no pattern
     void emitLoad3DInner(llvm::LdRawIntrinsic* inst, ResourceDescriptor& resource, llvm::Value* elemIdxV);
 
     // when resource is dynamically indexed, load/store must use special intrinsics
@@ -216,6 +225,7 @@ public:
 
     // message emit functions
     void emitSimdLaneId(llvm::Instruction* inst);
+    void emitSimdLaneIdReplicate(llvm::Instruction* inst);
     void emitSimdSize(llvm::Instruction* inst);
     void emitSimdShuffle(llvm::Instruction* inst);
     void emitCrossInstanceMov(const SSource& source, const DstModifier& modifier);
@@ -347,6 +357,7 @@ public:
     void emitInsert(llvm::Instruction* inst);
     void emitExtract(llvm::Instruction* inst);
     void emitBitCast(llvm::BitCastInst* btCst);
+    void emitBitcastfromstruct(llvm::GenIntrinsicInst* BCFromStruct);
     void emitPtrToInt(llvm::PtrToIntInst* p2iCst);
     void emitIntToPtr(llvm::IntToPtrInst* i2pCst);
     void emitAddrSpaceCast(llvm::AddrSpaceCastInst* addrSpaceCast);
@@ -354,6 +365,9 @@ public:
     void emitDiscardBranch(llvm::BranchInst* br, const SSource& cond);
     void emitAluNoModifier(llvm::GenIntrinsicInst* inst);
 
+    void createVMaskPred(CVariable*& predicate);
+    void UseVMaskPred();
+    CVariable* m_vMaskPredForSubplane = nullptr;
 
     void emitGradientX(const SSource& source, const DstModifier& modifier);
     void emitGradientY(const SSource& source, const DstModifier& modifier);
@@ -411,13 +425,17 @@ public:
     void emitVectorBitCast(llvm::BitCastInst* BCI);
     void emitVectorLoad(llvm::LoadInst* LI, llvm::Value* offset, llvm::ConstantInt* immOffset);
     void emitVectorStore(llvm::StoreInst* SI, llvm::Value* offset, llvm::ConstantInt* immOffset);
-    void emitLSCVectorLoad(
-        llvm::Value* Ptr, llvm::Value* offset, llvm::ConstantInt* immOffset,
-        llvm::Type* Ty, LSC_CACHE_OPTS cacheOpts, uint64_t align);
-    void emitLSCVectorStore(
-        llvm::Value* Ptr, llvm::Value* offset, llvm::ConstantInt* immOffset,
-        llvm::Value* storedVal, LSC_CACHE_OPTS cacheOpts, alignment_t align, bool dontForceDMask);
+    void emitLSCVectorLoad(llvm::Value *Ptr,
+                           llvm::Value *offset, llvm::ConstantInt *immOffset,
+                           llvm::Type *Ty, LSC_CACHE_OPTS cacheOpts,
+                           uint64_t align);
+    void emitLSCVectorStore(llvm::Value *Ptr,
+                            llvm::Value *offset, llvm::ConstantInt *immOffset,
+                            llvm::Value *storedVal, LSC_CACHE_OPTS cacheOpts,
+                            alignment_t align, bool dontForceDMask);
     void emitGenISACopy(llvm::GenIntrinsicInst* GenCopyInst);
+    void emitUniformVectorCopy(CVariable* Dst, CVariable* Src, uint32_t nElts,
+        uint32_t DstSubRegOffset = 0, uint32_t SrcSubRegOffset = 0);
     void emitVectorCopy(CVariable* Dst, CVariable* Src, uint32_t nElts,
         uint32_t DstSubRegOffset = 0, uint32_t SrcSubRegOffset = 0);
     void emitCopyAll(CVariable* Dst, CVariable* Src, llvm::Type* Ty);
@@ -454,7 +472,6 @@ public:
     void emitUnmaskedRegionBoundary(bool start);
     LSC_CACHE_OPTS getDefaultRaytracingCachePolicy(bool isLoad) const;
     void emitAsyncStackID(llvm::GenIntrinsicInst* I);
-    void emitSyncStackID(llvm::GenIntrinsicInst* I);
     void emitTraceRay(llvm::TraceRayIntrinsic *I, bool RayQueryEnable);
     void emitReadTraceRaySync(llvm::GenIntrinsicInst* I);
 
@@ -590,6 +607,8 @@ public:
     void emitLoadImplBufferPtr(llvm::GenIntrinsicInst* I);
     void emitLoadLocalIdBufferPtr(llvm::GenIntrinsicInst* I);
 
+    void emitMayUnalignedVectorCopy(
+        CVariable* D, uint32_t D_off, CVariable* S, uint32_t S_off, llvm::Type* Ty);
 
     std::pair<llvm::Value*, llvm::Value*> getPairOutput(llvm::Value*) const;
 
@@ -642,7 +661,7 @@ public:
 
     CVariable* ExtendVariable(CVariable* pVar, e_alignment uniformAlign);
     CVariable* BroadcastAndExtend(CVariable* pVar);
-    CVariable* TruncatePointer(CVariable* pVar);
+    CVariable* TruncatePointer(CVariable* pVar, bool TruncBothHalves = false);
     CVariable* ReAlignUniformVariable(CVariable* pVar, e_alignment align);
     CVariable* BroadcastAndTruncPointer(CVariable* pVar);
     CVariable* IndexableResourceIndex(CVariable* indexVar, uint btiIndex);

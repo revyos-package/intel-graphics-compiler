@@ -443,59 +443,73 @@ void CisaBinary::patchFunction(int index, unsigned genxBufferSize) {
   this->genxBinariesSize += genxBufferSize;
 }
 
-const VISAKernelImpl *CisaBinary::getFmtKernelForISADump(
-    const VISAKernelImpl *kernel,
-    const std::list<VISAKernelImpl *> &kernels) const {
-  // Assuming there's no too many payload kernels. Use the logic in
-  // CisaBinary::isaDump to select the kernel for format provider.
-  if (!kernel->getIsPayload())
-    return kernel;
+bool allowDump(const Options &options, const std::string &fileName) {
+  const char *regex = options.getOptionCstr(vISA_ShaderDumpFilter);
+  if (!regex || *regex == '\0')
+    return true;
 
-  vASSERT(!kernels.empty());
-  VISAKernelImpl *fmtKernel = kernels.front();
-  for (VISAKernelImpl *k : kernels) {
-    if (k == kernel)
-      break;
-    if (k->getIsKernel())
-      fmtKernel = k;
-  }
-  return fmtKernel;
+  std::regex fileRegex(regex);
+
+  return std::regex_search(fileName, fileRegex);
 }
 
-std::string CisaBinary::isaDump(const VISAKernelImpl *kernel,
-                                const VISAKernelImpl *fmtKernel) const {
+} // namespace CisaFramework
+
+// repKernel is usually the same as kernel except for when doing Pixel Shader
+// code patching, in which case the kernel is the payload prologue while the
+// repKernel has the actual shader body.
+std::string CISA_IR_Builder::isaDump(const VISAKernelImpl *kernel,
+                                     const VISAKernelImpl *repKernel,
+                                     bool printVersion) const {
   std::stringstream sstr;
-  VISAKernel_format_provider fmt(fmtKernel);
+  VISAKernel_format_provider header(repKernel);
 
-  sstr << fmt.printKernelHeader(m_header);
+  sstr << header.printKernelHeader(printVersion);
 
-  std::list<CisaFramework::CisaInst *>::const_iterator inst_iter =
-      kernel->getInstructionListBegin();
-  std::list<CisaFramework::CisaInst *>::const_iterator inst_iter_end =
-      kernel->getInstructionListEnd();
+  auto inst_iter = kernel->getInstructionListBegin();
+  auto inst_iter_end = kernel->getInstructionListEnd();
   for (; inst_iter != inst_iter_end; inst_iter++) {
     CisaFramework::CisaInst *cisa_inst = *inst_iter;
     const CISA_INST *inst = cisa_inst->getCISAInst();
-    sstr << printInstruction(m_header, &fmt, inst, kernel->getOptions())
+    // FIXME: This seems very suspicious that inst is coming from kernel but
+    // repKernel (which is used to look up variable name) is potentially a
+    // different kernel. Have we verified that .visaasm dump works correctly for
+    // PS code patching?
+    sstr << printInstruction(m_header, &header, inst, kernel->getOptions())
          << "\n";
   }
+
+#ifdef DLL_MODE
+  // Print the options used to compile this vISA object to assist debugging.
+  if (kernel->getCISABuilder()->getBuilderOption() == VISA_BUILDER_BOTH) {
+    sstr
+        << "\n//Platform: "
+        << kernel->getCISABuilder()->getPlatformInfo()->getGenxPlatformString();
+    sstr << "\n//Build option: \"" << kernel->getOptions()->getFullArgString()
+         << "\"";
+  }
+#endif
 
   return sstr.str();
 }
 
-int CisaBinary::isaDump(const std::list<VISAKernelImpl *> &kernels,
-                        const Options *options) const {
+int CISA_IR_Builder::isaDump(const char *combinedIsaasmName) const {
 #ifdef IS_RELEASE_DLL
   return VISA_SUCCESS;
 #else
-  if (!m_options->getOption(vISA_GenerateISAASM))
+  const bool genIsaasm = m_options.getOption(vISA_GenerateISAASM);
+  const bool genCombinedIsaasm =
+      m_options.getOption(vISA_GenerateCombinedISAASM);
+  if (!genIsaasm && !genCombinedIsaasm)
     return VISA_SUCCESS;
 
-  const bool isaasmToConsole = options->getOption(vISA_ISAASMToConsole);
+  const bool isaasmToConsole = m_options.getOption(vISA_ISAASMToConsole);
+  std::stringstream ss;
 
-  VISAKernelImpl *mainKernel = kernels.front();
-  for (VISAKernelImpl *kTemp : kernels) {
+  VISAKernelImpl *mainKernel = *kernel_begin();
+  for (auto kTempIt = kernel_begin(); kTempIt != kernel_end(); ++kTempIt) {
     std::stringstream asmName;
+    VISAKernelImpl *kTemp = *kTempIt;
     if (kTemp->getIsKernel()) {
       mainKernel = kTemp;
       asmName << kTemp->getOutputAsmPath();
@@ -519,34 +533,43 @@ int CisaBinary::isaDump(const std::list<VISAKernelImpl *> &kernels,
     asmName << ".visaasm";
     std::string asmFileName = sanitizePathString(asmName.str());
 
-    if (allowDump(*m_options, asmFileName)) {
-      VISAKernelImpl *fmtKernel = kTemp->getIsPayload() ? mainKernel : kTemp;
+    // Do we still want to support regex for file dump filters when writing
+    // a combined isaasm file?
+    if (!CisaFramework::allowDump(m_options, asmFileName))
+      continue;
+
+    VISAKernelImpl *repKernel = kTemp->getIsPayload() ? mainKernel : kTemp;
+    if (genCombinedIsaasm) {
+      // only print version when emitting the first kernel/function in the
+      // output.
+      ss << isaDump(kTemp, repKernel, !ss.rdbuf()->in_avail());
+      vISA_ASSERT(!ss.fail(), "Failed to write combined CISA ASM to file");
+    }
+    if (genIsaasm) {
       if (isaasmToConsole) {
-        std::cout << isaDump(kTemp, fmtKernel);
+        std::cout << isaDump(kTemp, repKernel);
       } else {
         std::ofstream out(asmFileName);
-        out << isaDump(kTemp, fmtKernel);
+        out << isaDump(kTemp, repKernel);
         vISA_ASSERT(!out.fail(), "Failed to write CISA ASM to file");
       }
     }
   }
 
+  if (genCombinedIsaasm) {
+    if (isaasmToConsole) {
+      std::cout << ss.rdbuf();
+    } else {
+      vASSERT(combinedIsaasmName);
+      std::ofstream out(combinedIsaasmName);
+      out << ss.rdbuf();
+      vISA_ASSERT(!out.fail(), "Failed to write combined CISA ASM to file");
+    }
+  }
   // Return early exit if emitting isaasm to console.
-  return isaasmToConsole? VISA_EARLY_EXIT : VISA_SUCCESS;
+  return isaasmToConsole ? VISA_EARLY_EXIT : VISA_SUCCESS;
 #endif // IS_RELEASE_DLL
 }
-
-bool allowDump(const Options &options, const std::string &fileName) {
-  const char *regex = options.getOptionCstr(vISA_ShaderDumpFilter);
-  if (!regex || *regex == '\0')
-    return true;
-
-  std::regex fileRegex(regex);
-
-  return std::regex_search(fileName, fileRegex);
-}
-
-} // namespace CisaFramework
 
 // It's unfortunate we have to define vISAVerifier functions here due to the
 // #include mess..

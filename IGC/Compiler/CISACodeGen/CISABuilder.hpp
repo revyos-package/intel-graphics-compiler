@@ -115,7 +115,7 @@ namespace IGC
     class CEncoder
     {
     public:
-        void InitEncoder(bool canAbortOnSpill, bool hasStackCall, bool hasInlineAsmCall, bool hasAdditionalVisaAsmToLink, uint numThreadsPerEU, VISAKernel* prevKernel);
+        void InitEncoder(bool canAbortOnSpill, bool hasStackCall, bool hasInlineAsmCall, bool hasAdditionalVisaAsmToLink, int numThreadsPerEU, VISAKernel* prevKernel);
         void InitBuildParams(llvm::SmallVector<std::unique_ptr< char, std::function<void(char*)>>, 10> & params);
         void InitVISABuilderOptions(TARGET_PLATFORM VISAPlatform, bool canAbortOnSpill, bool hasStackCall, bool enableVISA_IR);
         SEncoderState CopyEncoderState();
@@ -136,7 +136,6 @@ namespace IGC
         void MarkAsPayloadLiveOut(CVariable* var);
         void Compile(bool hasSymbolTable, GenXFunctionGroupAnalysis*& pFGA);
         std::string GetShaderName();
-        int GetThreadCount(SIMDMode simdMode);
 
         CEncoder();
         ~CEncoder();
@@ -254,18 +253,20 @@ namespace IGC
         static LSC_DATA_ELEMS LSC_GetElementNum(unsigned eNum);
         static LSC_ADDR_TYPE getLSCAddrType(const ResourceDescriptor * resource);
         static LSC_ADDR_TYPE getLSCAddrType(e_predefSurface surfaceType);
-        void LSC_LoadGather(
-            LSC_OP subOp, CVariable* dst, CVariable* offset,
-            LSC_DATA_SIZE elemSize, LSC_DATA_ELEMS numElems,
-            unsigned blockOffset, ResourceDescriptor* resource,
-            LSC_ADDR_SIZE addr_size, LSC_DATA_ORDER data_order,
-            int immOffset, LSC_CACHE_OPTS cacheOpts);
-        void LSC_StoreScatter(
-            LSC_OP subOp, CVariable * src, CVariable * offset,
-            LSC_DATA_SIZE elemSize, LSC_DATA_ELEMS numElems,
-            unsigned blockOffset, ResourceDescriptor * resource,
-            LSC_ADDR_SIZE addr_size, LSC_DATA_ORDER data_order,
-            int immOffset, LSC_CACHE_OPTS cacheOpts);
+        void LSC_LoadGather(LSC_OP subOp, CVariable *dst,
+                            CVariable *offset, LSC_DATA_SIZE elemSize,
+                            LSC_DATA_ELEMS numElems, unsigned blockOffset,
+                            ResourceDescriptor *resource,
+                            LSC_ADDR_SIZE addr_size, LSC_DATA_ORDER data_order,
+                            int immOffset, LSC_CACHE_OPTS cacheOpts);
+        void LSC_StoreScatter(LSC_OP subOp,
+                              CVariable *src, CVariable *offset,
+                              LSC_DATA_SIZE elemSize, LSC_DATA_ELEMS numElems,
+                              unsigned blockOffset,
+                              ResourceDescriptor *resource,
+                              LSC_ADDR_SIZE addr_size,
+                              LSC_DATA_ORDER data_order, int immOffset,
+                              LSC_CACHE_OPTS cacheOpts);
         void LSC_LoadBlock1D(
             CVariable* dst, CVariable* offset,
             LSC_DATA_SIZE elemSize, LSC_DATA_ELEMS numElems,
@@ -298,7 +299,8 @@ namespace IGC
         void NamedBarrier(e_barrierKind BarrierKind, CVariable* src0, CVariable* src1);
         void LSC_TypedReadWrite(
             LSC_OP subOp, ResourceDescriptor* resource,
-            CVariable* pU, CVariable* pV, CVariable* pR, CVariable* pLOD,
+            CVariable* pU, CVariable* pV, CVariable* pR,
+            CVariable* pLOD,
             CVariable* pSrcDst,
             unsigned elemSize, unsigned numElems,
             LSC_ADDR_SIZE addr_size, int chMask,
@@ -506,6 +508,7 @@ namespace IGC
         std::string GetUniqueInlineAsmLabel();
 
         bool IsVisaCompiledSuccessfully() const { return m_vIsaCompileStatus == VISA_SUCCESS; }
+        bool IsVisaCompileStatusFailure() const { return m_vIsaCompileStatus == VISA_FAILURE; }
     private:
         // helper functions
         VISA_VectorOpnd* GetSourceOperand(CVariable* var, const SModifier& mod);

@@ -253,6 +253,7 @@ class DDD {
   int OTHER_ARF_BUCKET;
   int TOTAL_BUCKETS;
   int totalGRFNum;
+  int totalACCNum;
   G4_Kernel *kernel;
   PointsToAnalysis &pointsToAnalysis;
 
@@ -379,9 +380,12 @@ private:
 //    2, Inst must not have predicate/cond mod
 //    3, The first use of the dst must have DF type as well
 static bool instCanUse2xDP(G4_INST *inst) {
-  if (inst->opcode() == G4_mad && inst->getExecSize() == g4::SIMD16 &&
-      inst->getDst()->getType() == Type_DF &&
-      inst->getMaskOption() == InstOpt_M0 && inst->getPredicate() == nullptr &&
+  if (inst->opcode() == G4_mad && (((inst->getExecSize() == g4::SIMD16) &&
+      (inst->getDst()->getType() == Type_DF)) || ((inst->getExecSize() == g4::SIMD32) &&
+      (inst->getDst()->getType() == Type_F))) &&
+      ((inst->getMaskOption() == InstOpt_M0) ||
+       (inst->getMaskOption() == InstOpt_NoOpt)) &&
+      inst->getPredicate() == nullptr &&
       inst->getCondMod() == nullptr) {
     return true;
   }

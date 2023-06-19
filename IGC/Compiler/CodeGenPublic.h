@@ -423,7 +423,9 @@ namespace IGC
         SIMD_SKIP_SPILL,     // 4: skip this SIMD due to spill or high chance of spilling.
         SIMD_SKIP_STALL,     // 5: skip this SIMD due to stall cycle or thread occupancy heuristic.
         SIMD_SKIP_THGRPSIZE, // 6: skip due to threadGroupSize heuristic(CS / OCL only).
-        SIMD_SKIP_PERF       // 7: skip this SIMD due to performance concern (dx12 + discard, MRT, etc) or other reasons.
+        SIMD_SKIP_PERF,      // 7: skip this SIMD due to performance concern (dx12 + discard, MRT, etc) or other reasons.
+        SIMD_SKIP_ML,        // 8: skip this SIMD due to ML engine prediction.
+        SIMD_INFO_RESERVED
     };
 
     enum SIMDInfoOffset
@@ -962,6 +964,10 @@ namespace IGC
         BVHInfo bvhInfo;
         // Immediate constant buffer promotion is enabled for all optimization except for Direct storage case
         bool m_disableICBPromotion = false;
+        // Ignore per module fast math flag and use only per instruction fast math flags
+        // Add few changes to CustomUnsafeOptPass related to fast flag propagation
+        bool m_checkFastFlagPerInstructionInCustomUnsafeOptPass = false;
+
     private:
         //For storing error message
         std::stringstream oclErrorMessage;
@@ -1050,7 +1056,7 @@ namespace IGC
 
         CompOptions& getCompilerOption();
         virtual void resetOnRetry();
-        virtual uint32_t getNumThreadsPerEU() const;
+        virtual int32_t getNumThreadsPerEU() const;
         virtual uint32_t getExpGRFSize() const;
         virtual uint32_t getNumGRFPerThread(bool returnDefault = true);
         virtual void setNumGRFPerThread(uint32_t value) { m_NumGRFPerThread = value; }

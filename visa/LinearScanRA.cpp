@@ -52,7 +52,7 @@ void globalLinearScan::allocRetRegsVector(LSLiveRange *lr) {
 }
 
 LSLiveRange *LinearScanRA::GetOrCreateLocalLiveRange(G4_Declare *topdcl) {
-  LSLiveRange *lr = gra.getLSLR(topdcl);
+  LSLiveRange *lr = gra.getSafeLSLR(topdcl);
 
   // Check topdcl of operand and setup a new live range if required
   if (!lr) {
@@ -89,8 +89,8 @@ public:
       }
 
       if (topdcl) {
-        LSLiveRange *lr = gra.getLSLR(topdcl);
-        if (lr->getNumRefs() == 0 && (topdcl->getRegFile() == G4_GRF ||
+        LSLiveRange *lr = gra.getSafeLSLR(topdcl);
+        if (lr && lr->getNumRefs() == 0 && (topdcl->getRegFile() == G4_GRF ||
                                       topdcl->getRegFile() == G4_INPUT)) {
           // Remove this lifetime op
           return true;
@@ -140,7 +140,8 @@ bool LinearScanRA::hasDstSrcOverlapPotential(G4_DstRegRegion *dst,
       int dstOffset = (dstDcl->getOffsetFromBase() + dst->getLeftBound()) /
                       builder.numEltPerGRF<Type_UB>();
       G4_DstRegRegion *dstRgn = dst;
-      dstOpndNumRows = dstRgn->getSubRegOff() + dstRgn->getLinearizedEnd() -
+      dstOpndNumRows = dstRgn->getSubRegOff() * dstRgn->getTypeSize() +
+                           dstRgn->getLinearizedEnd() -
                            dstRgn->getLinearizedStart() + 1 >
                        builder.numEltPerGRF<Type_UB>();
 
@@ -150,7 +151,7 @@ bool LinearScanRA::hasDstSrcOverlapPotential(G4_DstRegRegion *dst,
         G4_Declare *srcDcl = src->getBase()->asRegVar()->getDeclare();
         int srcOffset = (srcDcl->getOffsetFromBase() + src->getLeftBound()) /
                         builder.numEltPerGRF<Type_UB>();
-        bool srcOpndNumRows = srcRgn->getSubRegOff() +
+        bool srcOpndNumRows = srcRgn->getSubRegOff() * dstRgn->getTypeSize() +
                                   srcRgn->getLinearizedEnd() -
                                   srcRgn->getLinearizedStart() + 1 >
                               builder.numEltPerGRF<Type_UB>();
@@ -232,7 +233,7 @@ bool LSLiveRange::isGRFRegAssigned() {
 unsigned int LSLiveRange::getSizeInWords(const IR_Builder &builder) {
   int nrows = getTopDcl()->getNumRows();
   int elemsize = getTopDcl()->getElemSize();
-  int nelems = getTopDcl()->getNumElems();
+  int nelems = getTopDcl()->getNumElems();  //elements per row
   int words = 0;
 
   if (nrows > 1) {
@@ -288,7 +289,8 @@ void globalLinearScan::printActives() {
     startregnum = endregnum = op->asGreg()->getRegNum();
     endsregnum =
         startsregnum +
-        (lr->getTopDcl()->getNumElems() * lr->getTopDcl()->getElemSize() / 2) -
+                 (lr->getTopDcl()->getTotalElems() *
+                  lr->getTopDcl()->getElemSize() / 2) -
         1;
 
     if (lr->getTopDcl()->getNumRows() > 1) {
@@ -331,7 +333,7 @@ void globalLinearScan::printActives() {
 
         startregnum = endregnum = op->asGreg()->getRegNum();
         endsregnum = startsregnum +
-                     (lr->getTopDcl()->getNumElems() *
+                     (lr->getTopDcl()->getTotalElems() *
                       lr->getTopDcl()->getElemSize() / 2) -
                      1;
 
@@ -364,7 +366,7 @@ void globalLinearScan::printActives() {
         int startregnum = op->asGreg()->getRegNum();
         int endregnum = startregnum;
         int endsregnum = startsregnum +
-                         (lr->getTopDcl()->getNumElems() *
+                         (lr->getTopDcl()->getTotalElems() *
                           lr->getTopDcl()->getElemSize() / 2) -
                          1;
 
@@ -942,14 +944,15 @@ int LinearScanRA::linearScanRA() {
         // and live-out. because the variable is emitted only post RA to
         // preserve old value of a0.2.
         G4_Declare *a0Dcl = kernel.fg.builder->getOldA0Dot2Temp();
-        LSLiveRange *lr = gra.getLSLR(a0Dcl);
+        LSLiveRange *lr = gra.getSafeLSLR(a0Dcl);
         if (!lr) {
           lr = CreateLocalLiveRange(a0Dcl);
           globalDeclares.push_back(a0Dcl);
         }
-      } else if (gra.useLscForNonStackCallSpillFill) {
+      } else if (gra.useLscForNonStackCallSpillFill ||
+                 gra.useLscForScatterSpill) {
         G4_Declare *a0Dcl = kernel.fg.builder->getOldA0Dot2Temp();
-        LSLiveRange *lr = gra.getLSLR(a0Dcl);
+        LSLiveRange *lr = gra.getSafeLSLR(a0Dcl);
         if (!lr) {
           lr = CreateLocalLiveRange(a0Dcl);
           globalDeclares.push_back(a0Dcl);
@@ -998,7 +1001,9 @@ int LinearScanRA::linearScanRA() {
       std::cout << "\t\tGRFSpillFillCount: " << GRFSpillFillCount << "\n";
     });
 
-    kernel.dumpToFile("after.Spill_GRF." + std::to_string(iterator));
+    if (spillLRs.size()) {
+      kernel.dumpToFile("after.Spill_GRF." + std::to_string(iterator));
+    }
 
     iterator++;
   } while (spillLRs.size() && iterator < MAXIMAL_ITERATIONS);
@@ -1023,6 +1028,9 @@ int LinearScanRA::linearScanRA() {
 }
 
 int LinearScanRA::doLinearScanRA() {
+  if (l.getNumSelectedVar() == 0) {
+    return VISA_SUCCESS;
+  }
   RA_TRACE(std::cout << "--Global linear Scan RA--\n");
   // Initial pregs which will be used in the preRAAnalysis
   PhyRegsLocalRA phyRegs(builder, kernel.getNumRegTotal());
@@ -1041,7 +1049,7 @@ int LinearScanRA::doLinearScanRA() {
 void LinearScanRA::undoLinearScanRAAssignments() {
   // Undo all assignments made by local RA
   for (auto dcl : kernel.Declares) {
-    LSLiveRange *lr = gra.getLSLR(dcl);
+    LSLiveRange *lr = gra.getSafeLSLR(dcl);
     if (lr != NULL) {
       if (lr->getAssigned() == true) {
         // Undo the assignment
@@ -1104,7 +1112,7 @@ void LinearScanRA::setDstReferences(
     std::vector<LSLiveRange *> &liveIntervals,
     std::vector<LSLiveRange *> &eotLiveIntervals) {
   G4_INST *curInst = (*inst_it);
-  LSLiveRange *lr = gra.getLSLR(dcl);
+  LSLiveRange *lr = gra.getSafeLSLR(dcl);
 
   if (!lr &&
       dcl->getRegFile() == G4_GRF) // The new variables generated by spill/fill,
@@ -1196,7 +1204,7 @@ void LinearScanRA::setSrcReferences(
     std::vector<LSLiveRange *> &liveIntervals,
     std::vector<LSLiveRange *> &eotLiveIntervals) {
   G4_INST *curInst = (*inst_it);
-  LSLiveRange *lr = gra.getLSLR(dcl);
+  LSLiveRange *lr = gra.getSafeLSLR(dcl);
 
   if (!lr && dcl->getRegFile() == G4_GRF) {
     lr = CreateLocalLiveRange(dcl);
@@ -1424,7 +1432,7 @@ void LinearScanRA::calculateLiveInIntervals(
         dcl->isSpilled()) {
       continue;
     }
-    LSLiveRange *lr = gra.getLSLR(dcl);
+    LSLiveRange *lr = gra.getSafeLSLR(dcl);
     if (lr && !l.isEmptyLiveness() &&
         l.isLiveAtEntry(bb, dcl->getRegVar()->getId())) // Live in current BB
     {
@@ -1612,7 +1620,7 @@ void LinearScanRA::calculateLiveOutIntervals(
         dcl->isSpilled())
       continue;
 
-    LSLiveRange *lr = gra.getLSLR(dcl);
+    LSLiveRange *lr = gra.getSafeLSLR(dcl);
     if (lr && l.isLiveAtExit(bb, dcl->getRegVar()->getId())) {
       lr->setLastRef(bb->getInstList().back(),
                      bb->getInstList().back()->getLexicalId() * 2 + 1);
@@ -1628,7 +1636,7 @@ void LinearScanRA::calculateLiveThroughIntervals() {
         dcl->isSpilled())
       continue;
 
-    LSLiveRange *lr = gra.getLSLR(dcl);
+    LSLiveRange *lr = gra.getSafeLSLR(dcl);
     if (lr && dcl->isInput() && dcl->isOutput() && !lr->isGRFRegAssigned()) {
       lr->setFirstRef(nullptr, 0);
       lr->setLastRef(nullptr, lastInstLexID * 2 + 1);
@@ -1740,7 +1748,8 @@ static inline void printLiveInterval(LSLiveRange *lr, bool assign,
   startregnum = endregnum = op->asGreg()->getRegNum();
   endsregnum =
       startsregnum +
-      (lr->getTopDcl()->getNumElems() * lr->getTopDcl()->getElemSize() / 2) - 1;
+      (lr->getTopDcl()->getTotalElems() * lr->getTopDcl()->getElemSize() / 2) -
+      1;
 
   if (lr->getTopDcl()->getNumRows() > 1) {
     endregnum = startregnum + lr->getTopDcl()->getNumRows() - 1;
@@ -2012,7 +2021,6 @@ bool globalLinearScan::runLinearScan(IR_Builder &builder,
         }
       }
 
-      // startGRFReg = 0;
       allocateRegResult = allocateRegsLinearScan(lr, builder);
 #ifdef DEBUG_VERBOSE_ON
       if (allocateRegResult) {
@@ -2021,15 +2029,11 @@ bool globalLinearScan::runLinearScan(IR_Builder &builder,
 #endif
     } else {
       allocateRegResult = true;
-      int startregnum, subregnum, endsregnum;
+      int startregnum, subregnum;
       G4_VarBase *op;
       op = lr->getPhyReg(subregnum);
 
       startregnum = op->asGreg()->getRegNum();
-      endsregnum = subregnum +
-                   (lr->getTopDcl()->getNumElems() *
-                    lr->getTopDcl()->getElemSize() / 2) -
-                   1;
       int nrows = 0;
       int lastRowSize = 0;
       int size = lr->getSizeInWords(builder);

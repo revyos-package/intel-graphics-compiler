@@ -112,6 +112,7 @@ class Optimizer {
   void localInstCombine();
   void optimizeLogicOperation();
   void cselPeepHoleOpt();
+  void preRegAlloc();
   void regAlloc();
   void insertFallThroughJump();
   void reverseOffsetProp(AddrSubReg_Node addrRegInfo[8], int subReg,
@@ -175,8 +176,6 @@ class Optimizer {
   void ifCvt();
 
   void ifCvtFCCall();
-
-  void reRAPostSchedule();
 
   void dce();
 
@@ -295,11 +294,6 @@ private:
   void varSplit();
   void cloneSampleInst();
 
-  // helper function to find the size of cross thread data which needs to be
-  // loaded loadStartOffset - in this parameter we put the offsset of first
-  // input which gets loaded.
-  uint32_t findLoadedInputSize(uint32_t &loadStartOffset);
-
   /// Each optimization should be a member function of this class.
   /// This defines a pass type as a pointer to member function.
   typedef void (Optimizer::*PassType)();
@@ -349,7 +343,8 @@ public:
     PI_preRA_HWWorkaround,  // always, each WA under specific control
     PI_postRA_HWWorkaround, // always, each WA under specific control
     PI_preRA_Schedule,
-    PI_regAlloc,          // always
+    PI_preRegAlloc,              // always
+    PI_regAlloc,              // always
     PI_removeLifetimeOps, // always
     PI_removeRedundMov,       // always
     PI_removeEmptyBlocks,     // always
@@ -375,7 +370,6 @@ public:
     PI_cleanupBindless,
     PI_countGRFUsage,
     PI_changeMoveType,
-    PI_reRAPostSchedule,
     PI_accSubBeforeRA,
     PI_accSubPostSchedule,
     PI_dce,

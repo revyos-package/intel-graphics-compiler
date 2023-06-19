@@ -965,18 +965,16 @@ void _setRayFlagsSync_Xe(Value* arg_0, Value* arg_1)
   return;
 }
 
-auto* _getInstanceLeaf_Xe(Value* arg_0, Value* arg_1, const Twine& _ReturnName = "")
+auto* _getPrimLeaf_Xe(Value* arg_0, Value* arg_1)
 {
-  auto* V_2 = CreateInBoundsGEP(arg_0, { getInt64(0), getInt32(1), getInt32(5) });
-  auto* V_3 = CreateICmpEQ(arg_1, getInt32(1));
-  auto* V_4 = CreateInBoundsGEP(arg_0, { getInt64(0), getInt32(0), getInt32(5) });
-  auto* V_5 = CreateSelect(V_3, V_4, V_2);
-  auto* V_6 = CreateLoad(V_5);
-  auto* V_7 = CreateShl(V_6, getInt64(6));
-  auto* V_8 = CreateAnd(V_7, getInt64(281474976710592));
-  auto* V_9 = canonizePointer(V_8);
-  auto* V_10 = CreateIntToPtr(V_9, PointerType::get(_struct_RTStackFormat__InstanceLeaf(*Ctx.getModule()), 1), _ReturnName);
-  return V_10;
+  auto* V_2 = CreateInBoundsGEP(arg_0, { getInt64(0), getInt32(0), getInt32(4) });
+  auto* V_3 = CreateInBoundsGEP(arg_0, { getInt64(0), getInt32(1), getInt32(4) });
+  auto* V_4 = CreateSelect(arg_1, V_2, V_3);
+  auto* V_5 = CreateLoad(V_4);
+  auto* V_6 = CreateShl(V_5, getInt64(6));
+  auto* V_7 = CreateAnd(V_6, getInt64(281474976710592));
+  auto* V_8 = canonizePointer(V_7);
+  return V_8;
 }
 
 auto* _getInstanceContributionToHitGroupIndex_Xe(Value* arg_0, Value* arg_1, const Twine& _ReturnName = "")
@@ -994,6 +992,16 @@ auto* _getInstanceContributionToHitGroupIndex_Xe(Value* arg_0, Value* arg_1, con
   auto* V_12 = CreateLoad(V_11);
   auto* V_13 = CreateAnd(V_12, getInt32(16777215), _ReturnName);
   return V_13;
+}
+
+auto* _getRayMask_Xe(Value* arg_0, const Twine& _ReturnName = "")
+{
+  auto* V_1 = CreateInBoundsGEP(arg_0, { getInt64(0), getInt32(2), getInt64(0), getInt32(7), getInt32(0), getInt32(0) });
+  auto* V_2 = CreateLoad(V_1);
+  auto* V_3 = CreateLShr(V_2, getInt64(48));
+  auto* V_4 = CreateTrunc(V_3, getInt32Ty());
+  auto* V_5 = CreateAnd(V_4, getInt32(255), _ReturnName);
+  return V_5;
 }
 
 auto* _isValid_Xe(Value* arg_0, Value* arg_1, const Twine& _ReturnName = "")
@@ -1629,5 +1637,36 @@ void _commitProceduralPrimitiveHit_Xe(Value* arg_0, Value* arg_1)
   auto* V_17 = CreateInBoundsGEP(arg_0, { getInt64(0), getInt32(0), getInt32(5) });
   CreateStore(V_16, V_17);
   return;
+}
+
+auto* _getSyncStackID_Xe(const Twine& _ReturnName = "")
+{
+  auto* V_0 = getSr0_0();
+  auto* V_1 = CreateShl(V_0, getInt32(3));
+  auto* V_2 = CreateAnd(V_1, getInt32(1408));
+  auto* V_3 = CreateShl(V_0, getInt32(1));
+  auto* V_4 = CreateAnd(V_3, getInt32(512));
+  auto* V_5 = get32BitLaneIDReplicate();
+  auto* V_6 = CreateShl(V_0, getInt32(4));
+  auto* V_7 = CreateAnd(V_6, getInt32(112));
+  auto* V_8 = CreateOr(V_4, V_5);
+  auto* V_9 = CreateOr(V_8, V_2);
+  auto* V_10 = CreateOr(V_9, V_7, _ReturnName);
+  return V_10;
+}
+
+auto* _getSyncStackID_Xe_HPC(const Twine& _ReturnName = "")
+{
+  auto* V_0 = getSr0_0();
+  auto* V_1 = CreateShl(V_0, getInt32(4));
+  auto* V_2 = CreateAnd(V_1, getInt32(768));
+  auto* V_3 = CreateShl(V_0, getInt32(2));
+  auto* V_4 = CreateAnd(V_3, getInt32(1024));
+  auto* V_5 = get32BitLaneIDReplicate();
+  auto* V_6 = CreateAnd(V_1, getInt32(112));
+  auto* V_7 = CreateOr(V_4, V_5);
+  auto* V_8 = CreateOr(V_7, V_2);
+  auto* V_9 = CreateOr(V_8, V_6, _ReturnName);
+  return V_9;
 }
 

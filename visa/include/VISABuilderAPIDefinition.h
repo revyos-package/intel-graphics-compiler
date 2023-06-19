@@ -15,6 +15,8 @@ SPDX-License-Identifier: MIT
 #include "VISAOptions.h"
 #include "visa_igc_common_header.h"
 
+#include <unordered_set>
+
 #define VISA_BUILDER_API
 
 // Forward declares of vISA variable and operand types.
@@ -458,14 +460,14 @@ public:
       LSC_ADDR addrInfo, LSC_DATA_SHAPE dataShape, VISA_VectorOpnd *surface,
       VISA_RawOpnd *dstData, VISA_RawOpnd *src0AddrBase,
       VISA_VectorOpnd *src0AddrPitch, VISA_RawOpnd *src1Data) = 0;
-  /// A generic constructor for lsc_load_strided and lsc_store_strided.
+  /// A generic constructor for lsc_load_block2d and lsc_store_block2d.
   ///
   VISA_BUILDER_API virtual int AppendVISALscUntypedBlock2DInst(
       LSC_OP subOpcode, LSC_SFID lscSfid, VISA_PredOpnd *pred,
       VISA_Exec_Size execSize, VISA_EMask_Ctrl emask, LSC_CACHE_OPTS cacheOpts,
       LSC_DATA_SHAPE_BLOCK2D dataShape, VISA_RawOpnd *dstData,
       VISA_VectorOpnd *src0Addrs[LSC_BLOCK2D_ADDR_PARAMS],
-      VISA_RawOpnd *src1Data) = 0;
+      int xImmOffset, int yImmOffset, VISA_RawOpnd *src1Data) = 0;
   ///////////////////////////////////////////////////////////////////////////
   // LSC typed operations
   //
@@ -1166,12 +1168,10 @@ public:
   VISA_BUILDER_API virtual int SetGTPinInit(void *buffer) = 0;
 
   /// GetGTPinBuffer -- returns data buffer for gtpin (eg, free GRF info)
-  /// This requires reRA pass to be executed, otherwise it returs nullptr
   VISA_BUILDER_API virtual int GetGTPinBuffer(void *&buffer,
                                               unsigned int &size) = 0;
 
   /// GetFreeGRFInfo -- returns free GRF information for gtpin
-  /// This requires reRA pass to be executed, otherwise it returs nullptr
   VISA_BUILDER_API virtual int GetFreeGRFInfo(void *&buffer,
                                               unsigned int &size) = 0;
 

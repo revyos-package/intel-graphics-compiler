@@ -1,12 +1,10 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (C) 2017-2022 Intel Corporation
+Copyright (C) 2017-2023 Intel Corporation
 
 SPDX-License-Identifier: MIT
 
 ============================= end_copyright_notice ===========================*/
-
-#include <cmath>
 
 #include "Assertions.h"
 #include "DebugInfo.h"
@@ -15,6 +13,9 @@ SPDX-License-Identifier: MIT
 #include "Optimizer.h"
 #include "PointsToAnalysis.h"
 #include "visa_wa.h"
+
+#include <cmath>
+#include <unordered_set>
 
 using namespace vISA;
 
@@ -1117,7 +1118,8 @@ bool HWConformity::fixOpndType(INST_LIST_ITER it, G4_BB *bb) {
       has_int = true;
     }
   }
-  if (has_float && has_int) {
+
+  if (has_float && has_int && (inst->opcode() != G4_srnd)) {
     for (int i = 0; i < numSrc; i++) {
       if (inst->getSrc(i) && !IS_FTYPE(inst->getSrc(i)->getType()) &&
           !IS_DFTYPE(inst->getSrc(i)->getType())) {
@@ -1884,6 +1886,58 @@ void HWConformity::fixPredicateIndirectInst(INST_LIST_ITER it, G4_BB *bb) {
       replaceDst(it, inst->getDst()->getType());
     }
   }
+}
+
+// Workaround for compressed instructions with indirect src0:
+// For a compressed instruction with 2 passes, if src0 have indirect 1x1
+// addressing mode then src0 must not have GRF crossover in the first pass. A
+// move must be introduced with GRF offset 0 to avoid src0 and destination
+// crossover in the same instruction.
+bool HWConformity::fixIndirectSrcForCompressedInst(INST_LIST_ITER i, G4_BB *bb) {
+  if (!builder.needIndirectSrcForCompressedInstWA())
+    return false;
+
+  G4_INST *inst = *i;
+  if (inst->mayExceedTwoGRF() || inst->opcode() == G4_nop ||
+      inst->opcode() == G4_madm || inst->isLabel() ||
+      inst->isIntrinsic())
+    return false;
+
+  // apply WA to inst with 1x1 indirect src0
+  G4_Operand *src0 = inst->getSrc(0);
+  if (!src0 || !src0->isIndirect())
+    return false;
+
+  auto src0Region = src0->asSrcRegRegion()->getRegion();
+  if (src0Region->isRegionWH() || src0Region->isRegionV() ||
+      src0Region->isScalar())
+    return false;
+
+  G4_Operand *dst = inst->getDst();
+  if (!dst || dst->isNullReg())
+      return false;
+
+  // apply WA to inst with indirect or cross-grf access dst
+  if (!dst->isIndirect() && !dst->asDstRegRegion()->crossGRF(builder))
+    return false;
+
+  // 1. move dst to a grf-aligned reg
+  //    Do the copy whenever dst stride is not 1 to avoid getting
+  //    an invalid Execution Mask Offset during "evenlySplitInst" (that is,
+  //    avoid splitting simd8 instructions), with the assumption that this WA
+  //    won't apply to GRF size 32 platforms.
+  if (dst->isIndirect() || dst->asDstRegRegion()->getHorzStride() != 1 ||
+      !builder.tryToAlignOperand(dst, builder.getGRFSize()))
+    replaceDst(i, dst->getType(), builder.getGRFAlign());
+
+  // 2. evenly split the instruction so the dst of splitted instructions
+  //    can't cross grf
+  if (inst->getDst()->asDstRegRegion()->crossGRF(builder)) {
+    // Set checkOverlap to false since compressed instructions cannot have
+    // overlapped operands. Hence the splitted result must not have extraMov
+    evenlySplitInst(i, bb, false);
+  }
+  return true;
 }
 
 /*
@@ -3077,7 +3131,8 @@ bool HWConformity::emulate64bMov(INST_LIST_ITER iter, G4_BB *bb) {
           // second half
           bool dstAddrIncremented = false, src0AddrIncremented = false;
           unsigned int immAddrOff = 4;
-          if (dst->isIndirect() && (4 + dst->getAddrImm()) > 512) {
+          // The range of immAddrOff is [-512,511]
+          if (dst->isIndirect() && (4 + dst->getAddrImm()) > 511) {
             // increment dst address register by 4, later decrement it
             dstAddrIncremented = true;
             immAddrOff = 0;
@@ -3101,7 +3156,7 @@ bool HWConformity::emulate64bMov(INST_LIST_ITER iter, G4_BB *bb) {
               rgnToUse, Type_UD);
           if (newSrc->isIndirect()) {
             // upper 4 bytes
-            if ((4 + src0RR->getAddrImm()) > 512) {
+            if ((4 + src0RR->getAddrImm()) > 511) {
               src0AddrIncremented = true;
               iter = bb->insertBefore(
                   origIter, incrementVar(src0RR, src0RR->getRegion()->width,
@@ -3164,7 +3219,7 @@ bool HWConformity::emulate64bMov(INST_LIST_ITER iter, G4_BB *bb) {
 
           bool dstAddrIncremented = false;
           unsigned int immAddrOff = 4;
-          if (dst->isIndirect() && (4 + dst->getAddrImm()) > 512) {
+          if (dst->isIndirect() && (4 + dst->getAddrImm()) > 511) {
             // increment dst address register by 4, later decrement it
             dstAddrIncremented = true;
             immAddrOff = 0;
@@ -3236,7 +3291,7 @@ bool HWConformity::emulate64bMov(INST_LIST_ITER iter, G4_BB *bb) {
 
           bool dstAddrIncremented = false;
           unsigned int immAddrOff = 4;
-          if (dst->isIndirect() && (4 + dst->getAddrImm()) > 512) {
+          if (dst->isIndirect() && (4 + dst->getAddrImm()) > 511) {
             // increment dst address register by 4, later decrement it
             dstAddrIncremented = true;
             immAddrOff = 0;
@@ -3327,7 +3382,7 @@ bool HWConformity::emulate64bMov(INST_LIST_ITER iter, G4_BB *bb) {
     // high
     bool dstAddrIncremented = false;
     unsigned int immAddrOff = 4;
-    if (dst->isIndirect() && (4 + dst->getAddrImm()) > 512) {
+    if (dst->isIndirect() && (4 + dst->getAddrImm()) > 511) {
       // increment dst address register by 4, later decrement it
       dstAddrIncremented = true;
       immAddrOff = 0;
@@ -5253,6 +5308,18 @@ void HWConformity::fixSendInst(G4_BB *bb) {
         }
       }
     }
+
+    // Avoid src0 and src1 overlap for split send.
+    // simd1 split send is allowed to have srcs overlap. When it's simd1,
+    // overlap for the rest of the payload shouldn't matter
+    if (inst->isSplitSend() && inst->getExecSize() != g4::SIMD1) {
+      bool src0Src1Overlap = inst->getSrc(0)->compareOperand(
+                                 inst->getSrc(1), builder) != Rel_disjoint;
+
+      // Fix overlap
+      if (src0Src1Overlap)
+        fixSrc(inst, true);
+    }
   }
 }
 
@@ -5301,44 +5368,6 @@ void HWConformity::fixsrc1src2Overlap(G4_BB *bb) {
   }
 }
 
-void HWConformity::fixOverlapInst(G4_BB *bb) {
-  for (INST_LIST_ITER i = bb->begin(), end = bb->end(); i != end; i++) {
-    G4_INST *inst = *i;
-
-    if (inst->mayExceedTwoGRF() || inst->opcode() == G4_madm) {
-      continue;
-    }
-
-    if (inst->getDst() != NULL) {
-      // create copy if dst and src0/src1 overlap due to being the same variable
-      G4_Operand *dst = inst->getDst();
-      if (dst != NULL && dst->isDstRegRegion() && dst->getTopDcl() &&
-          dst->getTopDcl()->getRegFile() == G4_GRF) {
-
-        bool srcOverlap = false;
-        for (int i = 0; i < inst->getNumSrc(); i++) {
-          G4_Operand *src = inst->getSrc(i);
-          if (src != NULL && !src->isNullReg() && src->getTopDcl() &&
-              src->getTopDcl()->getRegFile() == G4_GRF) {
-            srcOverlap |= inst->getDst()->compareOperand(
-                              inst->getSrc(i), builder) == Rel_interfere;
-            if (srcOverlap)
-              break;
-          }
-        }
-
-        if (srcOverlap) {
-          G4_AccRegSel accSel = inst->getDst()->getAccRegSel();
-          G4_DstRegRegion *newDst =
-              insertMovAfter(i, inst->getDst(), inst->getDst()->getType(), bb);
-          newDst->setAccRegSel(accSel);
-          inst->setDest(newDst);
-        }
-      }
-    }
-  }
-}
-
 //
 // Fix sel and csel instructions:
 //  -- set their cond mod to null as they don't modify it.  They will be
@@ -5351,6 +5380,23 @@ void HWConformity::fixSelCsel(INST_LIST_ITER it, G4_BB *bb) {
     if (condMod) {
       condMod->setBase(nullptr);
     }
+  }
+
+  // When opcode is "sel" and the destination is "word" datatype with execution
+  // datatype as "dword" (i.e. at least one of the source operand is a dword),
+  // compiler must not produce instructions with destination in the odd dword
+  // location in the GRF e.g. word locations 2, 3, 6, 7, 10, 11, 14, 15, .. etc.
+  // A move instruction with a temporary register may be used as shown below:
+  // (~f0.1.any) sel (8|M8) (sat)r12.2<2>:uw -r8.23<1;2,0>:w (abs)r6.8<0;1,0>:d
+  // =>
+  // (~f0.1.any) sel (8|M8) (sat)r10.0<2>:uw -r8.23<1;2,0>:w (abs)r6.8<0;1,0>:d
+  // (~f0.1.any) mov (8|M8) r12.2<2>:uw r10.0<2>:uw
+  if (builder.hasSelWDstDwExecTypeAlignIssue() && inst->opcode() == G4_sel) {
+    bool isWDstAndDwExecType =
+        IS_WTYPE(inst->getDst()->getType()) && IS_DTYPE(inst->getExecType());
+    // The WA requires dst to be 8 bytes aligned
+    if (isWDstAndDwExecType && !builder.tryToAlignOperand(inst->getDst(), 8))
+      replaceDst(it, inst->getDst()->getType(), builder.getGRFAlign());
   }
 }
 
@@ -5366,10 +5412,10 @@ void HWConformity::avoidDstSrcOverlap(PointsToAnalysis &p) {
   }
 }
 
-//
-//  Avoid the dst and src overlap when they are using the same variable by
-//  inserting a mov instruction add(8)  var1<2>, var2, var1<0, 1, 0>
-//
+// Second half of a source operand must not point to the same register as the
+// first half of destination operand in a compressed instruction.
+// Avoid the dst and src overlap when they are using the same variable by
+// inserting a mov instruction add(8)  var1<2>, var2, var1<0, 1, 0>
 void HWConformity::avoidInstDstSrcOverlap(INST_LIST_ITER it, G4_BB *bb,
                                           PointsToAnalysis &p) {
   G4_INST *inst = *it;
@@ -5387,17 +5433,14 @@ void HWConformity::avoidInstDstSrcOverlap(INST_LIST_ITER it, G4_BB *bb,
   G4_Declare *dstDcl = dst->getTopDcl();
   if (dstDcl) {
     G4_DstRegRegion *dstRgn = dst;
-    int dstOpndNumRows =
-        ((dstRgn->getLinearizedEnd() - dstRgn->getLinearizedStart()) /
-         kernel.numEltPerGRF<Type_UB>()) +
-        1;
-    int dstLeft = dstRgn->getLinearizedStart();
-    int dstRight = dstOpndNumRows > 1
-                       ? ((dstLeft / kernel.numEltPerGRF<Type_UB>() + 1) *
-                              kernel.numEltPerGRF<Type_UB>() -
-                          1)
-                       : dstRgn->getLinearizedEnd();
+    bool dstCrossGRF =
+        (dstRgn->getSubRegOff() * dstRgn->getTypeSize() +
+        (dstRgn->getLinearizedEnd() - dstRgn->getLinearizedStart()) + 1) >
+         kernel.numEltPerGRF<Type_UB>();
+    int dstFirstHalf =
+        dst->getLinearizedStart() / kernel.numEltPerGRF<Type_UB>();
 
+    bool srcOverlap = false;
     for (int i = 0, nSrcs = inst->getNumSrc(); i < nSrcs; i++) {
       G4_Operand *src = inst->getSrc(i);
 
@@ -5405,50 +5448,44 @@ void HWConformity::avoidInstDstSrcOverlap(INST_LIST_ITER it, G4_BB *bb,
         continue;
       }
       G4_Declare *srcDcl = src->getTopDcl();
-      G4_CmpRelation rel = dst->compareOperand(src, builder);
+
       if (src->isSrcRegRegion()) {
-        G4_SrcRegRegion *srcRg = src->asSrcRegRegion();
-        if (srcDcl == dstDcl && srcRg->getRegAccess() == Direct &&
-            srcRg->getBase()->isRegVar()) {
-          if (rel != Rel_disjoint && rel != Rel_undef) // Overlap
-          {
-            G4_SrcRegRegion *srcRgn = src->asSrcRegRegion();
-            int srcOpndNumRows =
-                ((srcRgn->getLinearizedEnd() - srcRgn->getLinearizedStart()) /
-                 kernel.numEltPerGRF<Type_UB>()) +
-                1;
-            int srcLeft = srcRgn->getLinearizedStart();
-            int srcRight = srcRgn->getLinearizedEnd();
+        G4_SrcRegRegion *srcRgn = src->asSrcRegRegion();
+        if (srcDcl == dstDcl && srcRgn->getRegAccess() == Direct &&
+            srcRgn->getBase()->isRegVar()) {
+          bool srcCrossGRF =
+              (srcRgn->getSubRegOff() * srcRgn->getTypeSize() +
+               (srcRgn->getLinearizedEnd() - srcRgn->getLinearizedStart()) +
+               1) > kernel.numEltPerGRF<Type_UB>();
+          int srcSecondHalf =
+              srcRgn->getLinearizedEnd() / kernel.numEltPerGRF<Type_UB>();
 
-            if (!srcRgn->isScalar() && srcOpndNumRows > 1) {
-              srcLeft = (srcRgn->getLinearizedStart() /
-                             kernel.numEltPerGRF<Type_UB>() +
-                         1) *
-                        kernel.numEltPerGRF<Type_UB>();
-            }
-
-            if (dstOpndNumRows > 1 || srcOpndNumRows > 1) {
-              if (!(srcLeft > dstRight || dstLeft > srcRight)) {
-                inst->setSrc(insertMovBefore(it, i, src->getType(), bb), i);
-              }
+          if (dstCrossGRF || srcCrossGRF) {
+            if (dstFirstHalf == srcSecondHalf) {
+              srcOverlap = true;
+              break;
             }
           }
-        } else if (srcRg->isIndirect()) {
+        } else if (srcRgn->isIndirect()) {
           G4_RegVar *ptvar = NULL;
           int vid = 0;
           while ((ptvar = p.getPointsTo(srcDcl->getRegVar(), vid++)) != NULL) {
             G4_Declare *dcl = ptvar->getDeclare();
             if (dstDcl == dcl) {
-              G4_AccRegSel accSel = inst->getDst()->getAccRegSel();
-              G4_DstRegRegion *newDst = insertMovAfter(
-                  it, inst->getDst(), inst->getDst()->getType(), bb);
-              newDst->setAccRegSel(accSel);
-              inst->setDest(newDst);
-              return;
+              srcOverlap = true;
+              break;
             }
           }
         }
       }
+    }
+
+    if (srcOverlap) {
+      G4_AccRegSel accSel = inst->getDst()->getAccRegSel();
+      G4_DstRegRegion *newDst =
+          insertMovAfter(it, inst->getDst(), inst->getDst()->getType(), bb);
+      newDst->setAccRegSel(accSel);
+      inst->setDest(newDst);
     }
   }
 }
@@ -5607,7 +5644,8 @@ void HWConformity::conformBB(G4_BB *bb) {
       continue;
     }
 
-    if (inst->isFCall() && builder.supportCallaRegSrc())
+    if (inst->isFCall() && builder.supportCallaRegSrc() &&
+        VISA_WA_CHECK(builder.getPWaTable(), Wa_1608127078))
       fixCalla(i, bb);
 
     if ((inst->mayExceedTwoGRF() && !inst->isSend()) || opcode == G4_nop ||
@@ -5702,12 +5740,14 @@ void HWConformity::conformBB(G4_BB *bb) {
     // HW check #6: indirect operand spilling
     fixIndirectOpnd(i, bb);
 
+    fixIndirectSrcForCompressedInst(i, bb);
+
 #ifdef _DEBUG
     verifyG4Kernel(kernel, Optimizer::PI_HWConformityChk, false);
 #endif
     // HW check #8: unsigned dst with execution type F
-    /* If the execution type is F and the destination type if either UD, UW
-     * or UB and the detination is not saturated, then we need to add an
+    /* If the execution type is F and the destination type is either UD, UW
+     * or UB and the destination is not saturated, then we need to add an
      * intermediate type conversion to D.
      */
     inst = *i;
@@ -6454,10 +6494,6 @@ void HWConformity::chkHWConformity() {
 #endif
 
     fixSendInst(bb);
-
-    if (builder.avoidDstSrcOverlap()) {
-      fixOverlapInst(bb);
-    }
 
     if (builder.avoidSrc1Src2Overlap()) {
       fixsrc1src2Overlap(bb);
@@ -7359,7 +7395,7 @@ bool HWConformity::fixPlaneInst(INST_LIST_ITER it, G4_BB *bb) {
 
       bb->insertBefore(it, newInst);
 
-      rd = builder.getRegionScalar();
+      rd = builder.createRegionDesc(0, 4, 1);
       G4_SrcRegRegion *newSrcRgn =
           builder.createSrc(tmpDcl->getRegVar(), 0, 0, rd, Type_F);
 
@@ -7478,11 +7514,7 @@ void HWConformity::fixImm64(INST_LIST_ITER i, G4_BB *bb) {
           defDcl, builder.createRegionDesc(vs, wd, hs));
       inst->setSrc(new_src, j);
     } else {
-      bool allow64bitimmOperand = false;
-      if ((inst->opcode() == G4_mov)
-      )
-        allow64bitimmOperand = true;
-      if (!allow64bitimmOperand) {
+      if (inst->opcode() != G4_mov) {
         inst->setSrc(insertMovBefore(i, j, src->getType(), bb), j);
       }
     }
@@ -9287,6 +9319,32 @@ bool HWConformity::fixSrnd(INST_LIST_ITER it, G4_BB *bb) {
     changed = true;
   }
 
+  // SRND src1 operand would need to be changed to
+  // 1. f(unsigned 16bits Integer) for FP32 to FP16 conversions
+  // 2. hf(unsigned 8bits Integer) for FP16 to BF8 conversions
+  //
+  //
+  //(W) srnd(16|M0) r5.0<1>:hf  r3.0<1;1,0>:f  r12.0<1;1,0>:uw
+  //-->
+  //(W) mov (16|M0) r13.0<2>:uw  r12.0<1;1,0>:uw
+  //(W) srnd(16|M0) r5.0<1>:hf  r3.0<1;1,0>:f  r13.0<1;1,0>:f
+  bool typeTransform = true;
+
+  if (typeTransform &&
+      (opnd1->getType() == Type_UB || opnd1->getType() == Type_UW)) {
+    G4_Type src0Type = opnd0->getType();
+    //We are using src0 to check because for immediate ub, vISA always set to uw.
+    G4_Type newType = opnd0->getType() == Type_HF ? Type_UW : Type_UD;
+    vISA_ASSERT(TypeSize(src0Type) == TypeSize(newType),
+                "src0 and src1 have same size operand type in old platforms");
+    G4_Operand *newSrc1 =
+        insertMovBefore(it, 1, newType, bb, builder.getGRFAlign());
+    newSrc1->asSrcRegRegion()->setType(builder, src0Type);
+    inst->setSrc(newSrc1, 1);
+    opnd1 = newSrc1;
+    changed = true;
+  }
+
 
   dst = inst->getDst();
   if (isHF2BF8 && inst->getExecSize() == g4::SIMD1) { // case 4
@@ -9388,8 +9446,8 @@ INST_LIST_ITER HWConformity::fixMadwInst(INST_LIST_ITER it, G4_BB *bb) {
   auto execSize = madwInst->getExecSize();
   vISA_ASSERT(madwInst->opcode() == G4_madw, "expect madw instruction");
 
-  vISA_ASSERT(builder.getPlatform() >= Xe_PVC || execSize != g4::SIMD32,
-               "SIMD32 is not supported on this platform for madw");
+  vISA_ASSERT(execSize != g4::SIMD32,
+              "SIMD32 is not supported on this platform for madw");
 
   auto dst = madwInst->getDst();
   vISA_ASSERT(IS_DTYPE(dst->getType()), "dst only supports DW type");
@@ -9436,9 +9494,16 @@ INST_LIST_ITER HWConformity::fixMadwInst(INST_LIST_ITER it, G4_BB *bb) {
     lowMovSrcDcl->setAliasDeclare(newDstDcl, 0);
     G4_SrcRegRegion *lowMovSrc =
         builder.createSrcRegRegion(lowMovSrcDcl, builder.getRegionStride1());
-    auto dstLow =
-        builder.createDst(dst->getBase(), dst->getRegOff(), dst->getSubRegOff(),
-                          dst->getHorzStride(), dst->getType());
+    G4_DstRegRegion *dstLow = nullptr;
+    if (dst->isIndirect()) {
+      dstLow = builder.createIndirectDst(dst->getBase(), dst->getSubRegOff(),
+                                         dst->getHorzStride(), dst->getType(),
+                                         dst->getAddrImm());
+    } else {
+      dstLow = builder.createDst(dst->getBase(), dst->getRegOff(),
+                                 dst->getSubRegOff(), dst->getHorzStride(),
+                                 dst->getType());
+    }
     G4_INST *lowMovInst = builder.createMov(execSize, dstLow, lowMovSrc,
                                             madwInst->getMaskOption(), false);
     lowMovInst->setPredicate(madwInst->getPredicate());
@@ -9454,9 +9519,16 @@ INST_LIST_ITER HWConformity::fixMadwInst(INST_LIST_ITER it, G4_BB *bb) {
                                  dstLowGRFNum * builder.getGRFSize());
     G4_SrcRegRegion *hiMovSrc =
         builder.createSrcRegRegion(hiMovSrcDcl, builder.getRegionStride1());
-    auto dstHi = builder.createDst(
-        dst->getBase(), dst->getRegOff() + dstLowGRFNum, dst->getSubRegOff(),
-        dst->getHorzStride(), dst->getType());
+    G4_DstRegRegion *dstHi = nullptr;
+    if (dst->isIndirect()) {
+      dstHi = builder.createIndirectDst(
+          dst->getBase(), dst->getSubRegOff(), dst->getHorzStride(),
+          dst->getType(), dst->getAddrImm() + builder.numEltPerGRF<Type_UB>());
+    } else {
+      dstHi = builder.createDst(dst->getBase(), dst->getRegOff() + dstLowGRFNum,
+                                dst->getSubRegOff(), dst->getHorzStride(),
+                                dst->getType());
+    }
     G4_INST *hiMovInst = builder.createMov(execSize, dstHi, hiMovSrc,
                                            madwInst->getMaskOption(), false);
     hiMovInst->setPredicate(madwInst->getPredicate());
@@ -9483,23 +9555,23 @@ INST_LIST_ITER HWConformity::fixMadwInst(INST_LIST_ITER it, G4_BB *bb) {
       if (src0->isSrcRegRegion() &&
           src0->asSrcRegRegion()->getRegAccess() == IndirGRF) {
         madwInst->setSrc(insertMovBefore(it, 0, src0->getType(), bb), 0);
+        src0 = madwInst->getSrc(0);
       }
     }
     retIter = std::next(it);
   } else {
+    // clang-format off
     // SOA layout of dst:(dst_hi32:d, dst_lo32:d)
-    // if src2 is not immediate value of zero, then expand MADW((dst_hi32,
-    // dst_lo32) = src0 * src1 + src2) to:
+    // if src2 is not zero, then expand MADW(dst_hi32, dst_lo32) = src0 * src1 + src2 to:
     //     mul  (16) acc0.0<1>:d    src0<1;1,0>:d    src1<2;1,0>:uw
     //     mach (16) dst_hi32<1>:d  src0<1;1,0>:d    src1<1;1,0>:d
-    //     addc (16) dst_lo32<1>:d  acc0.0<1;1,0>:d  src2<1;1,0>:d     // Low 32
-    //     bits add  (16) dst_hi32<1>:d  acc0.0<1;1,0>:d  dst_hi32<1;1,0>:d //
-    //     High 32 bits
+    //     addc (16) dst_lo32<1>:d  acc0.0<1;1,0>:d  src2<1;1,0>:d     // Low 32 bits
+    //     add  (16) dst_hi32<1>:d  acc0.0<1;1,0>:d  dst_hi32<1;1,0>:d // High 32 bits
     // otherwise, expand to:
     //     mul  (16) acc0.0<1>:d    src0<1;1,0>:d    src1<2;1,0>:uw
-    //     mach (16) dst_hi32<1>:d  src0<1;1,0>:d    src1<1;1,0>:d // High 32
-    //     bits mov  (16) dst_lo32<1>:d  acc0.0<1;1,0>:d                // Low
-    //     32 bits
+    //     mach (16) dst_hi32<1>:d  src0<1;1,0>:d    src1<1;1,0>:d // High 32 bits
+    //     mov  (16) dst_lo32<1>:d  acc0.0<1;1,0>:d                // Low 32 bits
+    // clang-format on
 
     // unset AccWrCtrl
     madwInst->setOptionOff(InstOpt_AccWrCtrl);
@@ -9566,6 +9638,8 @@ INST_LIST_ITER HWConformity::fixMadwInst(INST_LIST_ITER it, G4_BB *bb) {
           G4_addc, execSize, dstLo32, accSrcOpnd,
           builder.duplicateOperand(src2), origOptions, false);
       addcInst->setPredicate(origPredicate);
+      addcInst->setImplAccDst(builder.duplicateOperand(accDstOpnd));
+      addcInst->setOptionOn(InstOpt_AccWrCtrl);
       endIter = bb->insertAfter(endIter, addcInst);
 
       // 4, create a add inst

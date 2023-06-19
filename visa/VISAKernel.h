@@ -37,47 +37,6 @@ class BinaryEncodingBase;
 
 class VISAKernel_format_provider;
 
-struct KERNEL_PERF_STATS {
- // The number of bank conflict.
-  unsigned BCNum = 0;
-
- // counting the number of read-modify-write
-  unsigned numRMWs = 0;
-
-  // For the static profiling of acc regsiter substituion ratio
-  // ALU instruction number
-  unsigned numALUInst = 0;
-  // ALU instruction destination operand number, which is not used in non-ALU
-  // instruction
-  unsigned numALUOnlyDst = 0;
-  // ALU instruction source operand number, which is not defined in non-ALU
-  // instruction
-  unsigned numALUOnlySrc = 0;
-
-  // The number of the operand which uses acc register
-  // Def:dst operand, Use:src operand
-  unsigned accSubDef = 0;
-  unsigned accSubUse = 0;
-
-  // Candidates, which may be substituted with acc, or not because of spill
-  unsigned accSubCandidateDef = 0;
-  unsigned accSubCandidateUse = 0;
-
-  // The number of sync instructions.
-  unsigned syncInstCount = 0;
-  // The token reuse times
-  unsigned tokenReuseCount = 0;
-  // The number of @1 distance in single ALU pipeline, it can be L@1,
-  // I@1, F@1 or @1 of TGL.
-  unsigned singlePipeAtOneDistNum = 0;
-  // A@1 number
-  unsigned allAtOneDistNum = 0;
-  // The number of $x.dst, after write token dependence
-  unsigned AfterWriteTokenDepCount = 0;
-  // The number of $x.src, after read token dependence
-  unsigned AfterReadTokenDepCount = 0;
-};
-
 struct print_decl_index_t {
   unsigned var_index = 0;
   unsigned addr_index = 0;
@@ -88,10 +47,11 @@ struct print_decl_index_t {
 };
 
 // Class hierarchy is as follows:
-// VISAKernel -> Abstract class that declares virtual functions to build a
-// kernel object VISAFunction : VISAKernel -> Abstract class that declares
-// function specific APIs VISAKernelImpl : VISAFunction -> Implementation for
-// all APIs in VISAKernel and VISAFunction
+// clang-format off
+// VISAKernel -> Abstract class that declares virtual functions to build a kernel object.
+// VISAFunction : VISAKernel -> Abstract class that declares function specific APIs.
+// VISAKernelImpl : VISAFunction -> Implementation for all APIs in VISAKernel and VISAFunction.
+// clang-format on
 class VISAKernelImpl : public VISAFunction {
   friend class VISAKernel_format_provider;
 
@@ -917,8 +877,7 @@ public:
       VISA_EMask_Ctrl emask, LSC_CACHE_OPTS cacheOpts,
       LSC_DATA_SHAPE_BLOCK2D dataShape, VISA_RawOpnd *dstData,
       VISA_VectorOpnd *src0Addrs[LSC_BLOCK2D_ADDR_PARAMS],
-      VISA_RawOpnd *src1Data) override;
-
+      int xImmOffset, int yImmOffset, VISA_RawOpnd *src1Data) override;
   VISA_BUILDER_API int AppendVISALscTypedLoad(
       LSC_OP op, VISA_PredOpnd *pred, VISA_Exec_Size execSize,
       VISA_EMask_Ctrl emask, LSC_CACHE_OPTS cacheOpts, LSC_ADDR_TYPE addrModel,
@@ -1183,11 +1142,6 @@ public:
             mBuildOption == VISA_BUILDER_BOTH);
   }
 
-  // This member holds symbolic index of function when invoked via
-  // API path. Builder client can use this id when invoking this
-  // stack call function. For a kernel instance, this is not useful.
-  const unsigned int m_functionId;
-
   unsigned getvIsaInstCount() const override { return m_vISAInstCount; };
 
   bool isFCCallableKernel() const { return mIsFCCallableKernel; }
@@ -1266,8 +1220,8 @@ public:
     return m_CISABuilder->getBuilderMode() == vISA_ASM_WRITER;
   }
 
-  typedef std::list<VISAKernelImpl *> VISAKernelImplListTy;
-  void computeAndEmitDebugInfo(VISAKernelImplListTy &functions);
+  typedef CISA_IR_Builder::KernelListTy KernelListTy;
+  void computeAndEmitDebugInfo(KernelListTy &functions);
 
 private:
   int InitializeKernel(const char *kernel_name);
@@ -1311,6 +1265,12 @@ private:
       GenPrecision src1Precision, uint8_t Depth, uint8_t Count);
 
   void createBindlessSampler();
+
+private:
+  // This member holds symbolic index of function when invoked via
+  // API path. Builder client can use this id when invoking this
+  // stack call function. For a kernel instance, this is not useful.
+  const unsigned int m_functionId;
 
   kernel_format_t m_cisa_kernel;
 
@@ -1517,7 +1477,7 @@ public:
   }
   uint32_t getInputCount() const { return m_kernel->m_input_count; }
 
-  std::string printKernelHeader(const common_isa_header &isaHeader);
+  std::string printKernelHeader(bool printVersion);
 };
 
 #endif // VISA_KERNEL_H

@@ -255,6 +255,7 @@ private:
   bool lowerMul64(Instruction *Inst);
   bool lowerLzd(Instruction *Inst);
   bool lowerTrap(CallInst *CI);
+  bool lowerDebugTrap(CallInst *CI);
   bool lowerFMulAdd(CallInst *CI);
   bool lowerBitreverse(CallInst *CI);
   bool lowerFunnelShift(CallInst *CI, unsigned IntrinsicID);
@@ -263,7 +264,8 @@ private:
   bool lowerSlmInit(CallInst *CI);
   bool lowerStackSave(CallInst *CI);
   bool lowerStackRestore(CallInst *CI);
-  bool lowerThreadID(CallInst *CI);
+  bool lowerHardwareThreadID(CallInst *CI);
+  bool lowerLogicalThreadID(CallInst *CI);
 
   Value *swapLowHighHalves(IRBuilder<> &Builder, Value *Arg) const;
   bool lowerByteSwap(CallInst *CI);
@@ -3336,6 +3338,8 @@ bool GenXLowering::processInst(Instruction *Inst) {
       return lowerLzd(Inst);
     case GenXIntrinsic::genx_slm_init:
       return lowerSlmInit(CI);
+    case Intrinsic::debugtrap:
+      return lowerDebugTrap(CI);
     case Intrinsic::trap:
       return lowerTrap(CI);
     case Intrinsic::ctpop:
@@ -3412,7 +3416,9 @@ bool GenXLowering::processInst(Instruction *Inst) {
     case Intrinsic::stackrestore:
       return lowerStackRestore(CI);
     case GenXIntrinsic::genx_get_hwid:
-      return lowerThreadID(CI);
+      return lowerHardwareThreadID(CI);
+    case vc::InternalIntrinsic::logical_thread_id:
+      return lowerLogicalThreadID(CI);
     }
     return false;
   }
@@ -4692,29 +4698,71 @@ bool GenXLowering::lowerUSubWithSat(CallInst *CI) {
   return true;
 }
 
+bool GenXLowering::lowerDebugTrap(CallInst *CI) {
+  Module *M = CI->getModule();
+  IRBuilder<> Builder(CI);
+
+  auto *Cr0Ty = IGCLLVM::FixedVectorType::get(Builder.getInt32Ty(), 4);
+
+  auto *ReadPredefRegFn = vc::getAnyDeclaration(
+      M, GenXIntrinsic::genx_read_predef_reg, {Cr0Ty, Cr0Ty});
+  auto *WritePredefRegFn = vc::getAnyDeclaration(
+      M, GenXIntrinsic::genx_write_predef_reg, {Cr0Ty, Cr0Ty});
+
+  auto *Cr0Id = Builder.getInt32(PreDefined_Vars::PREDEFINED_CR0);
+  auto *Cr0V =
+      Builder.CreateCall(ReadPredefRegFn, {Cr0Id, UndefValue::get(Cr0Ty)});
+
+  // CR0.1 region
+  Region R{Cr0V};
+  R.NumElements = 1;
+  R.VStride = 0;
+  R.Width = 1;
+  R.Stride = 0;
+  R.Offset = DWordBytes;
+  IGC_ASSERT(R.isScalar());
+
+  constexpr unsigned SWExceptionControl = 29;
+  constexpr unsigned CR0Mask = 1 << SWExceptionControl;
+
+  auto &DL = CI->getDebugLoc();
+  auto *SrcV = R.createRdRegion(Cr0V, "cr0.1", CI, DL);
+  auto *DstV = Builder.CreateOr(SrcV, CR0Mask);
+  auto *ResV = R.createWrRegion(Cr0V, DstV, "cr0.new", CI, DL);
+
+  Builder.CreateCall(WritePredefRegFn, {Cr0Id, ResV});
+
+  ToErase.push_back(CI);
+  return true;
+}
+
 bool GenXLowering::lowerTrap(CallInst *CI) {
   Module *M = CI->getModule();
   IRBuilder<> Builder(CI);
-  auto &Ctx = CI->getContext();
-  unsigned EMWidth = 32;
-  Type *ArgTypes[] = {
-      IGCLLVM::FixedVectorType::get(Type::getInt1Ty(Ctx), EMWidth),
-      IGCLLVM::FixedVectorType::get(Type::getInt16Ty(Ctx), EMWidth)};
-  auto Fn = GenXIntrinsic::getGenXDeclaration(M,
-    GenXIntrinsic::genx_raw_send_noresult, ArgTypes);
-  SmallVector<Value *, 8> Args;
-  // send
-  Args.push_back(ConstantInt::get(Type::getInt32Ty(Ctx), 0));
-  // predicate all lanes
-  Args.push_back(ConstantVector::getSplat(IGCLLVM::getElementCount(EMWidth),
-                                          ConstantInt::getTrue(Ctx)));
-  // EOT
-  Args.push_back(ConstantInt::get(Type::getInt32Ty(Ctx), 0x27));
-  Args.push_back(ConstantInt::get(Type::getInt32Ty(Ctx), 0x02000010));
-  Args.push_back(
-      ConstantVector::getSplat(IGCLLVM::getElementCount(EMWidth),
-                               Constant::getNullValue(Type::getInt16Ty(Ctx))));
-  Builder.CreateCall(Fn, Args);
+
+  constexpr unsigned Width = 8;
+  auto *PayloadTy = IGCLLVM::FixedVectorType::get(Builder.getInt32Ty(), Width);
+  auto *PayloadFunc =
+      vc::getAnyDeclaration(M, GenXIntrinsic::genx_r0, {PayloadTy});
+  auto *Payload = Builder.CreateCall(PayloadFunc, {});
+
+  SmallVector<Value *, 8> Args{
+      Builder.getInt8(2),                        // modifier (EOT)
+      Builder.getInt8(0),                        // log2(exec size)
+      Builder.getTrue(),                         // predicate
+      Builder.getInt8(1),                        // number of source registers
+      Builder.getInt8(ST->hasLSCMessages() ? 3   // Gateway
+                                           : 7), // Thread Spawner
+      Builder.getInt32(0),                       // extened message descriptor
+      Builder.getInt32(0x02000010),              // message descriptor
+      Payload,
+  };
+
+  auto *SendFunc =
+      vc::getAnyDeclaration(M, GenXIntrinsic::genx_raw_send2_noresult,
+                            {Builder.getInt1Ty(), PayloadTy});
+
+  Builder.CreateCall(SendFunc, Args);
   ToErase.push_back(CI);
 
   return true;
@@ -4923,11 +4971,19 @@ bool GenXLowering::lowerGenXMul(CallInst *CI, unsigned IID) {
 
   if (ScalarType(LH)->isIntegerTy(8) || ScalarType(LH)->isIntegerTy(16)) {
     // The result can't exceed 32 bit. Get rid of 64-bit multiplication
-    Value *Mul = B.CreateMul(LH, RH, CI->getName());
+    bool IsSigned = IID == GenXIntrinsic::genx_ssmul;
+    auto *SrcTy = LH->getType();
+    Type *MulTy = B.getIntNTy(ScalarType(LH)->isIntegerTy(8) ? 16 : 32);
+    if (auto *SrcVTy = dyn_cast<IGCLLVM::FixedVectorType>(SrcTy))
+      MulTy = IGCLLVM::FixedVectorType::get(MulTy, SrcVTy->getNumElements());
+
+    auto *MulFunc =
+        GenXIntrinsic::getAnyDeclaration(CI->getModule(), IID, {MulTy, SrcTy});
+    auto *Mul = B.CreateCall(MulFunc, {LH, RH}, CI->getName());
+
     Value *Ext =
-        (IID == GenXIntrinsic::genx_uumul)
-            ? B.CreateZExt(Mul, CI->getType(), CI->getName() + ".zext")
-            : B.CreateSExt(Mul, CI->getType(), CI->getName() + ".sext");
+        IsSigned ? B.CreateSExt(Mul, CI->getType(), CI->getName() + ".sext")
+                 : B.CreateZExt(Mul, CI->getType(), CI->getName() + ".zext");
     CI->replaceAllUsesWith(Ext);
     ToErase.push_back(CI);
     return true;
@@ -5718,15 +5774,14 @@ bool GenXLowering::lowerStackRestore(CallInst *CI) {
   return true;
 }
 
-bool GenXLowering::lowerThreadID(CallInst *CI) {
+bool GenXLowering::lowerHardwareThreadID(CallInst *CI) {
   IRBuilder<> IRB{CI};
 
   auto *Ty = CI->getType();
   auto *ReadPredefFunc = GenXIntrinsic::getGenXDeclaration(
       CI->getModule(), GenXIntrinsic::genx_read_predef_reg, {Ty, Ty});
 
-  auto RegID = ST->getsHWTIDFromPredef() ? PreDefined_Vars::PREDEFINED_HW_TID
-                                         : PreDefined_Vars::PREDEFINED_SR0;
+  auto RegID = ST->getsHWTIDFromPredef() ? PREDEFINED_HW_TID : PREDEFINED_SR0;
   Value *Res = IRB.CreateCall(ReadPredefFunc,
                               {IRB.getInt32(RegID), UndefValue::get(Ty)});
 
@@ -5744,6 +5799,72 @@ bool GenXLowering::lowerThreadID(CallInst *CI) {
 
     auto *MaskC = ConstantInt::get(Ty, ST->getMaxThreadsNumPerSubDevice() - 1);
     Res = IRB.CreateAnd(Res, MaskC);
+  }
+
+  CI->replaceAllUsesWith(Res);
+  ToErase.push_back(CI);
+  return true;
+}
+
+static Value *extractBitfields(IRBuilder<> &IRB, Value *To, Value *From,
+                               ArrayRef<std::pair<int, int>> Fields,
+                               int &InsertTo) {
+  auto *Ty = From->getType();
+  for (auto [Offset, Width] : Fields) {
+    auto Mask = ((1 << Width) - 1) << Offset;
+    auto Shift = Offset - InsertTo;
+
+    auto *ExtractV = IRB.CreateAnd(From, ConstantInt::get(Ty, Mask));
+    Value *ShiftV;
+    if (Shift == 0)
+      ShiftV = ExtractV;
+    else if (Shift > 0)
+      ShiftV = IRB.CreateLShr(ExtractV, ConstantInt::get(Ty, Shift));
+    else
+      ShiftV = IRB.CreateShl(ExtractV, ConstantInt::get(Ty, -Shift));
+
+    To = To ? IRB.CreateOr(To, ShiftV) : ShiftV;
+    InsertTo += Width;
+  }
+  return To;
+}
+
+bool GenXLowering::lowerLogicalThreadID(CallInst *CI) {
+  unsigned NumThreads = ST->getNumThreadsPerEU();
+  if (ST->getsHWTIDFromPredef() ||
+      (isPowerOf2_32(NumThreads) && !ST->hasPreemption()))
+    return lowerHardwareThreadID(CI);
+
+  IRBuilder<> IRB{CI};
+
+  auto *Ty = CI->getType();
+  auto *ReadPredefFunc = GenXIntrinsic::getGenXDeclaration(
+      CI->getModule(), GenXIntrinsic::genx_read_predef_reg, {Ty, Ty});
+
+  int InsertTo = 0;
+  auto *SR0 = IRB.CreateCall(
+      ReadPredefFunc, {IRB.getInt32(PREDEFINED_SR0), UndefValue::get(Ty)});
+  Value *Res = nullptr;
+  auto *TID = extractBitfields(IRB, Res, SR0, ST->getThreadIdBits(), InsertTo);
+
+  if (isPowerOf2_32(NumThreads))
+    Res = TID;
+  else
+    InsertTo = 0;
+
+  Res = extractBitfields(IRB, Res, SR0, ST->getEUIdBits(), InsertTo);
+
+  auto *SubsliceReg =
+      ST->hasPreemption()
+          ? IRB.CreateCall(ReadPredefFunc,
+                           {IRB.getInt32(PREDEFINED_MSG0), UndefValue::get(Ty)})
+          : SR0;
+  Res = extractBitfields(IRB, Res, SubsliceReg, ST->getSubsliceIdBits(),
+                         InsertTo);
+
+  if (!isPowerOf2_32(NumThreads)) {
+    auto *Mul = IRB.CreateMul(Res, ConstantInt::get(Ty, NumThreads));
+    Res = IRB.CreateAdd(Mul, TID);
   }
 
   CI->replaceAllUsesWith(Res);

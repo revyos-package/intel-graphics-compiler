@@ -219,10 +219,11 @@ DLL_EXPORT void getJITVersion(unsigned int &majorV, unsigned int &minorV) {
 #ifndef DLL_MODE
 
 int main(int argc, const char *argv[]) {
-  std::cout << argv[0];
+  // Dump to cerr to avoid polluting cout as cout might be used for lit test.
+  std::cerr << argv[0];
   for (int i = 1; i < argc; i++)
-    std::cout << " " << argv[i];
-  std::cout << "\n";
+    std::cerr << " " << argv[i];
+  std::cerr << "\n";
 
 #if 0
     _CrtSetDbgFlag(_CRTDBG_ALLOC_MEM_DF | _CRTDBG_LEAK_CHECK_DF);
@@ -370,12 +371,15 @@ int parseText(llvm::StringRef fileName, int argc, const char *argv[],
 
   // If the input text lacks "OutputAsmPath" (and it should), then we can
   // override it with the implied name here.
-  auto k = cisa_builder->get_kernel();
-  if (k->getOutputAsmPath().empty()) {
-    const char *outputPrefix = opt.getOptionCstr(VISA_AsmFileName);
-    k->setOutputAsmPath(outputPrefix);
-    cisa_builder->getOptions()->setOptionInternally(VISA_AsmFileName,
-                                                    outputPrefix);
+  for (auto it = cisa_builder->kernel_begin(), ie = cisa_builder->kernel_end();
+       it != ie; ++it) {
+    auto k = *it;
+    if (k->getIsKernel() && k->getOutputAsmPath().empty()) {
+      const char *outputPrefix = opt.getOptionCstr(VISA_AsmFileName);
+      k->setOutputAsmPath(outputPrefix);
+      cisa_builder->getOptions()->setOptionInternally(VISA_AsmFileName,
+                                                      outputPrefix);
+    }
   }
 
   std::string binFileName;

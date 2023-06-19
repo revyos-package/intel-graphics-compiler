@@ -695,20 +695,17 @@ bool AccSubPass::isAccCandidate(G4_INST *inst, int &lastUse, bool &mustBeAcc0,
 bool AccSubPass::replaceDstWithAcc(G4_INST *inst, int accNum) {
   G4_DstRegRegion *dst = inst->getDst();
   bool useAcc1 = (accNum & 0x1) != 0;
+  auto myAcc = useAcc1 ? AREG_ACC1 : AREG_ACC0;
   accNum &= ~0x1;
 
   if (!builder.relaxedACCRestrictions()) {
-    auto myAcc = useAcc1 ? AREG_ACC1 : AREG_ACC0;
     // check that dst and src do not have different accumulator
     for (int i = 0, numSrc = inst->getNumSrc(); i < numSrc; ++i) {
-      if (inst->getSrc(i)->isAccReg()) {
-        auto base = inst->getSrc(i)->asSrcRegRegion()->getBase();
-        if (base->isPhyAreg()) {
-          if (base->asAreg()->getArchRegType() != myAcc) {
-            return false;
-          }
-        }
-      }
+      if (!inst->getSrc(i)->isAccReg())
+        continue;
+      auto base = inst->getSrc(i)->asSrcRegRegion()->getBase();
+      if (base->isPhyAreg() && base->asAreg()->getArchRegType() != myAcc)
+        return false;
     }
   }
 
@@ -759,6 +756,12 @@ bool AccSubPass::replaceDstWithAcc(G4_INST *inst, int accNum) {
         // don't allow src0 acc for mad), and the mad's src1 is also an acc
         // candidate.
         return false;
+      }
+      if (useInst->isAccDstInst()) {
+        // Also check that dst and src in use cannot have different acc.
+        auto base = useInst->getDst()->asDstRegRegion()->getBase();
+        if (base->isPhyAreg() && base->asAreg()->getArchRegType() != myAcc)
+          return false;
       }
     }
   }
@@ -1013,63 +1016,6 @@ struct AccAssignment {
 };
 
 
-void AccSubPass::CheckALUOnlyDstSrc(G4_INST *inst) {
-  if (inst->isSend() || inst->isLabel() || inst->isCFInst() || inst->isDpas() ||
-      inst->isIntrinsic()) {
-    return;
-  }
-
-  FINALIZER_INFO *jitInfo = builder.getJitInfo();
-  G4_DstRegRegion *dst = inst->getDst();
-
-  if (dst && dst->getTopDcl() != nullptr &&
-      dst->getTopDcl()->getRegFile() == G4_GRF) {
-    bool usedInSend = false;
-    for (auto I = inst->use_begin(), E = inst->use_end(); I != E; ++I) {
-      auto &&use = *I;
-      G4_INST *useInst = use.first;
-      if (useInst->isSend()) {
-        usedInSend = true;
-      }
-    }
-
-    if (!usedInSend) {
-      jitInfo->statsVerbose.numALUOnlyDst++;
-    }
-  }
-
-  for (int i = 0, numSrc = inst->getNumSrc(); i < numSrc; ++i) {
-    G4_Operand *srcOpnd = inst->getSrc(i);
-    Gen4_Operand_Number opndNum = (Gen4_Operand_Number)(i + 1);
-    if (!srcOpnd) {
-      continue;
-    }
-    if (!srcOpnd->isSrcRegRegion() || srcOpnd->isImm() ||
-        srcOpnd->isAddrExp() ||
-        srcOpnd->asSrcRegRegion()->getRegAccess() != Direct) {
-      continue;
-    }
-    if (!srcOpnd->asSrcRegRegion()->getBase() ||
-        !srcOpnd->asSrcRegRegion()->getBase()->isRegVar()) {
-      continue;
-    }
-    if (srcOpnd->getBase()->asRegVar()->getDeclare()->getRegFile() != G4_GRF) {
-      continue;
-    }
-    bool defineInSend = false;
-    for (auto DI = inst->def_begin(), DE = inst->def_end(); DI != DE; ++DI) {
-      auto &&def = *DI;
-      if (def.second == opndNum && def.first->isSend()) {
-        defineInSend = true;
-      }
-    }
-
-    if (!defineInSend) {
-      jitInfo->statsVerbose.numALUOnlySrc++;
-    }
-  }
-}
-
 void AccSubPass::doAccSub(G4_BB *bb) {
   bb->resetLocalIds();
   int numGeneralAcc = kernel.getNumAcc();
@@ -1082,7 +1028,6 @@ void AccSubPass::doAccSub(G4_BB *bb) {
   for (auto instIter = bb->begin(), instEnd = bb->end(); instIter != instEnd;
        ++instIter) {
     G4_INST *inst = *instIter;
-    CheckALUOnlyDstSrc(inst);
 
     if (inst->defAcc()) {
       // we should only have single def/use acc at this point, so any use would
@@ -1281,7 +1226,6 @@ void AccSubPass::multiAccSub(G4_BB *bb) {
   for (auto instIter = bb->begin(), instEnd = bb->end(); instIter != instEnd;
        ++instIter) {
     G4_INST *inst = *instIter;
-    CheckALUOnlyDstSrc(inst);
 
     if (inst->defAcc()) {
       // we should only have single def/use acc at this point, so any use would

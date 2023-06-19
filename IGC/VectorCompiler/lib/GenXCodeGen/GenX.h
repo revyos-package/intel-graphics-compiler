@@ -84,6 +84,7 @@ FunctionPass *createGenXRegionCollapsingPass();
 FunctionPass *createGenXExtractVectorizerPass();
 FunctionPass *createGenXRawSendRipperPass();
 FunctionPass *createGenXFuncBalingPass(BalingKind Kind, GenXSubtarget *ST);
+FunctionPass *createGenXFuncLiveElementsPass();
 FunctionPass *createGenXPrologEpilogInsertionPass();
 FunctionPass *createGenXLegalizationPass();
 ModulePass *createGenXEmulatePass();
@@ -92,7 +93,7 @@ ModulePass *createGenXEmulationModulePreparePass();
 FunctionPass *createGenXDeadVectorRemovalPass();
 FunctionPass *createGenXPatternMatchPass(PatternMatchKind Kind);
 FunctionPass *createGenXPostLegalizationPass();
-FunctionPass *createTransformPrivMemPass();
+FunctionPass *createGenXPromoteArrayPass();
 ModulePass *createGenXThreadPrivateMemoryPass();
 FunctionPass *createGenXPromotePredicatePass();
 FunctionPass *createGenXIMadPostLegalizationPass();
@@ -104,6 +105,7 @@ FunctionPass *createGenXLoadStoreLoweringPass();
 ModulePass *createGenXCategoryWrapperPass();
 ModulePass *createGenXGroupBalingWrapperPass(BalingKind Kind,
                                              GenXSubtarget *ST);
+ModulePass *createGenXGroupLiveElementsWrapperPass();
 ModulePass *createGenXUnbalingWrapperPass();
 ModulePass *createGenXDepressurizerWrapperPass();
 ModulePass *createGenXLateLegalizationWrapperPass();
@@ -111,12 +113,13 @@ ModulePass *createGenXNumberingWrapperPass();
 ModulePass *createGenXLiveRangesWrapperPass();
 ModulePass *createGenXRematerializationWrapperPass();
 ModulePass *createGenXCoalescingWrapperPass();
+ModulePass *createGenXGVClobberCheckerWrapperPass();
 ModulePass *createGenXAddressCommoningWrapperPass();
 ModulePass *createGenXArgIndirectionWrapperPass();
 FunctionPass *createGenXTidyControlFlowPass();
 ModulePass *createGenXVisaRegAllocWrapperPass();
 ModulePass *createGenXCisaBuilderWrapperPass();
-ModulePass *createGenXFinalizerPass(raw_pwrite_stream &o);
+ModulePass *createGenXFinalizerPass();
 ModulePass *createGenXDebugInfoPass();
 ModulePass *createGenXGlobalValueLoweringPass();
 ModulePass *createGenXPromoteStatefulToBindlessPass();
@@ -128,6 +131,7 @@ FunctionPass *createGenXFixInvalidFuncNamePass();
 ModulePass *createGenXGASCastWrapperPass();
 FunctionPass *createGenXGASDynamicResolutionPass();
 ModulePass *createGenXInitBiFConstantsPass();
+FunctionPass *createGenXGlobalUniformAnalysisPass();
 
 namespace genx {
 

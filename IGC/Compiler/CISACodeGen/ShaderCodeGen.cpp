@@ -60,6 +60,7 @@ SPDX-License-Identifier: MIT
 #include "Compiler/CISACodeGen/PromoteInt8Type.hpp"
 #include "Compiler/CISACodeGen/PrepareLoadsStoresPass.h"
 #include "Compiler/CISACodeGen/EvaluateFreeze.hpp"
+#include "Compiler/CISACodeGen/DpasScan.hpp"
 
 #include "Compiler/CISACodeGen/SLMConstProp.hpp"
 #include "Compiler/Optimizer/OpenCLPasses/DebuggerSupport/ImplicitGIDPass.hpp"
@@ -162,6 +163,7 @@ SPDX-License-Identifier: MIT
 #include "AdaptorCommon/RayTracing/RayTracingAddressSpaceAliasAnalysis.h"
 #include "Compiler/SamplerPerfOptPass.hpp"
 #include "Compiler/CISACodeGen/HalfPromotion.h"
+#include "Compiler/CISACodeGen/CapLoopIterationsPass.h"
 #include "Compiler/CISACodeGen/AnnotateUniformAllocas.h"
 #include "Probe/Assertion.h"
 #include "Compiler/CISACodeGen/PartialEmuI64OpsPass.h"
@@ -300,7 +302,9 @@ void AddAnalysisPasses(CodeGenContext& ctx, IGCPassManager& mpm)
         mpm.add(new CastToGASInfoWrapper());
     }
 
-    // Evaluates LLVM 10+ freeze instructions so EmitPass does not need to handle them
+    // Evaluates LLVM 10+ freeze instructions so EmitPass does not need to handle them.
+    // The pass first occurs during optimization, however new freeze instructions could
+    // have been inserted since.
     mpm.add(createEvaluateFreezePass());
 
     // clean up constexpressions after EarlyCSE
@@ -314,11 +318,13 @@ void AddAnalysisPasses(CodeGenContext& ctx, IGCPassManager& mpm)
     mpm.add(createFixInvalidFuncNamePass());
 
     // collect stats after all the optimization. This info can be dumped to the cos file
-    mpm.add(new CheckInstrTypes(&(ctx.m_instrTypesAfterOpts), nullptr));
+    mpm.add(new CheckInstrTypes(true, false));
 
     //
     // Generally, passes that change IR should be prior to this place!
     //
+
+    mpm.add(new DpasScan());
 
     // let CleanPHINode be right before Layout
     mpm.add(createCleanPHINodePass());
@@ -339,7 +345,9 @@ static void UpdateInstTypeHint(CodeGenContext& ctx)
     unsigned int numInsts = ctx.m_instrTypes.numInsts;
     bool hasUnmaskedRegion = ctx.m_instrTypes.hasUnmaskedRegion;
     IGCPassManager mpm(&ctx, "UpdateOptPre");
-    mpm.add(new CheckInstrTypes(&(ctx.m_instrTypes), nullptr));
+    mpm.add(new CodeGenContextWrapper(&ctx));
+    mpm.add(new BreakConstantExpr());
+    mpm.add(new CheckInstrTypes(false, false));
     mpm.run(*ctx.getModule());
     ctx.m_instrTypes.numBB = numBB;
     ctx.m_instrTypes.numSample = numSample;
@@ -427,7 +435,6 @@ void AddLegalizationPasses(CodeGenContext& ctx, IGCPassManager& mpm, PSSignature
     if (ctx.m_threadCombiningOptDone)
     {
         mpm.add(createLoopCanonicalization());
-        mpm.add(createDisableLICMForSpecificLoops());
         mpm.add(llvm::createLoopDeletionPass());
         mpm.add(llvm::createBreakCriticalEdgesPass());
         mpm.add(llvm::createLoopRotatePass(LOOP_ROTATION_HEADER_INST_THRESHOLD));
@@ -444,6 +451,7 @@ void AddLegalizationPasses(CodeGenContext& ctx, IGCPassManager& mpm, PSSignature
 
         if (IGC_IS_FLAG_ENABLED(allowLICM) && ctx.m_retryManager.AllowLICM())
         {
+            mpm.add(createDisableLICMForSpecificLoops());
             mpm.add(llvm::createLICMPass());
         }
         mpm.add(llvm::createLoopSimplifyPass());
@@ -465,6 +473,7 @@ void AddLegalizationPasses(CodeGenContext& ctx, IGCPassManager& mpm, PSSignature
     uint32_t theEmuKind = (ctx.m_hasDPEmu ? EmuKind::EMU_DP : 0);
     theEmuKind |= (hasDPDivSqrtEmu ? EmuKind::EMU_DP_DIV_SQRT : 0);
     theEmuKind |= (ctx.m_DriverInfo.NeedI64BitDivRem() ? EmuKind::EMU_I64DIVREM : 0);
+    theEmuKind |= (ctx.m_DriverInfo.NeedFP64toFP16Conv() ? EmuKind::EMU_FP64_FP16_CONV : 0);
     theEmuKind |=
         ((IGC_IS_FLAG_ENABLED(ForceSPDivEmulation) ||
             (ctx.m_DriverInfo.NeedIEEESPDiv() && !ctx.platform.hasCorrectlyRoundedMacros()))
@@ -633,6 +642,7 @@ void AddLegalizationPasses(CodeGenContext& ctx, IGCPassManager& mpm, PSSignature
     }
     // Should help MemOpt pass to merge more loads
     mpm.add(createSinkCommonOffsetFromGEPPass());
+
     // Run MemOpt
     if (!isOptDisabled &&
         ctx.m_instrTypes.hasLoadStore && IGC_IS_FLAG_DISABLED(DisableMemOpt) && !ctx.getModuleMetaData()->disableMemOptforNegativeOffsetLoads) {
@@ -647,6 +657,14 @@ void AddLegalizationPasses(CodeGenContext& ctx, IGCPassManager& mpm, PSSignature
         // need to run WIAnalysis once
         if (IGC_IS_FLAG_ENABLED(EnableAdvMemOpt))
             mpm.add(createAdvMemOptPass());
+
+        if (!isOptDisabled && IGC_IS_FLAG_ENABLED(EnableLdStCombine) &&
+            ctx.type == ShaderType::OPENCL_SHADER)
+        {
+            // start with OCL, will apply to others.
+            //   Once it is stable, no split 64bit store/load anymore.
+            mpm.add(createLdStCombinePass());
+        }
 
         bool AllowNegativeSymPtrsForLoad =
             ctx.type == ShaderType::OPENCL_SHADER;
@@ -805,6 +823,7 @@ void AddLegalizationPasses(CodeGenContext& ctx, IGCPassManager& mpm, PSSignature
         }
         if (!fastCompile && !highAllocaPressure && !isPotentialHPCKernel && IGC_IS_FLAG_ENABLED(allowLICM) && ctx.m_retryManager.AllowLICM())
         {
+            mpm.add(createDisableLICMForSpecificLoops());
             mpm.add(createLICMPass());
             if (ctx.type == ShaderType::OPENCL_SHADER ||
                 ctx.type == ShaderType::COMPUTE_SHADER)
@@ -826,12 +845,20 @@ void AddLegalizationPasses(CodeGenContext& ctx, IGCPassManager& mpm, PSSignature
     // Enabling half promotion AIL for compute shaders only at this point.
     // If needed ctx.type check can be removed to apply for all shader types
     if (IGC_IS_FLAG_ENABLED(ForceHalfPromotion) ||
-        (ctx.getModuleMetaData()->compOpt.WaForceHalfPromotion && ctx.type == ShaderType::COMPUTE_SHADER) ||
+        (ctx.getModuleMetaData()->compOpt.WaForceHalfPromotionComputeShader && ctx.type == ShaderType::COMPUTE_SHADER) ||
+        (ctx.getModuleMetaData()->compOpt.WaForceHalfPromotionPixelVertexShader && 
+            (ctx.type == ShaderType::PIXEL_SHADER || ctx.type == ShaderType::VERTEX_SHADER)) ||
         (!ctx.platform.supportFP16() && IGC_IS_FLAG_ENABLED(EnableHalfPromotion)))
     {
         mpm.add(new HalfPromotion());
         mpm.add(createGVNPass());
         mpm.add(createDeadCodeEliminationPass());
+    }
+
+    if (IGC_IS_FLAG_ENABLED(ForceNoInfiniteLoops))
+    {
+        mpm.add(createLoopSimplifyPass());
+        mpm.add(new CapLoopIterations(UINT_MAX));
     }
 
     // Run address remat after GVN as it may hoist address calculations and
@@ -1040,7 +1067,8 @@ void unify_opt_PreProcess(CodeGenContext* pContext)
     }
 
     IGCPassManager mpm(pContext, "OPTPre");
-    mpm.add(new CheckInstrTypes(&(pContext->m_instrTypes), &pContext->metrics));
+    mpm.add(new CodeGenContextWrapper(pContext));
+    mpm.add(new CheckInstrTypes(false , true));
 
     if (pContext->isPOSH())
     {
@@ -1104,6 +1132,8 @@ static void alwaysInlineForNoOpt(CodeGenContext* pContext, bool NoOpt)
 }
 
 
+#define GFX_ONLY_PASS if(pContext->type != ShaderType::OPENCL_SHADER)
+
 void OptimizeIR(CodeGenContext* const pContext)
 {
     IGC_ASSERT(nullptr != pContext);
@@ -1138,7 +1168,7 @@ void OptimizeIR(CodeGenContext* const pContext)
     }
 
     IGCPassManager mpm(pContext, "OPT");
-#if defined(_INTERNAL)
+#if !defined(_DEBUG)
     if (IGC_IS_FLAG_ENABLED(EnableDebugging))
 #endif
         // do verifyModule for debug/release_internal only.
@@ -1196,7 +1226,6 @@ void OptimizeIR(CodeGenContext* const pContext)
                 mpm.add(createIPConstantPropagationPass());
 #endif
         }
-
         if (IGC_IS_FLAG_ENABLED(MSAA16BitPayloadEnable) &&
             pContext->platform.support16bitMSAAPayload())
         {
@@ -1210,7 +1239,8 @@ void OptimizeIR(CodeGenContext* const pContext)
         mpm.add(createSamplerPerfOptPass());
 
 
-        if ((!IGC_IS_FLAG_ENABLED(DisableDynamicTextureFolding) && pContext->getModuleMetaData()->inlineDynTextures.size() > 0) ||
+        if ((!IGC_IS_FLAG_ENABLED(DisableDynamicTextureFolding) &&
+                pContext->getModuleMetaData()->inlineDynTextures.size() > 0) ||
             (!IGC_IS_FLAG_ENABLED(DisableDynamicResInfoFolding)))
         {
             mpm.add(new DynamicTextureFolding());
@@ -1311,6 +1341,7 @@ void OptimizeIR(CodeGenContext* const pContext)
 
                 if (IGC_IS_FLAG_ENABLED(allowLICM) && pContext->m_retryManager.AllowLICM())
                 {
+                    mpm.add(createDisableLICMForSpecificLoops());
                     int licmTh = IGC_GET_FLAG_VALUE(LICMStatThreshold);
                     mpm.add(new InstrStatistic(pContext, LICM_STAT, InstrStatStage::BEGIN, licmTh));
                     mpm.add(llvm::createLICMPass());
@@ -1372,6 +1403,7 @@ void OptimizeIR(CodeGenContext* const pContext)
 
                 if (IGC_IS_FLAG_ENABLED(allowLICM) && pContext->m_retryManager.AllowLICM())
                 {
+                    mpm.add(createDisableLICMForSpecificLoops());
                     mpm.add(llvm::createLICMPass());
                 }
 
@@ -1428,6 +1460,17 @@ void OptimizeIR(CodeGenContext* const pContext)
 
             mpm.add(new BreakConstantExpr());
             mpm.add(new IGCConstProp(IGC_IS_FLAG_ENABLED(EnableSimplifyGEP)));
+#if LLVM_VERSION_MAJOR >= 14
+            // Now that constant propagation is largely complete, perform
+            // initial evaluation of freeze instructions. We need this to make
+            // life easier for subsequent LLVM passes, as passes like
+            // InstCombine/SimplifyCFG can sometimes be lazy in checking freeze
+            // operand's validity over the more complex instruction chains,
+            // simply assuming that it's safer to refrain from optimizations.
+            // TODO: Check if LLVM 15+ provides improvements in that regard,
+            // alleviating the need for early freeze evaluation.
+            mpm.add(createEvaluateFreezePass());
+#endif // LLVM_VERSION_MAJOR
 
             if (IGC_IS_FLAG_DISABLED(DisableImmConstantOpt))
             {
@@ -1436,11 +1479,9 @@ void OptimizeIR(CodeGenContext* const pContext)
                 {
                     mpm.add(createClampICBOOBAccess());
                 }
-
-                mpm.add(createIGCIndirectICBPropagaionPass());
+                GFX_ONLY_PASS { mpm.add(createIGCIndirectICBPropagaionPass()); }
             }
-
-            mpm.add(new GenUpdateCB());
+            GFX_ONLY_PASS { mpm.add(new GenUpdateCB()); }
 
             if (!pContext->m_instrTypes.hasAtomics && !extensiveShader(pContext))
             {
@@ -1497,10 +1538,8 @@ void OptimizeIR(CodeGenContext* const pContext)
 
             mpm.add(llvm::createDeadCodeEliminationPass());
             mpm.add(llvm::createEarlyCSEPass());
-
-
             // need to be before code sinking
-            mpm.add(createInsertBranchOptPass());
+            GFX_ONLY_PASS { mpm.add(createInsertBranchOptPass()); }
 
             mpm.add(new CustomSafeOptPass());
             if (!pContext->m_DriverInfo.WADisableCustomPass())
@@ -1551,15 +1590,15 @@ void OptimizeIR(CodeGenContext* const pContext)
             }
             if (IGC_IS_FLAG_DISABLED(DisableImmConstantOpt))
             {
-                // If we have ICBs, need to emit clamp code so OOB access doesn't occur
+                // If we have ICBs, need to emit clamp code so OOB access
+                // doesn't occur
                 if (pContext->getModuleMetaData()->immConstant.zeroIdxs.size())
                 {
                     mpm.add(createClampICBOOBAccess());
                 }
 
-                mpm.add(createIGCIndirectICBPropagaionPass());
+                GFX_ONLY_PASS { mpm.add(createIGCIndirectICBPropagaionPass()); }
             }
-
             //single basic block
             if (!pContext->m_DriverInfo.WADisableCustomPass())
             {
@@ -1568,11 +1607,11 @@ void OptimizeIR(CodeGenContext* const pContext)
                 mpm.add(new CustomUnsafeOptPass());
             }
             mpm.add(createGenOptLegalizer());
-            mpm.add(createInsertBranchOptPass());
+            GFX_ONLY_PASS { mpm.add(createInsertBranchOptPass()); }
         }
-
         // If we have ICBs, need to emit clamp code so OOB access doesn't occur
-        if (pContext->getModuleMetaData()->immConstant.zeroIdxs.size() && IGC_IS_FLAG_ENABLED(DisableImmConstantOpt))
+        if (pContext->getModuleMetaData()->immConstant.zeroIdxs.size() &&
+            IGC_IS_FLAG_ENABLED(DisableImmConstantOpt))
         {
             mpm.add(createClampICBOOBAccess());
         }
@@ -1633,8 +1672,7 @@ void OptimizeIR(CodeGenContext* const pContext)
             // more efficient sequences of multiplies, shifts, and adds
             mpm.add(createIntDivConstantReductionPass());
         }
-
-        mpm.add(createMergeMemFromBranchOptPass());
+        GFX_ONLY_PASS { mpm.add(createMergeMemFromBranchOptPass()); }
 
         if (IGC_IS_FLAG_DISABLED(DisableLoadSinking) &&
             !isOptDisabledForModule(pContext->getModuleMetaData(), IGCOpts::SinkLoadOptPass))
@@ -1643,11 +1681,8 @@ void OptimizeIR(CodeGenContext* const pContext)
         }
 
         mpm.add(createConstantMergePass());
-
-        mpm.add(CreateMCSOptimization());
-
-
-        mpm.add(CreateGatingSimilarSamples());
+        GFX_ONLY_PASS { mpm.add(CreateMCSOptimization()); }
+        GFX_ONLY_PASS { mpm.add(CreateGatingSimilarSamples()); }
 
         if (!IGC::ForceAlwaysInline(pContext))
         {

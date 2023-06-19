@@ -93,6 +93,7 @@ void initializeGenXPasses(PassRegistry &registry) {
   initializeGenXCFSimplificationPass(registry);
   initializeGenXCisaBuilderWrapperPass(registry);
   initializeGenXCoalescingWrapperPass(registry);
+  initializeGenXGVClobberCheckerWrapperPass(registry);
   initializeGenXDeadVectorRemovalPass(registry);
   initializeGenXDepressurizerWrapperPass(registry);
   initializeGenXEarlySimdCFConformancePass(registry);
@@ -101,8 +102,10 @@ void initializeGenXPasses(PassRegistry &registry) {
   initializeGenXExtractVectorizerPass(registry);
   initializeGenXVectorCombinerPass(registry);
   initializeGenXFuncBalingPass(registry);
+  initializeGenXFuncLiveElementsPass(registry);
   initializeGenXGEPLoweringPass(registry);
   initializeGenXGroupBalingWrapperPass(registry);
+  initializeGenXGroupLiveElementsWrapperPass(registry);
   initializeGenXIMadPostLegalizationPass(registry);
   initializeGenXLateSimdCFConformanceWrapperPass(registry);
   initializeGenXLegalizationPass(registry);
@@ -125,7 +128,7 @@ void initializeGenXPasses(PassRegistry &registry) {
   initializeGenXTidyControlFlowPass(registry);
   initializeGenXUnbalingWrapperPass(registry);
   initializeGenXVisaRegAllocWrapperPass(registry);
-  initializeTransformPrivMemPass(registry);
+  initializeGenXPromoteArrayPass(registry);
   initializeGenXBackendConfigPass(registry);
   initializeGenXImportOCLBiFPass(registry);
   initializeGenXSimplifyPass(registry);
@@ -157,6 +160,7 @@ void initializeGenXPasses(PassRegistry &registry) {
   initializeGenXGASDynamicResolutionPass(registry);
   initializeGenXInitBiFConstantsPass(registry);
   initializeGenXTranslateIntrinsicsPass(registry);
+  initializeGenXFinalizerPass(registry);
   // WRITE HERE MORE PASSES IF IT'S NEEDED;
 }
 
@@ -322,7 +326,11 @@ bool GenXTargetMachine::addPassesToEmitFile(PassManagerBase &PM,
   vc::addPass(PM, createSROAPass());
   vc::addPass(PM, createEarlyCSEPass());
   vc::addPass(PM, createLowerExpectIntrinsicPass());
+#if LLVM_VERSION_MAJOR >= 12
+  vc::addPass(PM, createCFGSimplificationPass(SimplifyCFGOptions().hoistCommonInsts(true)));
+#else
   vc::addPass(PM, createCFGSimplificationPass());
+#endif
   vc::addPass(PM, createInstructionCombiningPass());
   vc::addPass(PM, createCFGSimplificationPass());
 
@@ -338,7 +346,7 @@ bool GenXTargetMachine::addPassesToEmitFile(PassManagerBase &PM,
   /// removes code that has been made dead by other passes.
   ///
   vc::addPass(PM, createDeadCodeEliminationPass());
-  vc::addPass(PM, createTransformPrivMemPass());
+  vc::addPass(PM, createGenXPromoteArrayPass());
   vc::addPass(PM, createPromoteMemoryToRegisterPass());
   // All passes which modify the LLVM IR are now complete; run the verifier
   // to ensure that the IR is valid.
@@ -581,6 +589,9 @@ bool GenXTargetMachine::addPassesToEmitFile(PassManagerBase &PM,
   vc::addPass(PM, createGenXNumberingWrapperPass());
   /// .. include:: GenXLiveRanges.cpp
   vc::addPass(PM, createGenXLiveRangesWrapperPass());
+  /// .. include:: GenXGVClobberChecker.cpp
+  if (BackendConfig.checkGVClobbering())
+    vc::addPass(PM, createGenXGVClobberCheckerWrapperPass());
   /// .. include:: GenXCoalescing.cpp
   vc::addPass(PM, createGenXCoalescingWrapperPass());
   /// .. include:: GenXAddressCommoning.cpp
@@ -599,7 +610,7 @@ bool GenXTargetMachine::addPassesToEmitFile(PassManagerBase &PM,
     vc::addPass(PM, createVerifierPass());
   /// .. include:: GenXCisaBuilder.cpp
   vc::addPass(PM, createGenXCisaBuilderWrapperPass());
-  vc::addPass(PM, createGenXFinalizerPass(o));
+  vc::addPass(PM, createGenXFinalizerPass());
   vc::addPass(PM, createGenXDebugInfoPass());
 
   // Analysis for collecting information related to OCL runtime. Can
@@ -644,7 +655,11 @@ void GenXTargetMachine::adjustPassManager(PassManagerBuilder &PMBuilder) {
     PM.add(createPromoteMemoryToRegisterPass());
     PM.add(createInferAddressSpacesPass());
     PM.add(createEarlyCSEPass(true));
+#if LLVM_VERSION_MAJOR >= 12
+    PM.add(createCFGSimplificationPass(SimplifyCFGOptions().hoistCommonInsts(true)));
+#else
     PM.add(createCFGSimplificationPass());
+#endif
     PM.add(createInstructionCombiningPass());
     PM.add(createDeadCodeEliminationPass());
     PM.add(createSROAPass());

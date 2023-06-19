@@ -25,6 +25,8 @@ SPDX-License-Identifier: MIT
 #include <string>
 #include <vector>
 
+#include <llvm/ADT/SmallVector.h>
+
 #include "Assertions.h"
 #include "Attributes.hpp"
 #include "BitSet.h"
@@ -108,7 +110,7 @@ class G4_INST {
 
 protected:
   G4_opcode op;
-  std::array<G4_Operand *, G4_MAX_SRCS> srcs;
+  llvm::SmallVector<G4_Operand *, G4_MAX_SRCS> srcs;
   G4_DstRegRegion *dst;
   G4_Predicate *predicate;
   G4_CondMod *mod;
@@ -123,7 +125,7 @@ protected:
   DEF_EDGE_LIST defInstList;
 
   // instruction's id in BB. Each optimization should re-initialize before using
-  int32_t localId;
+  int32_t localId = 0;
 
   static const int UndefinedCisaOffset = -1;
   // Id of the vISA instruction this inst is generated from.
@@ -140,21 +142,21 @@ protected:
 
   // WARNING: if adding new options, please make sure that bitfield does not
   // overflow.
-  unsigned short sat : 1;
+  bool sat : 1;
   // during optimization, an inst may become redundant and be marked dead
-  unsigned short dead : 1;
-  unsigned short evenlySplitInst : 1;
-  unsigned short doPostRA : 1; // for NoMaskWA
-  unsigned short canBeAcc : 1; // The inst can be ACC, including the inst's dst
-                               // and the use operands in the DU chain.
+  bool dead : 1;
+  bool evenlySplitInst : 1;
+  bool doPostRA : 1; // for NoMaskWA
+  bool canBeAcc : 1; // The inst can be ACC, including the inst's dst
+                     // and the use operands in the DU chain.
   G4_ExecSize execSize;
 
   // make it private so only the IR_Builder can create new instructions
   void *operator new(size_t sz, Mem_Manager &m) { return m.alloc(sz); }
   uint32_t global_id = (uint32_t)-1;
 
-  const IR_Builder
-      &builder; // link to builder to access the various compilation options
+  // link to builder to access the various compilation options
+  const IR_Builder &builder;
 
 public:
   enum SWSBTokenType {
@@ -241,6 +243,9 @@ public:
     return (G4_InstDpas *)this;
   }
 
+private:
+  void initOperands();
+
 public:
   G4_INST(const IR_Builder &irb, G4_Predicate *prd, G4_opcode o, G4_CondMod *m,
           G4_Sat s, G4_ExecSize size, G4_DstRegRegion *d, G4_Operand *s0,
@@ -254,13 +259,12 @@ public:
 
   G4_INST(const IR_Builder &irb, G4_Predicate *prd, G4_opcode o, G4_CondMod *m,
           G4_Sat s, G4_ExecSize size, G4_DstRegRegion *d, G4_Operand *s0,
-          G4_Operand *s1, G4_Operand *s2, G4_Operand *s3, G4_InstOpts opt)
-      : G4_INST(irb, prd, o, m, s, size, d, s0, s1, s2, s3, nullptr, opt) {}
+          G4_Operand *s1, G4_Operand *s2, G4_Operand *s3, G4_InstOpts opt);
 
-  G4_INST(const IR_Builder &builder, G4_Predicate *prd, G4_opcode o,
-          G4_CondMod *m, G4_Sat s, G4_ExecSize size, G4_DstRegRegion *d,
-          G4_Operand *s0, G4_Operand *s1, G4_Operand *s2, G4_Operand *s3,
-          G4_Operand *s4, G4_InstOpts opt);
+  G4_INST(const IR_Builder &irb, G4_Predicate *prd, G4_opcode o, G4_CondMod *m,
+          G4_Sat s, G4_ExecSize size, G4_DstRegRegion *d, G4_Operand *s0,
+          G4_Operand *s1, G4_Operand *s2, G4_Operand *s3, G4_Operand *s4,
+          G4_Operand *s5, G4_Operand *s6, G4_Operand *s7, G4_InstOpts opt);
 
   virtual ~G4_INST() {}
 
@@ -277,8 +281,8 @@ public:
   void setPredicate(G4_Predicate *p);
   G4_Predicate *getPredicate() const { return predicate; }
 
-  void setSaturate(G4_Sat s) { sat = s == g4::SAT ? 1 : 0; }
-  void setSaturate(bool z) { sat = z ? 1 : 0; }
+  void setSaturate(G4_Sat s) { sat = (s == g4::SAT); }
+  void setSaturate(bool z) { sat = z; }
   G4_Sat getSaturate() const { return sat ? g4::SAT : g4::NOSAT; }
 
   G4_opcode opcode() const { return op; }
@@ -325,16 +329,34 @@ public:
   bool isMath() const { return op == G4_math; }
   bool isIntrinsic() const { return op == G4_intrinsic; }
   bool isSend() const {
-    return op == G4_send || op == G4_sendc || op == G4_sends || op == G4_sendsc;
+    return op == G4_send || op == G4_sendc || isSplitSend();
   }
-  bool isSplitSend() const { return op == G4_sends || op == G4_sendsc; }
+  // does the send split output payload into src0 and src1
+  bool isSplitSend() const {
+    return op == G4_sends || op == G4_sendsc;
+  }
+  bool isSendUnconditional() const {
+    return op == G4_send || op == G4_sends;
+  }
+  bool isSendConditional() const {
+    return op == G4_sendc || op == G4_sendsc;
+  }
   bool isRSWADivergentInst() const {
     return op == G4_goto || op == G4_while || op == G4_if || op == G4_break;
   }
   bool isBfn() const { return op == G4_bfn; }
 
-  // ToDo: get rid of these functions which don't make sense for non-sends
-  virtual bool isEOT() const { return false; }
+  bool isEOT() const { return getOption() & InstOpt_EOT; }
+
+  bool hasVectImm() const {
+    for (int i = 0, numSrc = getNumSrc(); i < numSrc; ++i) {
+      if (getSrc(i)->isVectImm())
+        return true;
+    }
+    return false;
+  }
+
+  // ToDo: get rid of this function which does't make sense for non-sends
   virtual G4_SendDesc *getMsgDesc() const { return nullptr; }
 
   const G4_SendDescRaw *getMsgDescRaw() const {
@@ -372,6 +394,11 @@ public:
   bool isMovAddr() const;
   bool isAccSrcInst() const;
   bool isAccDstInst() const;
+
+  bool nonALUInstructions() const {
+    return isSend() || isLabel() || isCFInst() || isDpas() || isIntrinsic() ||
+           opcode() == G4_nop || isWait();
+  }
 
   G4_InstMath *asMathInst() const {
     vISA_ASSERT(isMath(), ERROR_UNKNOWN);
@@ -434,8 +461,9 @@ public:
   // Note that def-use chain is not maintained after this; call swapDefUse
   // if you want to update the du-chain.
   void swapSrc(int src1, int src2) {
-    vISA_ASSERT((src1 >= 0 && src1 < getNumSrc() && src2 >= 0 &&
-          src2 < getNumSrc()), "illegal src number");
+    vISA_ASSERT(
+        (src1 >= 0 && src1 < getNumSrc() && src2 >= 0 && src2 < getNumSrc()),
+        "illegal src number");
     std::swap(srcs[src1], srcs[src2]);
   }
 
@@ -466,12 +494,14 @@ public:
   }
 
   void setOptionOn(G4_InstOption o) {
-    vISA_ASSERT(!isMaskOption(o),  "use setMaskOption() to change emask instead");
+    vISA_ASSERT(!isMaskOption(o),
+                "use setMaskOption() to change emask instead");
     option |= o;
   }
 
   void setOptionOff(G4_InstOption o) {
-    vISA_ASSERT(!isMaskOption(o),  "use setMaskOption() to change emask instead");
+    vISA_ASSERT(!isMaskOption(o),
+                "use setMaskOption() to change emask instead");
     option &= (~o);
   }
   unsigned int getOption() const { return option; }
@@ -607,10 +637,6 @@ public:
     return opndNum == Opnd_src0 || opndNum == Opnd_src1 ||
            opndNum == Opnd_src2 || opndNum == Opnd_src3 ||
            opndNum == Opnd_src4 || opndNum == Opnd_src5 ||
-           opndNum == Opnd_src6 || opndNum == Opnd_src7;
-  }
-  static bool isInstrinsicOnlySrcNum(Gen4_Operand_Number opndNum) {
-    return opndNum == Opnd_src4 || opndNum == Opnd_src5 ||
            opndNum == Opnd_src6 || opndNum == Opnd_src7;
   }
   const G4_Operand *getOperand(Gen4_Operand_Number opnd_num) const;
@@ -787,6 +813,8 @@ public:
   bool canInstBeAcc(GlobalOpndHashTable *ght);
 
   bool canInstBeAcc() const { return canBeAcc; };
+
+  bool canSrcBeFlagForPropagation(Gen4_Operand_Number opndNum) const;
 
   bool canSrcBeAccBeforeHWConform(Gen4_Operand_Number opndNum) const;
 
@@ -1143,20 +1171,18 @@ public:
   G4_InstSend(const IR_Builder &builder, G4_Predicate *prd, G4_opcode o,
               G4_ExecSize execSize, G4_DstRegRegion *dst,
               G4_SrcRegRegion *payload, G4_Operand *desc, G4_InstOpts opt,
-              G4_SendDesc *md);
+              G4_SendDescRaw *md);
 
   // split send (two source)
   // desc is either imm or a0.0 and in src2
   // extDesc is either imm or a0.N and in src3
   G4_InstSend(const IR_Builder &builder, G4_Predicate *prd, G4_opcode o,
-              G4_ExecSize execSize, G4_DstRegRegion *dst,
-              G4_SrcRegRegion *payload, G4_SrcRegRegion *src1, G4_Operand *desc,
-              G4_Operand *extDesc, G4_InstOpts opt, G4_SendDesc *md);
-
+              G4_ExecSize execSize, G4_DstRegRegion *dst, G4_SrcRegRegion *src0,
+              G4_SrcRegRegion *src1, G4_Operand *src2desc,
+              G4_Operand *src3extDesc, G4_InstOpts opt, G4_SendDescRaw *md);
 
   G4_INST *cloneInst(const IR_Builder *b = nullptr) override;
 
-  bool isSendc() const { return op == G4_sendc || op == G4_sendsc; }
   void setSendc() {
     // no effect if op is already G4_sendc/G4_sendsc
     if (op == G4_send) {
@@ -1175,6 +1201,10 @@ public:
     vISA_ASSERT(isSplitSend(), "must be a split send instruction");
     return srcs[3];
   }
+
+  // returns the number of effective srcs that may come from GRFS
+  // for ancient unary send this is only 1; sends allows 2
+  int getNumSrcPayloads() const { return isSplitSend() ? 2 : 1; }
 
   G4_SendDesc *getMsgDesc() const override { return msgDesc; }
 
@@ -1199,10 +1229,12 @@ public:
 
     return canEOT;
   }
+  void setEOT() {
+    vISA_ASSERT(canBeEOT(), "canBeEOT() must hold");
+    setOptionOn(InstOpt_EOT);
+  }
 
   bool isFence() const { return getMsgDesc()->isFence(); }
-
-  bool isEOT() const override { return msgDesc->isEOT(); }
 
   bool isDirectSplittableSend();
 
@@ -1213,7 +1245,7 @@ public:
 
   void setSerialize() { option = option | InstOpt_Serialize; }
   bool isSerializedInst() const { return (option & InstOpt_Serialize) != 0; }
-}; // G4_InstSend
+};     // G4_InstSend
 
 } // namespace vISA
 
@@ -1264,111 +1296,48 @@ enum class Phase {
   BinaryEncoding
 };
 
+// bit-field enum for various intrinsic properties, i.e., 1 << Property gives
+// its bit offset.
+// TODO: Would it make sense to unify it with G4_INST's attributes?
+enum IntrinsicFlags { HasSideEffects = 0 };
+
 struct IntrinsicInfo {
   Intrinsic id;
   const char *name;
   int numDst;
   int numSrc;
   Phase loweredBy; // intrinsic must be lowered before entering this phase
-  struct {
-    int numTmpGRF;  // number of tmp GRFs needed for this intrinsic
-    int numTmpAddr; // number of tmp addresses needed (in unit of uw)
-    int numTmpFlag; // number of tmp flags needed (in unit of 16-bit)
-    bool useR0;
-    bool useA0;
-  } temps;
-};
-
-static const IntrinsicInfo G4_Intrinsics[(int)Intrinsic::NumIntrinsics] = {
-    //  id                      name            numDst  numSrc  loweredBy temp
-    {Intrinsic::Wait, "wait", 0, 0, Phase::Optimizer, {0, 0, 0, false, false}},
-    {Intrinsic::Use, "use", 0, 1, Phase::Scheduler, {0, 0, 0, false, false}},
-    {Intrinsic::MemFence,
-     "mem_fence",
-     0,
-     0,
-     Phase::BinaryEncoding,
-     {0, 0, 0, false, false}},
-    {Intrinsic::PseudoKill,
-     "pseudo_kill",
-     1,
-     1,
-     Phase::RA,
-     {0, 0, 0, false, false}},
-    {Intrinsic::PseudoUse,
-     "pseudo_use",
-     0,
-     1,
-     Phase::RA,
-     {0, 0, 0, false, false}},
-    {Intrinsic::Spill, "spill", 1, 2, Phase::RA, {0, 0, 0, false, false}},
-    {Intrinsic::Fill, "fill", 1, 1, Phase::RA, {0, 0, 0, false, false}},
-    {Intrinsic::Split, "split", 1, 1, Phase::RA, {0, 0, 0, false, false}},
-    {Intrinsic::CallerSave,
-     "caller_save",
-     1,
-     0,
-     Phase::RA,
-     {0, 0, 0, false, false}},
-    {Intrinsic::CallerRestore,
-     "caller_restore",
-     0,
-     1,
-     Phase::RA,
-     {0, 0, 0, false, false}},
-    {Intrinsic::CalleeSave,
-     "callee_save",
-     1,
-     0,
-     Phase::RA,
-     {0, 0, 0, false, false}},
-    {Intrinsic::CalleeRestore,
-     "callee_restore",
-     0,
-     1,
-     Phase::RA,
-     {0, 0, 0, false, false}},
-    {Intrinsic::FlagSpill,
-     "flagSpill",
-     0,
-     1,
-     Phase::RA,
-     {0, 0, 0, false, false}},
-    {Intrinsic::PseudoAddrMov,
-     "pseudo_addr_mov",
-     1,
-     8,
-     Phase::BinaryEncoding,
-     {0, 0, 0, false, false}},
-    {Intrinsic::NamedBarrierWA,
-     "namedBarrierWA",
-     1,
-     1,
-     Phase::SWSB,
-     {0, 0, 0, false, false}},
-    {Intrinsic::BarrierWA,
-     "barrierWA",
-     1,
-     0,
-     Phase::SWSB,
-     {0, 0, 0, false, false}},
-    {Intrinsic::IEEEExceptionTrap,
-     "ieee_exception_trap",
-     1,
-     0,
-     Phase::SWSB,
-     {0, 0, 0, false, false}},
+  uint64_t flags;
 };
 
 namespace vISA {
 class G4_InstIntrinsic : public G4_INST {
   const Intrinsic intrinsicId;
-  std::array<G4_Operand *, G4_MAX_INTRINSIC_SRCS> srcs;
 
-  // these should be set by RA if intrinsic requires tmp GRF/addr/flag
-  int tmpGRFStart;
-  int tmpAddrStart;
-  int tmpFlagStart;
+  static constexpr IntrinsicInfo G4_Intrinsics[(int)Intrinsic::NumIntrinsics] =
+      {
+          //  id  name   numDst   numSrc  loweredBy
+          {Intrinsic::Wait, "wait", 0, 0, Phase::Optimizer, 0},
+          {Intrinsic::Use, "use", 0, 1, Phase::Scheduler, 0},
+          {Intrinsic::MemFence, "mem_fence", 0, 0, Phase::BinaryEncoding,
+           1ull << HasSideEffects},
+          {Intrinsic::PseudoKill, "pseudo_kill", 1, 1, Phase::RA, 0},
+          {Intrinsic::PseudoUse, "pseudo_use", 0, 1, Phase::RA, 0},
+          {Intrinsic::Spill, "spill", 1, 2, Phase::RA, 0},
+          {Intrinsic::Fill, "fill", 1, 1, Phase::RA, 0},
+          {Intrinsic::Split, "split", 1, 1, Phase::RA, 0},
+          {Intrinsic::CallerSave, "caller_save", 1, 0, Phase::RA, 0},
+          {Intrinsic::CallerRestore, "caller_restore", 0, 1, Phase::RA, 0},
+          {Intrinsic::CalleeSave, "callee_save", 1, 0, Phase::RA, 0},
+          {Intrinsic::CalleeRestore, "callee_restore", 0, 1, Phase::RA, 0},
+          {Intrinsic::FlagSpill, "flagSpill", 0, 1, Phase::RA, 0},
+          {Intrinsic::PseudoAddrMov, "pseudo_addr_mov", 1, 8,
+           Phase::BinaryEncoding, 0},
+          {Intrinsic::NamedBarrierWA, "namedBarrierWA", 1, 1, Phase::SWSB, 0},
+          {Intrinsic::BarrierWA, "barrierWA", 1, 0, Phase::SWSB, 0},
+          {Intrinsic::IEEEExceptionTrap, "ieee_exception_trap", 1, 0,
+           Phase::SWSB, 0},
+      };
 
 public:
   G4_InstIntrinsic(const IR_Builder &builder, G4_Predicate *prd,
@@ -1377,24 +1346,22 @@ public:
                    G4_InstOpts opt)
       : G4_INST(builder, prd, G4_intrinsic, nullptr, g4::NOSAT, execSize, d, s0,
                 s1, s2, opt),
-        intrinsicId(intrinId), tmpGRFStart(-1), tmpAddrStart(-1),
-        tmpFlagStart(-1) {}
+        intrinsicId(intrinId) {}
 
   G4_InstIntrinsic(const IR_Builder &builder, G4_Predicate *prd,
                    Intrinsic intrinId, G4_ExecSize execSize, G4_DstRegRegion *d,
                    G4_Operand *s0, G4_Operand *s1, G4_Operand *s2,
                    G4_Operand *s3, G4_Operand *s4, G4_Operand *s5,
-                   G4_Operand *s6, G4_Operand *s7, G4_InstOpts opt);
-
-  G4_Operand *getIntrinsicSrc(unsigned i) const;
-  G4_Operand *getOperand(Gen4_Operand_Number opnd_num) const;
-
-  void setIntrinsicSrc(G4_Operand *opnd, unsigned i);
+                   G4_Operand *s6, G4_Operand *s7, G4_InstOpts opt)
+      : G4_INST(builder, prd, G4_intrinsic, nullptr, g4::NOSAT, execSize, d, s0,
+                s1, s2, s3, s4, s5, s6, s7, opt),
+        intrinsicId(intrinId) {}
 
   G4_INST *cloneInst(const IR_Builder *b = nullptr) override;
 
   int getNumDst() const { return G4_Intrinsics[(int)intrinsicId].numDst; }
   int getNumSrc() const { return G4_Intrinsics[(int)intrinsicId].numSrc; }
+  unsigned getDstByteSize() const;
 
   Intrinsic getIntrinsicId() const { return intrinsicId; }
   const char *getName() const { return G4_Intrinsics[(int)intrinsicId].name; }
@@ -1402,12 +1369,11 @@ public:
     return G4_Intrinsics[(int)intrinsicId].loweredBy;
   }
 
-  int getTmpGRFStart() const { return tmpGRFStart; }
-  void setTmpGRFStart(int startGRF) { tmpGRFStart = startGRF; }
-  int getTmpAddrStart() const { return tmpAddrStart; }
-  void setTmpAddrStart(int startAddr) { tmpAddrStart = startAddr; }
-  int getTmpFlagStart() const { return tmpFlagStart; }
-  void setTmpFlagStart(int startFlag) { tmpFlagStart = startFlag; }
+  void computeRightBound(G4_Operand *opnd) override;
+  bool hasSideEffects() const {
+    return G4_Intrinsics[(int)intrinsicId].flags &
+           (1ull << IntrinsicFlags::HasSideEffects);
+  }
 };
 // place for holding all physical register operands
 //
@@ -1465,21 +1431,13 @@ public:
 };
 
 inline G4_Operand *G4_INST::getOperand(Gen4_Operand_Number opnd_num) {
-  if (isPseudoAddrMovIntrinsic() && isSrcNum(opnd_num))
-    return asIntrinsicInst()->getOperand(opnd_num);
-  if (isInstrinsicOnlySrcNum(opnd_num))
-    return NULL;
   return const_cast<G4_Operand *>(
       ((const G4_INST *)this)->getOperand(opnd_num));
 }
 
 inline G4_Operand *G4_INST::getSrc(unsigned i) const {
-  if (isPseudoAddrMovIntrinsic())
-    return asIntrinsicInst()->getIntrinsicSrc(i);
-  else {
-    vISA_ASSERT(i < G4_MAX_SRCS, ERROR_INTERNAL_ARGUMENT);
-    return srcs[i];
-  }
+  vISA_ASSERT(i < srcs.size(), ERROR_INTERNAL_ARGUMENT);
+  return srcs[i];
 }
 
 inline int G4_INST::getNumSrc() const {
@@ -1618,15 +1576,18 @@ public:
   void setNumRows(uint32_t r) { numRows = r; }
   void setOffset(uint32_t o) { offset = o; }
   void setFP(G4_Declare *f) { fp = f; }
+  void setScatterSpill(bool b) { scatterSpill = b; }
 
   bool isOffsetValid() const { return offset != InvalidOffset; }
+  bool isScatterSpill() const { return scatterSpill; }
 
-  void computeRightBound(G4_Operand *opnd);
+  void computeRightBound(G4_Operand *opnd) override;
 
 private:
   G4_Declare *fp = nullptr;
   uint32_t numRows = 0;
   uint32_t offset = InvalidOffset;
+  bool scatterSpill = false;
 };
 
 class G4_PseudoAddrMovIntrinsic : public G4_InstIntrinsic {
@@ -1664,7 +1625,7 @@ public:
 
   bool isOffsetValid() { return offset != InvalidOffset; }
 
-  void computeRightBound(G4_Operand *opnd);
+  void computeRightBound(G4_Operand *opnd) override;
 
 private:
   G4_Declare *fp = nullptr;

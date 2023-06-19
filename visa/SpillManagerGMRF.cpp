@@ -163,8 +163,10 @@ SpillManagerGRF::SpillManagerGRF(
   // LSC messages are used when:
   // a. Stack call is used on PVC+,
   // b. Spill size exceeds what can be represented using hword msg on PVC+
+  // c. Scatter store for spill is needed to avoid RMW
   useLSCMsg = gra.useLscForSpillFill;
   useLscNonstackCall = gra.useLscForNonStackCallSpillFill;
+  useLscForScatterSpill = gra.useLscForScatterSpill;
 
   if (failSafeSpill_) {
     if (gra.kernel.getOption(vISA_NewFailSafeRA)) {
@@ -221,8 +223,10 @@ SpillManagerGRF::SpillManagerGRF(GlobalRA &g, unsigned spillAreaOffset,
   // LSC messages are used when:
   // a. Stack call is used on PVC+,
   // b. Spill size exceeds what can be represented using hword msg on PVC+
+  // c. Scatter store for spill is needed to avoid RMW
   useLSCMsg = gra.useLscForSpillFill;
   useLscNonstackCall = gra.useLscForNonStackCallSpillFill;
+  useLscForScatterSpill = gra.useLscForScatterSpill;
 }
 
 // Get the base regvar for the source or destination region.
@@ -230,16 +234,6 @@ template <class REGION_TYPE>
 G4_RegVar *SpillManagerGRF::getRegVar(REGION_TYPE *region) const {
   G4_RegVar *spilledRegVar = (G4_RegVar *)region->getBase();
   return spilledRegVar;
-}
-
-// Get the representative regvar that will be assigned a unique spill
-// disp and not a relative spill disp.
-G4_RegVar *SpillManagerGRF::getReprRegVar(G4_RegVar *regVar) const {
-  G4_RegVar *absBase = regVar->getAbsBaseRegVar();
-  if (absBase->isAliased())
-    return getReprRegVar(absBase->getDeclare()->getAliasDeclare()->getRegVar());
-  else
-    return absBase;
 }
 
 // Obtain the register file type of the regvar.
@@ -357,49 +351,6 @@ unsigned SpillManagerGRF::getByteSize(G4_RegVar *regVar) const {
                                    : regVar->getDeclare()->getNumElems() *
                                          regVar->getDeclare()->getElemSize();
   return normalizedRowSize * regVar->getDeclare()->getNumRows();
-}
-
-// Check if the lifetime of the spill/fill memory of live range i interferes
-// with the lifetime of the spill/fill memory of live range j
-bool SpillManagerGRF::spillMemLifetimeInterfere(unsigned i, unsigned j) const {
-  G4_RegVar *ireg = getRegVar(i);
-  G4_RegVar *jreg = getRegVar(j);
-  G4_RegVar *irep = getReprRegVar(ireg);
-  G4_RegVar *jrep = getReprRegVar(jreg);
-  G4_RegVar *inont = ireg->getNonTransientBaseRegVar();
-  G4_RegVar *jnont = jreg->getNonTransientBaseRegVar();
-
-  if (ireg->isRegVarTmp()) {
-    return ireg->getBaseRegVar() == jrep ||
-           spillMemLifetimeInterfere(ireg->getBaseRegVar()->getId(), j);
-  } else if (jreg->isRegVarTmp()) {
-    return jreg->getBaseRegVar() == irep ||
-           spillMemLifetimeInterfere(jreg->getBaseRegVar()->getId(), i);
-  }
-
-  else if (inont->isRegVarTmp()) {
-    return inont->getBaseRegVar() == jrep ||
-           spillMemLifetimeInterfere(inont->getBaseRegVar()->getId(), j);
-
-  }
-
-  else if (jnont->isRegVarTmp()) {
-    return jnont->getBaseRegVar() == irep ||
-           spillMemLifetimeInterfere(jnont->getBaseRegVar()->getId(), i);
-  }
-
-  else {
-    if (spillIntf_->interfereBetween(irep->getId(), jrep->getId()))
-      return true;
-    else if (getRFType(irep) != getRFType(jrep))
-      return true;
-    else
-#ifdef DISABLE_SPILL_MEMORY_COMPRESSION
-      return irep != jrep;
-#else
-      return false;
-#endif
-  }
 }
 
 void SpillManagerGRF::getOverlappingIntervals(
@@ -970,7 +921,9 @@ G4_Declare *SpillManagerGRF::createRangeDeclare(
     G4_Operand *repRegion, G4_ExecSize execSize) {
   G4_Declare *rangeDeclare = builder_->createDeclare(
       name, regFile, nElems, nRows, type, kind, base, repRegion, execSize);
-  rangeDeclare->getRegVar()->setId(varIdCount_ + latestImplicitVarIdCount_++);
+  // TODO: Remove call to setId() as ids are to be computed/set by LivenessAnalysis
+  if (!gra.incRA.isEnabled())
+    rangeDeclare->getRegVar()->setId(varIdCount_ + latestImplicitVarIdCount_++);
   gra.setBBId(rangeDeclare, bbId_);
   return rangeDeclare;
 }
@@ -2530,9 +2483,10 @@ G4_INST *SpillManagerGRF::createLSCSpill(G4_Declare *spillRangeDcl,
 G4_INST *SpillManagerGRF::createLSCSpill(G4_Declare *spillRangeDcl,
                                          G4_Declare *mRangeDcl,
                                          G4_DstRegRegion *spilledRangeRegion,
-                                         G4_ExecSize execSize,
-                                         unsigned option) {
-  G4_DstRegRegion *postDst = builder_->createNullDst(Type_UD);
+                                         G4_ExecSize execSize, unsigned option,
+                                         bool isScatter) {
+  G4_DstRegRegion *postDst = builder_->createNullDst(
+      isScatter ? spilledRangeRegion->getType() : Type_UD);
 
   unsigned extMsgLength = spillRangeDcl->getNumRows();
   const RegionDesc *region = builder_->getRegionStride1();
@@ -2553,7 +2507,7 @@ G4_INST *SpillManagerGRF::createLSCSpill(G4_Declare *spillRangeDcl,
   G4_SrcRegRegion *header = getLSCSpillFillHeader(mRangeDcl, fp, offset);
   auto sendInst = builder_->createSpill(
       postDst, header, srcOpnd, execSize, (uint16_t)extMsgLength, offsetHwords,
-      fp, static_cast<G4_InstOption>(option), true);
+      fp, static_cast<G4_InstOption>(option), true, isScatter);
   sendInst->inheritDIFrom(curInst);
 
   return sendInst;
@@ -2934,6 +2888,18 @@ void SpillManagerGRF::insertSpillRangeCode(INST_LIST::iterator spilledInstIter,
     return noRMWNeeded.find(spilledRegion) == noRMWNeeded.end();
   };
 
+  auto isScatterSpillCandidate = [this, inst]() {
+    // Conditions for scatter spill: inst can't be NoMask,
+    // element size is W/DW/Q, isn't dst partial region, and
+    // inst isn't predicated
+    auto elemSz = inst->getDst()->getElemSize();
+    return useLscForScatterSpill && !inst->isWriteEnableInst() &&
+           (elemSz == 2 || elemSz == 4 || elemSz == 8) &&
+           !isPartialRegion(inst->getDst(), inst->getExecSize()) &&
+           !inst->getPredicate();
+  };
+
+
   // subreg offset for new dst that replaces the spilled dst
   auto newSubregOff = 0;
 
@@ -2980,8 +2946,11 @@ void SpillManagerGRF::insertSpillRangeCode(INST_LIST::iterator spilledInstIter,
 
     // Unaligned region specific handling.
     unsigned int spillSendOption = InstOpt_WriteEnable;
+
     auto preloadNeeded = shouldPreloadSpillRange(*spilledInstIter, bb);
-    if (preloadNeeded && checkRMWNeeded()) {
+    auto scatterSpillCandidate = isScatterSpillCandidate();
+
+    if (preloadNeeded && checkRMWNeeded() && !scatterSpillCandidate) {
 
       // Preload the segment aligned spill range from memory to use
       // as an overlay
@@ -3098,7 +3067,7 @@ void SpillManagerGRF::insertSpillRangeCode(INST_LIST::iterator spilledInstIter,
         newSubregOff = subRegOff;
       }
 
-      if (!bb->isAllLaneActive() && !preloadNeeded) {
+      if ((!bb->isAllLaneActive() && !preloadNeeded) ||  scatterSpillCandidate) {
         spillSendOption = (*spilledInstIter)->getMaskOption();
       }
     }
@@ -3107,9 +3076,10 @@ void SpillManagerGRF::insertSpillRangeCode(INST_LIST::iterator spilledInstIter,
 
     initMWritePayload(spillRangeDcl, mRangeDcl, spilledRegion, execSize);
 
-    if (useLSCMsg) {
-      spillSendInst = createLSCSpill(spillRangeDcl, mRangeDcl, spilledRegion,
-                                     execSize, spillSendOption);
+    if (useLSCMsg || useLscForScatterSpill) {
+      spillSendInst =
+          createLSCSpill(spillRangeDcl, mRangeDcl, spilledRegion, execSize,
+                         spillSendOption, scatterSpillCandidate);
     } else {
       spillSendInst = createSpillSendInstr(
           spillRangeDcl, mRangeDcl, spilledRegion, execSize, spillSendOption);
@@ -4122,11 +4092,12 @@ void SpillManagerGRF::immMovSpillAnalysis() {
   }
 }
 
-bool vISA::isEOTSpill(const IR_Builder &builder, const LiveRange *lr,
-                bool isFailSafeIter) {
+bool vISA::isEOTSpillWithFailSafeRA(const IR_Builder &builder,
+                                    const LiveRange *lr, bool isFailSafeIter) {
   bool needsEOTGRF = lr->getEOTSrc() && builder.hasEOTGRFBinding();
   if (isFailSafeIter && needsEOTGRF &&
-      (lr->getVar()->isRegVarTransient() || lr->getVar()->isRegVarTmp()))
+      (lr->getVar()->isRegVarTransient() || lr->getVar()->isRegVarTmp() ||
+       lr->getIsInfiniteSpillCost()))
     return true;
   return false;
 }
@@ -4145,7 +4116,7 @@ bool SpillManagerGRF::insertSpillFillCode(G4_Kernel *kernel,
     // Ignore request to spill/fill the spill/fill ranges
     // as it does not help the allocator.
     if (shouldSpillRegister(lr->getVar()) == false) {
-      if (isEOTSpill(*builder_, lr, failSafeSpill_)) {
+      if (isEOTSpillWithFailSafeRA(*builder_, lr, failSafeSpill_)) {
         if (!builder_->getOption(vISA_NewFailSafeRA)) {
           lr->getVar()->setPhyReg(
               builder_->phyregpool.getGreg(
@@ -4159,6 +4130,7 @@ bool SpillManagerGRF::insertSpillFillCode(G4_Kernel *kernel,
       return false;
     } else {
       lr->getVar()->getDeclare()->setSpillFlag();
+      gra.incRA.markForIntfUpdate(lr->getDcl());
     }
   }
 
@@ -4193,6 +4165,7 @@ bool SpillManagerGRF::insertSpillFillCode(G4_Kernel *kernel,
       if (gra.splitResults.find(dcl) == gra.splitResults.end())
         continue;
 
+      gra.incRA.markForIntfUpdate(dcl);
       LoopVarSplit::removeAllSplitInsts(&gra, dcl);
     }
   }
@@ -4276,32 +4249,27 @@ bool SpillManagerGRF::insertSpillFillCode(G4_Kernel *kernel,
             if (mayExceedTwoGRF) {
               // this path may be taken if current instruction is a spill
               // intrinsic. for eg, V81 below is not spilled in 1st RA
-              // iteration: mov (16)             SP_GRF_V167_0(0,0)<1>:w
-              // V81(0,0)<1;1,0>:w // $412:&234: (W) intrinsic.spill.1 (16)
-              // Scratch[0x32]  R0_Copy0(0,0)<1;1,0>:ud
-              // SP_GRF_V167_0(0,0)<1;1,0>:w // $412: mov (16)
-              // SP_GRF_V167_1(0,0)<1>:w  V81(1,0)<1;1,0>:w // $413:&235: (W)
-              // intrinsic.spill.1 (16)  Scratch[1x32]  R0_Copy0(0,0)<1;1,0>:ud
-              // SP_GRF_V167_1(0,0)<1;1,0>:w // $413: mov (16)
-              // SP_GRF_V167_2(0,0)<1>:w  V81(2,0)<1;1,0>:w // $414:&236: (W)
-              // intrinsic.spill.1 (16)  Scratch[2x32]  R0_Copy0(0,0)<1;1,0>:ud
-              // SP_GRF_V167_2(0,0)<1;1,0>:w // $414: mov (16)
-              // SP_GRF_V167_3(0,0)<1>:w  V81(3,0)<1;1,0>:w // $415:&237: (W)
-              // intrinsic.spill.1 (16)  Scratch[3x32]  R0_Copy0(0,0)<1;1,0>:ud
-              // SP_GRF_V167_3(0,0)<1;1,0>:w // $415:
+              // iteration:
+              // clang-format off
+              // mov (16)             SP_GRF_V167_0(0,0)<1>:w   V81(0,0)<1;1,0>:w
+              // (W) intrinsic.spill.1 (16)  Scratch[0x32]  R0_Copy0(0,0)<1;1,0>:ud  SP_GRF_V167_0(0,0)<1;1,0>:w
+              // mov (16)             SP_GRF_V167_1(0,0)<1>:w  V81(1,0)<1;1,0>:w
+              // (W) intrinsic.spill.1 (16)  Scratch[1x32]  R0_Copy0(0,0)<1;1,0>:ud  SP_GRF_V167_1(0,0)<1;1,0>:w
+              // mov (16)             SP_GRF_V167_2(0,0)<1>:w  V81(2,0)<1;1,0>:w
+              // (W) intrinsic.spill.1 (16)  Scratch[2x32]  R0_Copy0(0,0)<1;1,0>:ud  SP_GRF_V167_2(0,0)<1;1,0>:w
+              // mov (16)             SP_GRF_V167_3(0,0)<1>:w  V81(3,0)<1;1,0>:w
+              // (W) intrinsic.spill.1 (16)  Scratch[3x32]  R0_Copy0(0,0)<1;1,0>:ud  SP_GRF_V167_3(0,0)<1;1,0>:w
               //
               // ==> spill cleanup emits (notice spill range V81 appears in
               // spill intrinsic but is not spilled itself):
               //
-              // (W) intrinsic.spill.4 (16)  Scratch[0x32]
-              // R0_Copy0(0,0)<1;1,0>:ud  V81(0,0)<1;1,0>:ud // $412:
+              // (W) intrinsic.spill.4 (16)  Scratch[0x32]  R0_Copy0(0,0)<1;1,0>:ud  V81(0,0)<1;1,0>:ud
               //
               // in next RA iteration assume V81 spills. so we should emit:
               //
-              // (W) intrinsic.fill.4 (16)  FL_Send_V81_0(0,0)<1>:uw
-              // R0_Copy0(0,0)<1;1,0>:ud  Scratch[88x32]  // $412: (W)
-              // intrinsic.spill.4 (16)  Scratch[0x32]  R0_Copy0(0,0)<1;1,0>:ud
-              // FL_Send_V81_0(0,0)<1;1,0>:ud // $412:&393:
+              // (W) intrinsic.fill.4 (16)  FL_Send_V81_0(0,0)<1>:uw  R0_Copy0(0,0)<1;1,0>:ud  Scratch[88x32]
+              // (W) intrinsic.spill.4 (16)  Scratch[0x32]  R0_Copy0(0,0)<1;1,0>:ud  FL_Send_V81_0(0,0)<1;1,0>:ud
+              // clang-format on
               //
               // V81 appears in spill intrinsic instruction as an optimization
               // earlier even though it wasnt spilled in 1st RA iteration.
@@ -4887,6 +4855,102 @@ void GlobalRA::expandSpillLSC(G4_BB *bb, INST_LIST_ITER &instIt) {
   splice(bb, instIt, builder->instList, inst->getVISAId());
 }
 
+void GlobalRA::expandScatterSpillLSC(G4_BB *bb, INST_LIST_ITER &instIt) {
+  auto &builder = kernel.fg.builder;
+  auto inst = (*instIt)->asSpillIntrinsic();
+  // offset into scratch surface in bytes
+  auto spillOffset = inst->getOffsetInBytes();
+  auto payload = inst->getSrc(1)->asSrcRegRegion();
+  auto rowOffset = payload->getRegOff();
+
+  // Max elements to write in LSC scatter store is 32 (SIMD32)
+  // Scatter spill intrinsics are expanded to either SIMD8, SIMD16 or SIMD32
+  G4_ExecSize execSize(inst->getExecSize());
+  vISA_ASSERT(execSize == 8 || execSize == 16 || execSize == 32,
+              "Execution size not supported for scatter spill");
+
+  LSC_OP op = LSC_STORE;
+  LSC_SFID lscSfid = LSC_UGM;
+  LSC_CACHE_OPTS cacheOpts{LSC_CACHING_DEFAULT, LSC_CACHING_DEFAULT};
+  LSC_L1_L3_CC store_cc =
+      (LSC_L1_L3_CC)builder->getuint32Option(vISA_lscSpillStoreCCOverride);
+  if (store_cc != LSC_CACHING_DEFAULT) {
+    cacheOpts = convertLSCLoadStoreCacheControlEnum(store_cc, false);
+  }
+
+  // Set the LSC address info
+  LSC_ADDR addrInfo;
+  addrInfo.type = LSC_ADDR_TYPE_SS; // Scratch memory
+  addrInfo.immScale = 1;
+  addrInfo.immOffset = 0;
+  addrInfo.size = LSC_ADDR_SIZE_32b;
+  unsigned int addrSizeInBytes = 4;
+
+  // Set the LSC data shape
+  LSC_DATA_SHAPE dataShape;
+  dataShape.order = LSC_DATA_ORDER_NONTRANSPOSE;
+  dataShape.elems = LSC_DATA_ELEMS_1;
+
+  auto elemSz = inst->getDst()->getTypeSize();
+  switch (elemSz) {
+  case 2:
+    dataShape.size = LSC_DATA_SIZE_16b;
+    break;
+  case 4:
+    dataShape.size = LSC_DATA_SIZE_32b;
+    break;
+  case 8:
+    dataShape.size = LSC_DATA_SIZE_64b;
+    break;
+  default:
+    vISA_ASSERT(false, "Data size not supported");
+  }
+
+  unsigned numGRFAddressToWrite =
+      execSize * addrSizeInBytes / builder->getGRFSize();
+  builder->instList.clear();
+
+  // Add spill offset to vector of addresses
+  G4_Declare *baseAddresses = builder->getScatterSpillBaseAddress();
+  G4_Declare *spillAddresses = builder->getScatterSpillAddress();
+  G4_INST *addA0 = builder->createBinOp(
+      G4_add, execSize,
+      builder->createDst(spillAddresses->getRegVar(), 0, 0, 1, Type_D),
+      builder->createSrcRegRegion(baseAddresses, builder->getRegionStride1()),
+      builder->createImm(spillOffset, Type_W), inst->getOption(), false);
+  bb->insertBefore(instIt, addA0);
+
+  auto payloadToUse = builder->createSrcWithNewRegOff(payload, rowOffset);
+  auto surface = builder->createSrcRegRegion(builder->getSpillSurfaceOffset(),
+                                             builder->getRegionScalar());
+
+  G4_DstRegRegion *postDst =
+      builder->createNullDst(inst->getDst()->getType());
+  G4_SendDescRaw *desc = builder->createLscMsgDesc(
+      op, lscSfid, Get_VISA_Exec_Size_From_Raw_Size(execSize), cacheOpts,
+      addrInfo, dataShape, surface, 0, numGRFAddressToWrite,
+      LdStAttrs::SCRATCH_SURFACE);
+  auto src0Addr =
+      builder->createSrcRegRegion(spillAddresses, builder->getRegionStride1());
+
+  auto sendInst = builder->createLscSendInst(
+      nullptr, postDst, src0Addr, payloadToUse, execSize, desc,
+      inst->getOption(), LSC_ADDR_TYPE_SS, false);
+
+  sendInst->addComment(makeSpillFillComment(
+      "scatter spill", "to", inst->getFP() ? "FP" : "offset", spillOffset,
+      payload->getTopDcl()->getName(), builder->getGRFSize()));
+
+  if (inst->getFP() && kernel.getOption(vISA_GenerateDebugInfo)) {
+    for (auto newInst : builder->instList) {
+      kernel.getKernelDebugInfo()->updateExpandedIntrinsic(
+          inst->asSpillIntrinsic(), newInst);
+    }
+  }
+
+  splice(bb, instIt, builder->instList, inst->getVISAId());
+}
+
 void GlobalRA::expandFillLSC(G4_BB *bb, INST_LIST_ITER &instIt) {
   auto &builder = kernel.fg.builder;
   auto inst = (*instIt)->asFillIntrinsic();
@@ -5272,8 +5336,12 @@ void GlobalRA::expandSpillIntrinsic(G4_BB *bb) {
       auto spillIt = instIt;
 
       auto rowOffset = payload->getRegOff();
-      if (useLscForNonStackCallSpillFill || spillFillIntrinUsesLSC(inst)) {
-        expandSpillLSC(bb, instIt);
+      if (useLscForNonStackCallSpillFill || spillFillIntrinUsesLSC(inst) ||
+          useLscForScatterSpill) {
+        if (inst->asSpillIntrinsic()->isScatterSpill())
+          expandScatterSpillLSC(bb, instIt);
+        else
+          expandSpillLSC(bb, instIt);
       } else {
         if (!isOffBP) {
           expandSpillNonStackcall(numRows, offset, rowOffset, header, payload,
@@ -5529,7 +5597,9 @@ void GlobalRA::markSlot1HwordSpillFill(G4_BB *bb) {
 
   bool isSet = false;
   G4_INST *prevSetInst = nullptr;
-  G4_Declare* builtinR0 = builder.getBuiltinR0()->getRootDeclare();
+  G4_Declare *builtinR0 = builder.getBuiltinR0()->getRootDeclare();
+  unsigned builtinR0RegNum =
+      builtinR0->getRegVar()->getPhyReg()->asGreg()->getRegNum();
 
   for (auto instIt = bb->begin(); instIt != bb->end(); ++instIt) {
     G4_INST *inst = (*instIt);
@@ -5543,6 +5613,34 @@ void GlobalRA::markSlot1HwordSpillFill(G4_BB *bb) {
           isSet = true;
         }
         prevSetInst = inst;
+
+        // Special case of builtin r0 being overwritten by the fill instruction.
+        // In this case the register shouldn't be reset from slot1 after the
+        // fill because the physical register got reused and builtin r0 is no
+        // longer alive.
+        // Example IR illustrating the problem:
+        //   //.declare FL (r0.0)
+        //   (W) intrinsic.fill.1 (8)  FL(0,0)<1>:ud r0.0<1;1,0>:ud
+        //                             Scratch[0x32]
+        //       mov (8)               M2(0,0)<1>:f FL(0,0)<1;1,0>:f
+        //       mov (8)               M2(1,0)<1>:f FL(0,0)<1;1,0>:f
+        //       mov (8)               M2(2,0)<1>:f FL(0,0)<1;1,0>:f
+        //       mov (8)               M2(3,0)<1>:f FL(0,0)<1;1,0>:f
+        //       sendsc (8)            null:ud M2(0,0) null 0x25:ud
+        //                             0x8031400:ud {EOT} // render target write
+        G4_VarBase *dstVarBase = fillInst->getDst()->getBase();
+
+        vASSERT(dstVarBase);
+        G4_VarBase *dstPhyReg = dstVarBase->asRegVar()->getPhyReg();
+
+        vASSERT(dstPhyReg);
+        unsigned dstRegNum = dstPhyReg->asGreg()->getRegNum();
+
+        if (dstRegNum <= builtinR0RegNum &&
+            builtinR0RegNum < dstRegNum + fillInst->getNumRows()) {
+          isSet = false;
+          prevSetInst = nullptr;
+        }
       }
     } else if (inst->isSpillIntrinsic()) {
       G4_SpillIntrinsic *spillInst = inst->asSpillIntrinsic();
@@ -6042,7 +6140,7 @@ void BoundedRA::markUniversalForbidden() {
 
 void BoundedRA::markForbidden(LiveRange *lr) {
   auto totalRegs = gra.kernel.getNumRegTotal();
-  auto forbidden = lr->getForbidden();
+  BitSet *forbidden = lr->getForbidden();
   // We've 0 reserved GRFs if an RA iteration was converted
   // to fail safe. But we may have non-zero reserved GRFs
   // if fail safe was set before running RA iteration.
@@ -6053,7 +6151,7 @@ void BoundedRA::markForbidden(LiveRange *lr) {
             reg < (reservedGRFStart + numReserved));
   };
   for (unsigned int i = 0; i != totalRegs; ++i) {
-    if (!isReservedGRF(i) && forbidden[i])
+    if (!isReservedGRF(i) && forbidden && forbidden->isSet(i))
       markGRF(i);
   }
 

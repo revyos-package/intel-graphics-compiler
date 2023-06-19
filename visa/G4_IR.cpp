@@ -1,6 +1,6 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (C) 2017-2022 Intel Corporation
+Copyright (C) 2017-2023 Intel Corporation
 
 SPDX-License-Identifier: MIT
 
@@ -17,6 +17,7 @@ SPDX-License-Identifier: MIT
 #include "VISAKernel.h"
 #include "visa_igc_common_header.h"
 
+#include <algorithm>
 #include <iomanip>
 
 using namespace vISA;
@@ -174,62 +175,74 @@ static void associateOpndWithInst(G4_Operand *opnd, G4_INST *inst) {
   }
 }
 
-G4_INST::G4_INST(const IR_Builder &irb, G4_Predicate *prd, G4_opcode o,
-                 G4_CondMod *m, G4_Sat s, G4_ExecSize size, G4_DstRegRegion *d,
-                 G4_Operand *s0, G4_Operand *s1, G4_Operand *s2, G4_Operand *s3,
-                 G4_Operand *s4, G4_InstOpts opt)
-    : op(o), dst(d), predicate(prd), mod(m), option(opt),
-      useInstList(irb.getAllocator()), defInstList(irb.getAllocator()),
-      localId(0), sat(s ? 1 : 0), evenlySplitInst(false), canBeAcc(false),
-      execSize(size), builder(irb) {
-  srcs[0] = s0;
-  srcs[1] = s1;
-  srcs[2] = s2;
-  srcs[3] = s3;
-  srcs[4] = s4;
-
-  dead = false;
-  doPostRA = false;
-
+void G4_INST::initOperands() {
   resetRightBound(dst);
-  resetRightBound(s0);
-  resetRightBound(s1);
-  resetRightBound(s2);
-  resetRightBound(s3);
-  resetRightBound(s4);
+  for (G4_Operand *src : srcs)
+    resetRightBound(src);
   computeRightBound(predicate);
   computeRightBound(mod);
 
   associateOpndWithInst(dst, this);
-  associateOpndWithInst(s0, this);
-  associateOpndWithInst(s1, this);
-  associateOpndWithInst(s2, this);
-  associateOpndWithInst(s3, this);
-  associateOpndWithInst(s4, this);
+  for (G4_Operand *src : srcs)
+    associateOpndWithInst(src, this);
   associateOpndWithInst(predicate, this);
   associateOpndWithInst(mod, this);
+}
+
+G4_INST::G4_INST(const IR_Builder &irb, G4_Predicate *prd, G4_opcode o,
+                 G4_CondMod *m, G4_Sat s, G4_ExecSize size, G4_DstRegRegion *d,
+                 G4_Operand *s0, G4_Operand *s1, G4_Operand *s2, G4_Operand *s3,
+                 G4_InstOpts opt)
+    : op(o), dst(d), predicate(prd), mod(m), option(opt),
+      useInstList(irb.getAllocator()), defInstList(irb.getAllocator()),
+      sat(s ? true : false), dead(false), evenlySplitInst(false),
+      doPostRA(false), canBeAcc(false), execSize(size), builder(irb) {
+  // FIXME: Currently srcs would be initialized with a list that has max
+  // allowed size in ctor. Probably should initialize srcs with the actual
+  // required srcs of the inst instead.
+  srcs = {s0, s1, s2, s3};
+  initOperands();
+}
+
+G4_INST::G4_INST(const IR_Builder &irb, G4_Predicate *prd, G4_opcode o,
+                 G4_CondMod *m, G4_Sat s, G4_ExecSize size, G4_DstRegRegion *d,
+                 G4_Operand *s0, G4_Operand *s1, G4_Operand *s2, G4_Operand *s3,
+                 G4_Operand *s4, G4_Operand *s5, G4_Operand *s6, G4_Operand *s7,
+                 G4_InstOpts opt)
+    : op(o), dst(d), predicate(prd), mod(m), option(opt),
+      useInstList(irb.getAllocator()), defInstList(irb.getAllocator()),
+      sat(s ? true : false), dead(false), evenlySplitInst(false),
+      doPostRA(false), canBeAcc(false), execSize(size), builder(irb) {
+  srcs = {s0, s1, s2, s3, s4, s5, s6, s7};
+  initOperands();
 }
 
 G4_InstSend::G4_InstSend(const IR_Builder &builder, G4_Predicate *prd,
                          G4_opcode o, G4_ExecSize size, G4_DstRegRegion *dst,
                          G4_SrcRegRegion *payload, G4_Operand *desc,
-                         G4_InstOpts opt, G4_SendDesc *md)
+                         G4_InstOpts opt, G4_SendDescRaw *md)
     : G4_INST(builder, prd, o, nullptr, g4::NOSAT, size, dst, payload, desc,
               opt),
       msgDesc(md) {
   md->setExecSize(size);
+  // convert legacy EOT to instruction option if it slipped through in ExDesc[5]
+  if (md->hasLegacyEoT())
+    setEOT();
 }
 
 G4_InstSend::G4_InstSend(const IR_Builder &builder, G4_Predicate *prd,
                          G4_opcode o, G4_ExecSize size, G4_DstRegRegion *dst,
-                         G4_SrcRegRegion *payload, G4_SrcRegRegion *src1,
-                         G4_Operand *desc, G4_Operand *extDesc, G4_InstOpts opt,
-                         G4_SendDesc *md)
-    : G4_INST(builder, prd, o, nullptr, g4::NOSAT, size, dst, payload, src1,
-              desc, opt),
+                         G4_SrcRegRegion *src0, G4_SrcRegRegion *src1,
+                         G4_Operand *src2desc, G4_Operand *src3extDesc,
+                         G4_InstOpts opt, G4_SendDescRaw *md)
+    : G4_INST(builder, prd, o, nullptr, g4::NOSAT, size, dst, src0, src1,
+              src2desc, opt),
       msgDesc(md) {
-  setSrc(extDesc, 3);
+  setSrc(src3extDesc, 3);
   md->setExecSize(size);
+  // convert legacy EOT to instruction option if it slipped through in ExDesc[5]
+  if (md->hasLegacyEoT())
+    setEOT();
 }
 
 
@@ -260,12 +273,9 @@ void G4_INST::setOpcode(G4_opcode opcd) {
   op = opcd;
 
   if (resetBounds) {
-    // FIXME: This is likely not correct given that we have src3 and even src4
-    // now.
     resetRightBound(dst);
-    resetRightBound(srcs[0]);
-    resetRightBound(srcs[1]);
-    resetRightBound(srcs[2]);
+    for (G4_Operand *src : srcs)
+      resetRightBound(src);
     resetRightBound(predicate);
     resetRightBound(mod);
     resetRightBound(getImplAccDst());
@@ -283,12 +293,9 @@ void G4_INST::setExecSize(G4_ExecSize s) {
   execSize = s;
 
   if (resetBounds) {
-    // FIXME: This is likely not correct given that we have src3 and even src4
-    // now.
     resetRightBound(dst);
-    resetRightBound(srcs[0]);
-    resetRightBound(srcs[1]);
-    resetRightBound(srcs[2]);
+    for (G4_Operand *src : srcs)
+      resetRightBound(src);
     resetRightBound(predicate);
     resetRightBound(mod);
     resetRightBound(getImplAccDst());
@@ -529,17 +536,28 @@ void G4_INST::removeDefUse(Gen4_Operand_Number opndNum) {
 }
 
 const G4_Operand *G4_INST::getOperand(Gen4_Operand_Number opnd_num) const {
+  if (isSrcNum(opnd_num) && (size_t)getSrcNum(opnd_num) >= srcs.size())
+    return nullptr;
+
   switch (opnd_num) {
   case Opnd_dst:
     return (G4_Operand *)dst;
   case Opnd_src0:
-    return srcs[0];
+    return getSrc(0);
   case Opnd_src1:
-    return srcs[1];
+    return getSrc(1);
   case Opnd_src2:
-    return srcs[2];
+    return getSrc(2);
   case Opnd_src3:
-    return srcs[3];
+    return getSrc(3);
+  case Opnd_src4:
+    return getSrc(4);
+  case Opnd_src5:
+    return getSrc(5);
+  case Opnd_src6:
+    return getSrc(6);
+  case Opnd_src7:
+    return getSrc(7);
   case Opnd_pred:
     return (G4_Operand *)predicate;
   case Opnd_condMod:
@@ -552,7 +570,7 @@ const G4_Operand *G4_INST::getOperand(Gen4_Operand_Number opnd_num) const {
     vISA_ASSERT_UNREACHABLE("Operand number is out of range.");
     break;
   }
-  return NULL;
+  return nullptr;
 }
 
 USE_EDGE_LIST_ITER G4_INST::eraseUse(USE_EDGE_LIST_ITER iter) {
@@ -1800,9 +1818,9 @@ bool G4_INST::canPropagateTo(G4_INST *useInst, Gen4_Operand_Number opndNum,
   if (useInst->getDst() == nullptr)
     return false;
 
-  // limit flag copy propagation to opcode known to work for now
-  if (src->isFlag() && useInst->opcode() != G4_not &&
-      useInst->opcode() != G4_and && useInst->opcode() != G4_cbit) {
+  // If the operand to be copied is flag register, need to check if the use
+  // operand can use flag register
+  if (src->isFlag() && !useInst->canSrcBeFlagForPropagation(opndNum)) {
     return false;
   }
 
@@ -2723,15 +2741,12 @@ bool G4_INST::isRAWdep(G4_INST *inst) {
 }
 
 bool G4_INST::detectComprInst() const {
-  enum class ComprInstStates : unsigned char { U, T, F };
-
   G4_Type execType = getExecType();
-  ComprInstStates comprInst = ComprInstStates::U;
 
   // Compressed instructions must have a minimum execution size of
   // at least 8.
   if (execSize < g4::SIMD8) {
-    comprInst = ComprInstStates::F;
+    return false;
   }
 
   // Compressed instructions must have a minimum execution size of
@@ -2740,9 +2755,7 @@ bool G4_INST::detectComprInst() const {
            dst->getType() != Type_UNDEF) {
     if ((unsigned)execSize * dst->getTypeSize() * dst->getHorzStride() >
         getBuilder().numEltPerGRF<Type_UB>()) {
-      comprInst = ComprInstStates::T;
-    } else {
-      comprInst = ComprInstStates::F;
+      return true;
     }
   }
 
@@ -2751,14 +2764,41 @@ bool G4_INST::detectComprInst() const {
   // moves which always have destinations).
   else if ((unsigned)execSize * TypeSize(execType) >
            getBuilder().numEltPerGRF<Type_UB>()) {
-    comprInst = ComprInstStates::T;
+    return true;
   }
 
+  // Cross GRF boundary check for dst and src operands
+  // NOTE: The function cannot handle indirect
   else {
-    comprInst = ComprInstStates::F;
+    G4_DstRegRegion *dst = getDst();
+    if (dst && dst->getRegAccess() == Direct && dst->isDstRegRegion() &&
+        dst->getBase()->isRegVar() &&
+        (dst->getTopDcl()->getRegFile() == G4_GRF)) {
+      if (dst->getSubRegOff() * dst->getTypeSize() + dst->getLinearizedEnd() -
+              dst->getLinearizedStart() + 1 >
+          getBuilder().numEltPerGRF<Type_UB>()) {
+        return true;
+      }
+    }
+
+    for (unsigned j = 0, numSrc = getNumSrc(); j < numSrc; j++) {
+      G4_Operand *src = getSrc(j);
+      if (src != NULL && src->isSrcRegRegion() &&
+          src->asSrcRegRegion()->getRegAccess() == Direct &&
+          src->asSrcRegRegion()->getBase()->isRegVar() &&
+          (src->getTopDcl()->getRegFile() == G4_GRF ||
+           src->getTopDcl()->getRegFile() == G4_INPUT)) {
+        G4_SrcRegRegion *srcRgn = src->asSrcRegRegion();
+        if (srcRgn->getSubRegOff() * srcRgn->getTypeSize() +
+                srcRgn->getLinearizedEnd() - srcRgn->getLinearizedStart() + 1 >
+            getBuilder().numEltPerGRF<Type_UB>()) {
+          return true;
+        }
+      }
+    }
   }
 
-  return (comprInst == ComprInstStates::T);
+  return false;
 }
 
 /*
@@ -2872,6 +2912,13 @@ bool G4_INST::isPartialWriteForSpill(bool inSIMDCF,
       // also we can't use the scratch message when under stack call
       return true;
     }
+
+    //For DPAS, always Nomask
+    //For send, !isWriteEnableInst in if covers the case with Nomask.
+    if (mayExceedTwoGRF()) {
+      return true;
+    }
+
     if (getMaskOption() != InstOpt_M0) {
       return true;
     }
@@ -2926,14 +2973,13 @@ bool G4_INST::isOptBarrier() const {
     return true;
   }
 
-  if (isIntrinsic() &&
-      asIntrinsicInst()->getIntrinsicId() == Intrinsic::MemFence) {
+  if (isIntrinsic() && asIntrinsicInst()->hasSideEffects()) {
     return true;
   }
 
   // any instructions that access special ARFs is considered a opt barrier
   // this includes any ARF that is not address/flag/acc
-  if (dst != NULL) {
+  if (dst) {
     if (dst->isAreg()) {
       if (dst->isNReg() || dst->isSrReg() || dst->isCrReg() || dst->isTmReg() ||
           dst->isTDRReg()) {
@@ -2990,6 +3036,33 @@ static void emitExecSize(std::ostream &output, const G4_INST &inst) {
   }
 }
 
+static const char *SFIDToString(vISA::SFID sfid)
+{
+  switch (sfid) {
+  case SFID::NULL_SFID: return ".null";
+  case SFID::SAMPLER:   return ".smpl";
+  case SFID::GATEWAY:   return ".gtwy";
+  case SFID::DP_DC2:    return ".dc2";
+  case SFID::DP_RC:     return ".rc";
+  case SFID::URB:       return ".urb";
+  case SFID::SPAWNER:   return ".ts";
+  case SFID::VME:       return ".vme";
+  case SFID::DP_CC:     return ".dcro";
+  case SFID::DP_DC0:    return ".dc0";
+  case SFID::DP_PI:     return ".pi";
+  case SFID::DP_DC1:    return ".dc1";
+  case SFID::CRE:       return ".cre";
+  case SFID::BTD:       return ".btd";
+  case SFID::RTHW:      return ".rta";
+  case SFID::TGM:       return ".tgm";
+  case SFID::SLM:       return ".slm";
+  case SFID::UGM:       return ".ugm";
+  case SFID::UGML:      return ".ugml";
+  default: break;
+  }
+  return ".???";
+}
+
 // the syntax column width of beinning instruction info
 //  (P1.0) and (16)     ...
 //         nop
@@ -3023,6 +3096,9 @@ static void emitInstructionStartColumn(std::ostream &output, G4_INST &inst) {
   } else if (inst.isMath() &&
              inst.asMathInst()->getMathCtrl() != MATH_RESERVED) {
     oupPfx << "." << MathOpNames[inst.asMathInst()->getMathCtrl()];
+  } else if (inst.isSend()) {
+    G4_SendDesc *sdesc = inst.asSendInst()->getMsgDesc();
+    oupPfx << SFIDToString(sdesc->getSFID());
   }
 
   oupPfx << ' ';
@@ -3044,6 +3120,9 @@ void G4_INST::emit(std::ostream &output) {
   if (isLabel()) {
     srcs[0]->emit(output);
     output << ":";
+    return;
+  } else if (isSend()) {
+    asSendInst()->emit_send(output);
   } else {
     // predication, opcode, execsize, condition, ...
     emitInstructionStartColumn(output, *this);
@@ -3082,13 +3161,22 @@ void G4_INST::emit(std::ostream &output) {
       output << "  ";
       asCFInst()->getUip()->emit(output);
     }
-
-    emit_options(output);
-    if (getVISAId() != -1) {
-      output << " // ";
-      emitInstIds(output);
-    }
   } // end: non-label
+
+  emit_options(output);
+  if (getVISAId() != -1) {
+    output << " // ";
+    emitInstIds(output);
+  }
+
+  if (isSend()) {
+    asSendInst()->emit_send_desc(output);
+  }
+
+  auto comm = getComments();
+  if (!comm.empty()) {
+    output << " // " << comm;
+  }
 } // G4_INST::emit_inst
 
 void G4_INST::emitInstIds(std::ostream &output) const {
@@ -3213,9 +3301,6 @@ void G4_INST::emit_options(std::ostream &output) const {
   ////////////////////////////////////////////////
   // bitset options
   G4_InstOpts currOpts = option;
-  if (isEOT()) {
-    currOpts |= InstOpt_EOT;
-  }
 
   // strip out stuff we handle elsewhere
   currOpts &= ~(InstOpt_QuarterMasks | InstOpt_WriteEnable);
@@ -3399,6 +3484,7 @@ bool G4_InstSend::isDirectSplittableSend() {
   return false;
 }
 
+
 //
 // emit send instruction with symbolic/physical register operand depending on
 // the operand check
@@ -3407,37 +3493,48 @@ void G4_InstSend::emit_send(std::ostream &output) {
   emitInstructionStartColumn(output, *this);
 
   output << ' ';
-  dst->emit(output);
-
-  output << ' ';
-  G4_Operand *currSrc = srcs[0];
-  if (currSrc->isSrcRegRegion()) {
-    // only output reg var & reg off; don't output region desc and type
-    currSrc->asSrcRegRegion()->emitRegVarOff(output);
+  bool printDstType = true;
+  if (printDstType || !dst->isDstRegRegion()) {
+    dst->emit(output); // TODO use emitRegVarOff here after TGL
   } else {
-    currSrc->emit(output);
-  }
-  output << ' ';
-
-  if (isSplitSend()) {
-    // emit src1
-    srcs[1]->asSrcRegRegion()->emitRegVarOff(output);
-    output << ' ';
+    dst->asDstRegRegion()->emitRegVarOff(output);
   }
 
-  // emit exDesc if srcs[3] is not null.
-  // It should always be a0.2 unless it was constant folded
-  if (isSplitSend() && srcs[3]) {
-    srcs[3]->emit(output);
+  auto emitBareSrc =
+    [&](G4_Operand* src) {
+      if (src->isSrcRegRegion()) {
+        // only output reg var & reg off; don't output region desc and type
+        src->asSrcRegRegion()->emitRegVarOff(output);
+      } else { // BAD IR; let's see it
+        src->emit(output);
+        output << "?";
+      }
+    };
+
+  int nSrcs = getNumSrcPayloads();
+  for (int i = 0; i < nSrcs; i++) {
     output << ' ';
-  } else if (!isSplitSend() && srcs[2]) {
-    srcs[2]->emit(output); // for old unary send
-    output << ' ';
+    emitBareSrc(srcs[i]);
   }
 
-  // emit msgDesc (2 for sends and 1 for send). Last operand shown in asm.
-  int msgDescId = isSplitSend() ? 2 : 1;
-  srcs[msgDescId]->emit(output);
+  // emit descriptors for send[c] or sends[c]
+  auto emitSendDescs = [&]() {
+    // emit exDesc if srcs[3] is not null.
+    // It should always be a0.2 unless it was constant folded
+    if (isSplitSend() && srcs[3]) {
+      output << ' ';
+      srcs[3]->emit(output);
+    } else if (!isSplitSend() && srcs[2]) {
+      output << ' ';
+      srcs[2]->emit(output); // for old unary send
+    }
+    // emit msgDesc (2 for sends and 1 for send). Last operand shown in asm.
+    int msgDescIdx = getNumSrcPayloads();
+    output << ' ';
+    srcs[msgDescIdx]->emit(output);
+  };
+
+  emitSendDescs();
 
   emit_options(output);
 }
@@ -3453,34 +3550,31 @@ void G4_InstSend::emit_send_desc(std::ostream &output) {
     output << "; ";
   }
 
-  auto desc = msgDesc->getDescription();
-  if (!desc.empty()) {
-    output << msgDesc->getDescription();
-  }
+  output << msgDesc->getDescription();
 
-  if (auto immOff = sendInst->getMsgDesc()->getOffset()) {
-    int signedOff = immOff->immOff;
-    if (immOff->is2d) {
-      output << "; ImmOff=(" << fmtHex(immOff->immOffX) << " elems,"
-             << fmtHex(immOff->immOffY) << " elems)";
-    } else {
-      if (signedOff > 0) {
-        output << "; ImmOff=+" << fmtHex(signedOff);
-      } else if (signedOff < 0) {
-        output << "; ImmOff=-" << fmtHex(-signedOff);
+  if (msgDesc->isRaw()) {
+    if (auto immOff = msgDesc->getOffset()) {
+      int signedOff = immOff->immOff;
+      if (immOff->is2d) {
+        output << "; ImmOff=(" << fmtHex(immOff->immOffX) << " elems,"
+               << fmtHex(immOff->immOffY) << " elems)";
+      } else {
+        if (signedOff > 0) {
+          output << "; ImmOff=+" << fmtHex(signedOff);
+        } else if (signedOff < 0) {
+          output << "; ImmOff=-" << fmtHex(-signedOff);
+        }
       }
     }
   }
 
-  output << ", dstLen=" << msgDesc->getDstLenRegs();
+  output << "; dstLen=" << msgDesc->getDstLenRegs();
   output << ", src0Len=" << msgDesc->getSrc0LenRegs();
-  if (isSplitSend()) {
-    output << ", src1Len=" << msgDesc->getSrc1LenRegs();
-  }
+  output << ", src1Len=" << msgDesc->getSrc1LenRegs();
 
-  if (msgDesc->isBarrier()) {
-    output << ", barrier";
-  }
+  auto comments = getComments();
+  if (!comments.empty())
+    output << "; " << comments;
 }
 
 // print r#
@@ -3905,10 +3999,6 @@ static void printRegVarOff(std::ostream &output, G4_Operand *opnd,
             // ArfSubRegNum is in unit of declOpSize
             // transform ArfSubRegNum to unit of thisOpSize
             if (thisOpSize != declOpSize) {
-              if (!opnd->getInst()->isPseudoKill()) {
-                // vISA_ASSERT((ArfSubRegNum * declOpSize) % thisOpSize == 0,
-                //             ERROR_DATA_RANGE("ARF sub-register number"));
-              }
               ArfSubRegNum = (ArfSubRegNum * declOpSize) / thisOpSize;
             }
 
@@ -4032,12 +4122,12 @@ bool G4_SrcRegRegion::isScalar() const {
 }
 
 void G4_SrcRegRegion::emitRegVarOff(std::ostream &output) {
-  bool printSubReg = true;
-  if (inst && inst->isSend()) {
-    printSubReg = false;
-  }
+  bool printSubReg = !inst || !inst->isSend();
   printRegVarOff(output, this, regOff, subRegOff, immAddrOff, type,
                  printSubReg);
+}
+void G4_SrcRegRegion::emitRegVarOffNoRegion(std::ostream &output) {
+  printRegVarOff(output, this, regOff, subRegOff, immAddrOff, type, true);
 }
 
 //
@@ -4245,6 +4335,11 @@ unsigned G4_DstRegRegion::computeRightBound(uint8_t exec_size) {
             (totalBytes + builder.getGRFSize() - 1) &
             (~(builder.getGRFSize() - 1)); // GRF-aligned
         totalBytes = totalBytesDstLow * 2;
+        if (builder.getGRFSize() > 32) {
+          bitVec[1] = bitVec[0];
+        } else {
+          bitVec[0] |= bitVec[0] << 32;
+        }
       }
 
       right_bound = left_bound + totalBytes - 1;
@@ -4851,7 +4946,7 @@ G4_Declare::G4_Declare(const IR_Builder &builder, const char *n,
   doNotSpill = false;
   capableOfReuse = false;
   addrSpillFill = false;
-
+  forceSpilled = false;
   scopeID = 0;
 
   GRFOffsetFromR0 = 0;
@@ -5037,6 +5132,12 @@ void G4_Predicate::emit_body(std::ostream &output) {
       break;
     case PRED_ALLV:
       output << "allv";
+      break;
+    case PRED_ANY_WHOLE:
+      output << "any";
+      break;
+    case PRED_ALL_WHOLE:
+      output << "all";
       break;
     default:
       // do nothing
@@ -5370,22 +5471,6 @@ int64_t G4_Imm::typecastVals(int64_t value, G4_Type type) {
 G4_RegVar *G4_RegVarTransient::getNonTransientBaseRegVar() {
   G4_RegVar *base;
   for (base = getBaseRegVar(); base->isRegVarTransient();
-       base = base->getBaseRegVar())
-    ;
-  return base;
-}
-
-G4_RegVar *G4_RegVarTransient::getAbsBaseRegVar() {
-  G4_RegVar *base;
-  for (base = getBaseRegVar(); base->getBaseRegVar() != base;
-       base = base->getBaseRegVar())
-    ;
-  return base;
-}
-
-G4_RegVar *G4_RegVarTmp::getAbsBaseRegVar() {
-  G4_RegVar *base;
-  for (base = getBaseRegVar(); base->getBaseRegVar() != base;
        base = base->getBaseRegVar())
     ;
   return base;
@@ -5924,7 +6009,7 @@ uint64_t G4_Operand::getBitVecH(const IR_Builder &builder) {
     // computeRightBound also computes bitVec
     inst->computeRightBound(this);
   }
-  if (builder.getGRFSize() == 32) {
+  if (builder.getGRFSize() == 32 && inst->opcode() != G4_pln) {
     vISA_ASSERT(bitVec[1] == 0, "upper bits should be 0");
   }
   return bitVec[1];
@@ -6050,6 +6135,8 @@ void G4_INST::computeRightBound(G4_Operand *opnd) {
       opnd->computeRightBound(execSize > g4::SIMD8 ? execSize : execSize * 2);
       if (execSize > g4::SIMD8) {
         opnd->setRightBound(opnd->right_bound * 2 - opnd->getLeftBound() + 1);
+        // SIMD16 plane src1 has 4 GRFs. Set bitVec for the higher 2 GRFs.
+        opnd->bitVec[1] = opnd->bitVec[0];
       }
 
       done = true;
@@ -6219,6 +6306,19 @@ void G4_Operand::dump() const {
 #endif
 }
 
+bool G4_Operand::isPhysicallyAllocatedRegVar(bool includeAccRegSel) const {
+  if (includeAccRegSel &&
+      accRegSel != G4_AccRegSel::ACC_UNDEFINED &&
+      accRegSel != G4_AccRegSel::NOACC)
+    return true;
+  if (base) {
+    if (base->isRegVar())
+      return base->asRegVar()->isPhyRegAssigned();
+    return true; // Greg or Areg
+  }
+  return false;
+}
+
 std::ostream &operator<<(std::ostream &os, G4_Operand &opnd) {
   opnd.emit(os);
   return os;
@@ -6236,24 +6336,14 @@ void G4_INST::setPredicate(G4_Predicate *p) {
 }
 
 void G4_INST::setSrc(G4_Operand *opnd, unsigned i) {
-  if (isPseudoAddrMovIntrinsic()) {
-    asIntrinsicInst()->setIntrinsicSrc(opnd, i);
-    return;
-  }
+  vISA_ASSERT(i < srcs.size(), ERROR_INTERNAL_ARGUMENT);
 
-  vISA_ASSERT(i < G4_MAX_SRCS, ERROR_INTERNAL_ARGUMENT);
-
-  if (srcs[i] != NULL) {
-    if ((srcs[0] == srcs[i] && i != 0) || (srcs[1] == srcs[i] && i != 1) ||
-        (srcs[2] == srcs[i] && i != 2) || (srcs[3] == srcs[i] && i != 3)) {
-      // opnd is present in some other
-      // index of srcs so don't set its
-      // inst to NULL
-    } else {
-      if (srcs[i]->getInst() == this) {
-        srcs[i]->setInst(NULL);
-      }
-    }
+  // If opnd is present in some other index of srcs, don't set its inst to NULL
+  if (srcs[i] && srcs[i]->getInst() == this &&
+      std::none_of(srcs.begin(), srcs.end(), [&](G4_Operand *&src) {
+        return src == srcs[i] && (&src - &srcs.front()) != i;
+      })) {
+    srcs[i]->setInst(nullptr);
   }
 
   srcs[i] = opnd;
@@ -7176,14 +7266,13 @@ G4_INST *G4_InstSend::cloneInst(const IR_Builder *b) {
   auto prd = nonConstBuilder->duplicateOperand(getPredicate());
   auto dst = nonConstBuilder->duplicateOperand(getDst());
   auto src0 = nonConstBuilder->duplicateOperand(getSrc(0))->asSrcRegRegion();
-
   if (isSplitSend()) {
     // desc -> src2, extDesc -> src3
     auto src1 = nonConstBuilder->duplicateOperand(getSrc(1))->asSrcRegRegion();
     auto desc = nonConstBuilder->duplicateOperand(getSrc(2));
     auto extDesc = nonConstBuilder->duplicateOperand(getSrc(3));
     newInst = nonConstBuilder->createInternalSplitSendInst(
-        getExecSize(), dst, src0, src1, desc, getOption(), getMsgDesc(),
+        getExecSize(), dst, src0, src1, desc, getOption(), getMsgDescRaw(),
         extDesc);
     if (prd) {
       newInst->setPredicate(prd);
@@ -7192,93 +7281,10 @@ G4_INST *G4_InstSend::cloneInst(const IR_Builder *b) {
     auto desc = nonConstBuilder->duplicateOperand(getSrc(1));
     // desc -> src1, no extDesc (must be imm and stored in SendMsgDesc)
     newInst = nonConstBuilder->createInternalSendInst(
-        prd, op, getExecSize(), dst, src0, desc, getOption(), getMsgDesc());
+        prd, op, getExecSize(), dst, src0, desc, getOption(), getMsgDescRaw());
   }
 
   return newInst;
-}
-
-G4_InstIntrinsic::G4_InstIntrinsic(const IR_Builder &builder, G4_Predicate *prd,
-                                   Intrinsic intrinId, G4_ExecSize execSize,
-                                   G4_DstRegRegion *d, G4_Operand *s0,
-                                   G4_Operand *s1, G4_Operand *s2,
-                                   G4_Operand *s3, G4_Operand *s4,
-                                   G4_Operand *s5, G4_Operand *s6,
-                                   G4_Operand *s7, G4_InstOpts opt)
-    : G4_INST(builder, prd, G4_intrinsic, nullptr, g4::NOSAT, execSize, d,
-              nullptr, nullptr, nullptr, opt),
-      intrinsicId(intrinId), tmpGRFStart(-1), tmpAddrStart(-1),
-      tmpFlagStart(-1) {
-  srcs[0] = s0;
-  srcs[1] = s1;
-  srcs[2] = s2;
-  srcs[3] = s3;
-  srcs[4] = s4;
-  srcs[5] = s5;
-  srcs[6] = s6;
-  srcs[7] = s7;
-
-  resetRightBound(s0);
-  resetRightBound(s1);
-  resetRightBound(s2);
-  resetRightBound(s3);
-  resetRightBound(s4);
-  resetRightBound(s5);
-  resetRightBound(s6);
-  resetRightBound(s7);
-
-  associateOpndWithInst(s0, this);
-  associateOpndWithInst(s1, this);
-  associateOpndWithInst(s2, this);
-  associateOpndWithInst(s3, this);
-  associateOpndWithInst(s4, this);
-  associateOpndWithInst(s5, this);
-  associateOpndWithInst(s6, this);
-  associateOpndWithInst(s7, this);
-}
-
-G4_Operand *G4_InstIntrinsic::getIntrinsicSrc(unsigned i) const {
-  vISA_ASSERT(i < G4_MAX_INTRINSIC_SRCS, ERROR_INTERNAL_ARGUMENT);
-  return srcs[i];
-}
-
-G4_Operand *G4_InstIntrinsic::getOperand(Gen4_Operand_Number opnd_num) const {
-  switch (opnd_num) {
-  case Opnd_src0:
-    return srcs[0];
-  case Opnd_src1:
-    return srcs[1];
-  case Opnd_src2:
-    return srcs[2];
-  case Opnd_src3:
-    return srcs[3];
-  case Opnd_src4:
-    return srcs[4];
-  case Opnd_src5:
-    return srcs[5];
-  case Opnd_src6:
-    return srcs[6];
-  case Opnd_src7:
-    return srcs[7];
-  default:
-    vISA_ASSERT_UNREACHABLE("Operand number is out of range.");
-    break;
-  }
-  return NULL;
-}
-
-void G4_InstIntrinsic::setIntrinsicSrc(G4_Operand *opnd, unsigned i) {
-  vISA_ASSERT(i < G4_MAX_INTRINSIC_SRCS, ERROR_INTERNAL_ARGUMENT);
-
-  if (srcs[i] != NULL) {
-    if (srcs[i]->getInst() == (G4_INST *)this) {
-      srcs[i]->setInst(NULL);
-    }
-  }
-  srcs[i] = opnd;
-
-  associateOpndWithInst(opnd, (G4_INST *)this);
-  resetRightBound(opnd);
 }
 
 G4_INST *G4_InstIntrinsic::cloneInst(const IR_Builder *b) {
@@ -7291,8 +7297,64 @@ G4_INST *G4_InstIntrinsic::cloneInst(const IR_Builder *b) {
   auto src1 = nonConstBuilder->duplicateOperand(getSrc(1));
   auto src2 = nonConstBuilder->duplicateOperand(getSrc(2));
 
-  return nonConstBuilder->createInternalIntrinsicInst(
-      prd, getIntrinsicId(), getExecSize(), dst, src0, src1, src2, option);
+  if (!isPseudoAddrMovIntrinsic())
+    return nonConstBuilder->createInternalIntrinsicInst(
+        prd, getIntrinsicId(), getExecSize(), dst, src0, src1, src2, option);
+
+  auto src3 = nonConstBuilder->duplicateOperand(getSrc(3));
+  auto src4 = nonConstBuilder->duplicateOperand(getSrc(4));
+  auto src5 = nonConstBuilder->duplicateOperand(getSrc(5));
+  auto src6 = nonConstBuilder->duplicateOperand(getSrc(6));
+  auto src7 = nonConstBuilder->duplicateOperand(getSrc(7));
+  return nonConstBuilder->createIntrinsicAddrMovInst(getIntrinsicId(), dst,
+      src0, src1, src2, src3, src4, src5, src6, src7, false);
+}
+
+unsigned G4_InstIntrinsic::getDstByteSize() const {
+  vASSERT(getNumDst() == 1 && getDst());
+  switch (intrinsicId) {
+    case Intrinsic::NamedBarrierWA:
+    case Intrinsic::BarrierWA:
+    case Intrinsic::IEEEExceptionTrap:
+      vASSERT(getDst()->getTopDcl());
+      return getDst()->getTopDcl()->getByteSize();
+    default:
+      vISA_ASSERT(false, "Unhandled intrinsic type");
+      return 0;
+  }
+}
+
+void G4_InstIntrinsic::computeRightBound(G4_Operand *opnd) {
+  if (!opnd || opnd->isImm() || opnd->isNullReg())
+    return;
+
+  associateOpndWithInst(opnd, this);
+
+  switch (intrinsicId) {
+  case Intrinsic::NamedBarrierWA:
+  case Intrinsic::BarrierWA:
+  case Intrinsic::IEEEExceptionTrap:
+    if (opnd == getDst())
+      opnd->setRightBound(opnd->left_bound + getDstByteSize() - 1);
+    break;
+  case Intrinsic::PseudoAddrMov:
+    if (opnd != getDst()) { // Source operand only, dst operand will be handled
+                            // as normal dst
+      opnd->setLeftBound(opnd->left_bound +
+                         opnd->asAddrExp()->getOffset());
+      opnd->setRightBound(opnd->left_bound + builder.numEltPerGRF<Type_UB>() -
+                          1);
+      opnd->setBitVecFromSize(builder.numEltPerGRF<Type_UB>(), getBuilder());
+    }
+    break;
+  default:
+    break;
+  }
+  // Use the default implementation if the intrinsic does not specify how to
+  // handle its bound for the operand. The derived class may also provide an
+  // override of this function.
+  if (!opnd->isRightBoundSet())
+    G4_INST::computeRightBound(opnd);
 }
 
 static void computeSpillFillOperandBound(G4_Operand *opnd, unsigned int LB,
@@ -7587,4 +7649,21 @@ bool G4_INST::isNamedBarrierWAIntrinsic() const {
 bool G4_INST::isIEEEExceptionTrap() const {
   return isIntrinsic() &&
          asIntrinsicInst()->getIntrinsicId() == Intrinsic::IEEEExceptionTrap;
+}
+
+// In general a flag register can only be src0 for an instruction.
+// This funcion is not for general usage. It is dedicated for copy propagation,
+// for now we just limit to logic instructions.
+bool G4_INST::canSrcBeFlagForPropagation(Gen4_Operand_Number opndNum) const {
+  if (!isLogic())
+    return false;
+
+  // For non-commutative opcodes, only src0 can be flag. Otherwise, HWConformity
+  // may generate more mov instructions to fix the illegal flag reg operand.
+  // For commutative opcodes, it is fine to have flag reg on non-src0 sources as
+  // HWConformity can fix it by swapping the srouces.
+  if (!INST_COMMUTATIVE(opcode()) && opndNum != Opnd_src0)
+    return false;
+
+  return true;
 }

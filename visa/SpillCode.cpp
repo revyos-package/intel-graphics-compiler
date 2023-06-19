@@ -301,29 +301,29 @@ void SpillManager::replaceSpilledSrc(
     G4_Declare *spDcl = srcDcl->getSpilledDeclare();
     if (ss->getRegAccess() == Direct) {
       G4_SrcRegRegion *s;
-        if (inst->isSplitSend() && i == 3) {
-          G4_Declare *tmpDcl = createNewTempAddrDeclare(spDcl, 1);
-          tmpDcl->setSubRegAlign(Four_Word);
-          gra.setSubRegAlign(tmpDcl, Four_Word);
-          // (W) mov (1) tmpDcl<1>:ud spDcl<0;1,0>:ud
-          auto movSrc =
-              builder.createSrcRegRegion(spDcl, builder.getRegionScalar());
-          auto movDst = builder.createDstRegRegion(tmpDcl, 1);
-          G4_INST *movInst = builder.createMov(g4::SIMD1, movDst, movSrc,
-                                               InstOpt_WriteEnable, false);
-          bb->insertBefore(it, movInst);
+      if (inst->isSplitSend() && i == 3) {
+        G4_Declare *tmpDcl = createNewTempAddrDeclare(spDcl, 1);
+        tmpDcl->setSubRegAlign(Four_Word);
+        gra.setSubRegAlign(tmpDcl, Four_Word);
+        // (W) mov (1) tmpDcl<1>:ud spDcl<0;1,0>:ud
+        auto movSrc =
+            builder.createSrcRegRegion(spDcl, builder.getRegionScalar());
+        auto movDst = builder.createDstRegRegion(tmpDcl, 1);
+        G4_INST *movInst = builder.createMov(g4::SIMD1, movDst, movSrc,
+                                             InstOpt_WriteEnable, false);
+        bb->insertBefore(it, movInst);
 
-          if (gra.EUFusionNoMaskWANeeded()) {
-            gra.addEUFusionNoMaskWAInst(bb, movInst);
-          }
-
-          s = builder.createSrc(tmpDcl->getRegVar(), 0, 0, ss->getRegion(),
-                                spDcl->getElemType());
-          inst->setSrc(s, i);
-        } else {
-          s = builder.createSrcWithNewBase(
-              ss, spDcl->getRegVar()); // using spDcl as new base
+        if (gra.EUFusionNoMaskWANeeded()) {
+          gra.addEUFusionNoMaskWAInst(bb, movInst);
         }
+
+        s = builder.createSrc(tmpDcl->getRegVar(), 0, 0, ss->getRegion(),
+                              spDcl->getElemType());
+        inst->setSrc(s, i);
+      } else {
+        s = builder.createSrcWithNewBase(
+            ss, spDcl->getRegVar()); // using spDcl as new base
+      }
       inst->setSrc(s, i);
     } else if (ss->getRegAccess() == IndirGRF) {
       // add (2)  V124_f(0,0)<1>:f  r[V100_uw(0,0),0]<4;2,2>:f 1
@@ -360,13 +360,13 @@ void SpillManager::replaceSpilledSrc(
         tmpDcl = createNewTempAddrDeclare(spDcl, num_reg);
         operands_analyzed[i] = ss;
         declares_created[i] = tmpDcl;
-
+        bool isNoMask = (inst->getOption() & InstOpt_WriteEnable) != 0;
         //
         // generate mov Tmp(0,0)<1>  SPILL_LOC_V100(0,0)
         //
         genRegMov(bb, it, spDcl->getRegVar(), ss->getSubRegOff(),
                   tmpDcl->getRegVar(), tmpDcl->getNumElems(),
-                  builder.getPlatform() >= GENX_ICLLP ? false : true);
+                  isNoMask);
       }
 
       // create new src from the temp address variable, with offset 0

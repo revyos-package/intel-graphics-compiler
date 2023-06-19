@@ -485,6 +485,10 @@ void vISAVerifier::verifyRegion(const CISA_INST *inst, unsigned i) {
   if (ISA_Inst_Data_Port == ISA_Inst_Table[opcode].type)
     return;
 
+  // Region parameters for plane are ignored
+  if (opcode == ISA_PLANE)
+    return;
+
   vISA_ASSERT(inst->opnd_array[i]->opnd_type == CISA_OPND_VECTOR,
               "Should only be verifying region on a vector operand");
   const vector_opnd &vect = getVectorOperand(inst, i);
@@ -1768,6 +1772,11 @@ void vISAVerifier::verifyInstructionArith(const CISA_INST *inst) {
         i + ISA_Inst_Table[opcode].n_dsts); /// dst is at index 0, addc/subbb
                                             /// have two destinations
     VISA_Type srcType = getVectorOperandType(header, src);
+
+    if (!irBuilder->hasPackedRestrictedFloatVector())
+      REPORT_INSTRUCTION(options, srcType != ISA_TYPE_VF,
+                         ":vf datatype is not supported on this platform");
+
     VISA_Modifier srcModifier = src.getOperandModifier();
 
     REPORT_INSTRUCTION(
@@ -3799,11 +3808,11 @@ struct LscInstVerifier {
       switch (vo.tag & 0x7) {
       case OPERAND_IMMEDIATE:
         verify(vo.opnd_val.const_opnd._val.ival == 0,
-               "Surface: for LSC_ADDR_TYPE_FLAT only imm 0 or V0 allowed");
-        break; // okay
+               "Surface: for LSC_ADDR_TYPE_FLAT only imm 0 or %null allowed");
+        break;
       case OPERAND_GENERAL:
-          verify(vo.opnd_val.gen_opnd.index == 0,
-                 "Surface: must be null (V0) reg for LSC_ADDR_TYPE_FLAT");
+        verify(vo.opnd_val.gen_opnd.index == 0,
+               "Surface: must be %null reg for LSC_ADDR_TYPE_FLAT");
         break;
       default:
         error("Surface: invalid operand type");
@@ -3975,9 +3984,18 @@ struct LscInstVerifier {
 
     bool transpose = dataShape2D.order == LSC_DATA_ORDER_TRANSPOSE;
     bool transform = dataShape2D.vnni;
-    int cols = !transpose ? dataShape2D.width : dataShape2D.height;
-    valid &= verify(cols * dataSizeBytes <= 64, cols * dataSizeBytes,
-                    ": block2d cols * data size must be <= 64");
+    if (subOp == LSC_LOAD_BLOCK2D) {
+      valid &= verify(dataShape2D.width * dataShape2D.blocks * dataSizeBytes <= 64,
+          dataShape2D.width * dataShape2D.blocks * dataSizeBytes,
+         ": block2d width * data size must be <= 64Bytes for 2D loads");
+    }
+    else {
+      // subOp is LSC_STORE_BLOCK2D
+      valid &= verify(dataShape2D.width * dataShape2D.blocks * dataSizeBytes <= 512,
+          dataShape2D.width * dataShape2D.blocks * dataSizeBytes,
+         ": block2d width * data size must be <= 512Bytes for 2D stores");
+    }
+
     int rows = !transpose ? dataShape2D.height : dataShape2D.width;
     valid &=
         verify(rows <= 32, rows, ": block2d row count must be less than <= 32");
@@ -4046,9 +4064,9 @@ struct LscInstVerifier {
     verifyVectorOperandNotNull("SurfaceHeight", currOpIx + 3);
     verifyVectorOperandNotNull("SurfacePitch", currOpIx + 4);
     verifyVectorOperandNotNull("OffsetX", currOpIx + 5);
-    verifyVectorOperandNotNull("OffsetY", currOpIx + 6);
+    verifyVectorOperandNotNull("OffsetY", currOpIx + 7);
     //
-    verifyDataOperands(currOpIx, currOpIx + 1 + 6);
+    verifyDataOperands(currOpIx, currOpIx + 9);
   }
 
   ///////////////////////////////////////////////////////////////////////////
@@ -4215,10 +4233,11 @@ void vISAVerifier::verifyInstructionSrnd(const CISA_INST *inst) {
            src1.getOperandClass() == OPERAND_IMMEDIATE),
       "Sources in this instruction must be general or immediate");
 
-  // Verify types
-  REPORT_INSTRUCTION(
-      options, src0Type == src1Type,
-      "Src0 and src1 should have the same type for this instruction");
+  // FIXME, ISA_TYPE_F | ISA_TYPE_HF of src1 is to be WA the LIT test of VC
+  REPORT_INSTRUCTION(options,
+                     src1Type == ISA_TYPE_UW || src1Type == ISA_TYPE_UB ||
+                         src1Type == ISA_TYPE_F || src1Type == ISA_TYPE_HF,
+                     "src1 use UW/UB type");
 
   REPORT_INSTRUCTION(options,
                      (dstType == ISA_TYPE_UB && src0Type == ISA_TYPE_HF) ||

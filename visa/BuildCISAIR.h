@@ -9,6 +9,11 @@ SPDX-License-Identifier: MIT
 #ifndef _BUILDCISAIR_H_
 #define _BUILDCISAIR_H_
 
+#include "Common_ISA.h"
+#include "Common_ISA_framework.h"
+
+#include "llvm/ADT/SmallVector.h"
+
 #include <cstdint>
 #include <sstream>
 
@@ -16,7 +21,6 @@ namespace vISA {
 class Mem_Manager;
 class PlatformInfo;
 } // namespace vISA
-class CisaKernel;
 class CisaBinary;
 class VISAKernelImpl;
 class VISAFunction;
@@ -115,6 +119,12 @@ public:
   bool debugParse() const { return m_options.getOption(vISA_DebugParse); }
 
   int verifyVISAIR();
+
+  int isaDump(const char *combinedIsaasmName) const;
+
+  std::string isaDump(const VISAKernelImpl *kernel,
+                      const VISAKernelImpl *mainKernel,
+                      bool printVersion = true) const;
 
   static void cat(std::stringstream &ss) {}
   template <typename T, typename... Ts>
@@ -550,8 +560,19 @@ public:
   void CISA_push_decl_scope();
   void CISA_pop_decl_scope();
 
-  // getKernels - get all kernels and functions added into this builder
-  std::list<VISAKernelImpl *> &getKernels() { return m_kernelsAndFunctions; }
+  typedef llvm::SmallVector<VISAKernelImpl *, 8> KernelListTy;
+  KernelListTy::iterator kernel_begin() {
+    return m_kernelsAndFunctions.begin();
+  }
+  KernelListTy::iterator kernel_end() {
+      return m_kernelsAndFunctions.end();
+  }
+  KernelListTy::const_iterator kernel_begin() const {
+    return m_kernelsAndFunctions.begin();
+  }
+  KernelListTy::const_iterator kernel_end() const {
+    return m_kernelsAndFunctions.end();
+  }
 
   const VISAKernelImpl *getKernel(const std::string &name) const;
   VISAKernelImpl *getKernel(const std::string &name);
@@ -603,7 +624,7 @@ public:
       LSC_DATA_SHAPE_BLOCK2D dataShape, VISA_opnd *dstData,
       VISA_opnd
           *src0Addrs[LSC_BLOCK2D_ADDR_PARAMS], // {base,surfW,surfH,surfP,x,y}
-      VISA_opnd *src1Data, int lineNum);
+      VISA_opnd *src1Data, int xOffset, int yOffset, int lineNum);
   bool CISA_create_lsc_typed_inst(
       VISA_opnd *pred, LSC_OP opcode, LSC_SFID sfid, LSC_CACHE_OPTS caching,
       VISA_Exec_Size execSize, VISA_EMask_Ctrl emask, LSC_ADDR_TYPE addrModel,
@@ -634,7 +655,8 @@ private:
   unsigned int m_function_count = 0;
 
   // list of kernels and functions added to this builder
-  std::list<VISAKernelImpl *> m_kernelsAndFunctions;
+  KernelListTy m_kernelsAndFunctions;
+
   // for cases of several kernels/functions in one CisaBuilder
   // we need to keep a mapping of kernels to names
   // to make GetVISAKernel() work
@@ -661,17 +683,15 @@ private:
   // spill/stack size estimation. After Stitch_Compiled_Units the
   // "mainFunction" is merged with subFunctions and becomes a single
   // binary, which should also contains the functions' info of subFunctions.
-  typedef std::list<VISAKernelImpl *> VISAKernelImplListTy;
   void summarizeFunctionInfo(
-      VISAKernelImplListTy &mainFunctions,
-      VISAKernelImplListTy &subFunctions);
+      KernelListTy &mainFunctions, KernelListTy &subFunctions);
 
   vISA::G4_Kernel *GetCallerKernel(vISA::G4_INST *);
   vISA::G4_Kernel *GetCalleeKernel(vISA::G4_INST *);
 
   // To collect call related info for LinkTimeOptimization
   void CollectCallSites(
-      std::list<VISAKernelImpl *> &functions,
+      KernelListTy &functions,
       std::unordered_map<vISA::G4_Kernel *,
                          std::list<std::list<vISA::G4_INST *>::iterator>>
           &callSites,
@@ -698,7 +718,6 @@ private:
   // Remove sgInvoke functions out of function list to avoid redundant
   // compilation
   void RemoveOptimizingFunction(
-      std::list<VISAKernelImpl *> &functions,
       const std::list<std::list<vISA::G4_INST *>::iterator> &sgInvokeList);
 
   // Create callee to a set of callsites map

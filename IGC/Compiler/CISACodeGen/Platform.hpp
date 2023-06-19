@@ -702,23 +702,9 @@ bool hasPartialInt64Support() const
     return (m_platformInfo.eProductFamily == IGFX_PVC && m_platformInfo.usRevId >= REVISION_B);
 }
 
-bool hasNoInt64AddInst() const
-{
-    // to be changed for PVC-XT with Add Int64 support;
-    return hasNoFullI64Support() && !hasQWAddSupport();
-}
-
 bool hasInt64Add() const
 {
-    if (m_platformInfo.eProductFamily == IGFX_PVC
-        )
-    {
-        return hasQWAddSupport();
-    }
-    else
-    {
-        return !hasNoInt64Inst();
-    }
+    return !hasNoFullI64Support() || hasQWAddSupport();
 }
 
 bool hasFullInt64() const
@@ -790,9 +776,11 @@ bool supportRayTracing() const
     return isProductChildOf(IGFX_DG2);
 }
 
-bool isValidNumThreads(uint32_t numThreadsPerEU) const
+bool isValidNumThreads(int32_t numThreadsPerEU) const
 {
-    return numThreadsPerEU == 4 || numThreadsPerEU == 8;
+    return numThreadsPerEU == 0 // "auto" mode - use compiler heuristic
+        || numThreadsPerEU == 4
+        || numThreadsPerEU == 8;
 }
 
 bool supports3DAndCubeSampleD() const
@@ -989,8 +977,6 @@ bool supportDpaswInstruction() const
 
 // This represents the max number of logical lanes available for RT,
 // so it is not dependent on compiled SIMD size or "PreferredRayTracingSIMDSize".
-// The calculation here is: (ThreadCount / DualSubSliceCount) * 16,
-// where 16 is max current SIMD lenght for RT.
 unsigned getRTStackDSSMultiplier() const
 {
     IGC_ASSERT(supportRayTracing());
@@ -1034,6 +1020,11 @@ bool hasFusedEU() const
 {
     return m_platformInfo.eRenderCoreFamily >= IGFX_GEN12_CORE &&
         !isCoreChildOf(IGFX_XE_HPC_CORE);
+}
+
+bool requireCallWA() const
+{
+    return IGC_IS_FLAG_ENABLED(EnableCallWA) && hasFusedEU() && (getWATable().Wa_14016243945 == false);
 }
 
 bool hasPartialEmuI64Enabled() const
@@ -1174,12 +1165,9 @@ bool DSPrimitiveIDPayloadPhaseCanBeSkipped() const
 
 bool emulateByteScraterMsgForSS() const
 {
-    return (isProductChildOf(IGFX_XE_HP_SDV) &&
-        ((m_platformInfo.usRevId == 0 && m_platformInfo.eProductFamily != IGFX_DG2) ||
-            IGC_IS_FLAG_ENABLED(EnableUntypedSurfRWofSS) ||
-            (m_platformInfo.eProductFamily == IGFX_DG2 && SI_WA_BEFORE(m_platformInfo.usRevId, ACM_G10_GT_REV_ID_B0) &&
-                !GFX_IS_DG2_G11_CONFIG(m_platformInfo.usDeviceID) &&
-                !GFX_IS_DG2_G12_CONFIG(m_platformInfo.usDeviceID))));
+    return IGC_IS_FLAG_ENABLED(EnableUntypedSurfRWofSS) &&
+        isProductChildOf(IGFX_XE_HP_SDV) &&
+        !hasLSC();
 }
 
 bool has64BMediaBlockRW() const
@@ -1216,11 +1204,11 @@ bool enableSetDefaultTileYWalk() const
     if (IGC_IS_FLAG_ENABLED(EnableTileYForExperiments))
         return true;
 
-    // enable it on DG2 G10 & G12
-    bool isDG2G10G12Config =
-        GFX_IS_DG2_G10_CONFIG(m_platformInfo.usDeviceID) ||
-        GFX_IS_DG2_G12_CONFIG(m_platformInfo.usDeviceID);
-    return (supportHWGenerateTID() && isDG2G10G12Config);
+    // disable it on DG2 G11
+    if (GFX_IS_DG2_G11_CONFIG(m_platformInfo.usDeviceID))
+        return false;
+
+    return (supportHWGenerateTID());
 }
 
 // max block size for legacy OWord block messages
@@ -1406,6 +1394,7 @@ bool noNativeDwordMulSupport() const
     return m_platformInfo.eProductFamily == IGFX_BROXTON ||
         m_platformInfo.eProductFamily == IGFX_GEMINILAKE ||
         m_platformInfo.eProductFamily == IGFX_DG2 ||
+        m_platformInfo.eProductFamily == IGFX_METEORLAKE ||
         GetPlatformFamily() == IGFX_GEN11_CORE ||
         GetPlatformFamily() == IGFX_GEN12LP_CORE;
 }
@@ -1455,6 +1444,11 @@ bool limitedBCR() const
 uint32_t getMaxAddressedHWThreads() const
 {
     return 4096;
+}
+
+bool supportsNumberOfBariers() const
+{
+    return isProductChildOf(IGFX_DG2);
 }
 
 };

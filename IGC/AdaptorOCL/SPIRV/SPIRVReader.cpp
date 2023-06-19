@@ -520,19 +520,20 @@ public:
       OpDebugPtrType ptrType(inst);
 
       auto pointeeType = createType(BM->get<SPIRVExtInst>(ptrType.getBaseType()));
+      auto storageClass = ptrType.getStorageClass();
       auto flags = ptrType.getFlags();
 
       if (flags & SPIRVDebug::Flag::FlagIsLValueReference)
-          return addMDNode(inst, Builder.createReferenceType(dwarf::DW_TAG_reference_type, pointeeType, M->getDataLayout().getPointerSizeInBits()));
+          return addMDNode(inst, Builder.createReferenceType(dwarf::DW_TAG_reference_type, pointeeType, M->getDataLayout().getPointerSizeInBits(), 0, storageClass));
       else if (flags & SPIRVDebug::Flag::FlagIsRValueReference)
-          return addMDNode(inst, Builder.createReferenceType(dwarf::DW_TAG_rvalue_reference_type, pointeeType, M->getDataLayout().getPointerSizeInBits()));
+          return addMDNode(inst, Builder.createReferenceType(dwarf::DW_TAG_rvalue_reference_type, pointeeType, M->getDataLayout().getPointerSizeInBits(), 0, storageClass));
       else if (flags & SPIRVDebug::Flag::FlagIsObjectPointer)
       {
-          auto objType = Builder.createPointerType(pointeeType, M->getDataLayout().getPointerSizeInBits());
+          auto objType = Builder.createPointerType(pointeeType, M->getDataLayout().getPointerSizeInBits(), 0, storageClass);
           return addMDNode(inst, Builder.createObjectPointerType(objType));
       }
       else
-          return addMDNode(inst, Builder.createPointerType(pointeeType, M->getDataLayout().getPointerSizeInBits()));
+          return addMDNode(inst, Builder.createPointerType(pointeeType, M->getDataLayout().getPointerSizeInBits(),0,storageClass));
   }
 
   DIType* createTypeQualifier(SPIRVExtInst* inst)
@@ -3853,9 +3854,10 @@ SPIRVToLLVM::transValueWithoutDecoration(SPIRVValue *BV, Function *F,
 
   case OpSNegate: {
     SPIRVUnary *BC = static_cast<SPIRVUnary*>(BV);
-    return mapValue(BV, BinaryOperator::CreateNSWNeg(
-      transValue(BC->getOperand(0), F, BB),
-      BV->getName(), BB));
+    auto Neg = BinaryOperator::CreateNeg(transValue(BC->getOperand(0), F, BB), BV->getName(), BB);
+    if (BV->hasDecorate(DecorationNoSignedWrap))
+      Neg->setHasNoSignedWrap();
+    return mapValue(BV, Neg);
     }
 
   case OpFNegate: {
@@ -3874,7 +3876,8 @@ SPIRVToLLVM::transValueWithoutDecoration(SPIRVValue *BV, Function *F,
     }
     break;
 
-  case OpNot: {
+  case OpNot:
+  case OpLogicalNot: {
     SPIRVUnary *BC = static_cast<SPIRVUnary*>(BV);
     return mapValue(BV, BinaryOperator::CreateNot(
       transValue(BC->getOperand(0), F, BB),
@@ -4008,7 +4011,7 @@ SPIRVToLLVM::transValueWithoutDecoration(SPIRVValue *BV, Function *F,
     /* Prepare types for the call: */
     Type *RetTy      = transType(MatTy);
     Type *PtrTy      = PointerType::get(Type::getInt8Ty(*Context), AS);
-    Type *StrideTy   = Type::getInt32Ty(*Context);
+    Type *StrideTy   = Type::getInt64Ty(*Context);
     Type *LayoutTy   = Type::getInt32Ty(*Context);
 
     std::vector<Type *> ArgTys = {
@@ -4055,7 +4058,7 @@ SPIRVToLLVM::transValueWithoutDecoration(SPIRVValue *BV, Function *F,
     /* Prepare types for the call: */
     Type *MatrixTy   = transType(MatTy);
     Type *PtrTy      = PointerType::get(Type::getInt8Ty(*Context), AS);
-    Type *StrideTy   = Type::getInt32Ty(*Context);
+    Type *StrideTy   = Type::getInt64Ty(*Context);
     Type *LayoutTy   = Type::getInt32Ty(*Context);
 
     std::vector<Type *> ArgTys = {
@@ -4720,7 +4723,7 @@ static void convertAnnotaionsToAttributes(llvm::Function *F, const std::vector<s
                     ::isspace),
                 numThreadPerEU.end());
 
-            F->addFnAttr("num-thread-per-eu", numThreadPerEU);
+            F->addFnAttr("num-thread-per-eu", numThreadPerEU == "auto" ? "0" : numThreadPerEU);
         }
     }
 }

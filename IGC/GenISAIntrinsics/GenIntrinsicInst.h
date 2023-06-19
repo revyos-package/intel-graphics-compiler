@@ -1155,6 +1155,19 @@ public:
     uint32_t getDim() const {
         return (uint32_t)cast<ConstantInt>(getOperand(1))->getZExtValue();
     }
+
+    bool hasShaderType() const {
+        return isa<ConstantInt>(getOperand(2));
+    }
+
+    uint32_t getShaderType() const {
+        return (uint32_t)(cast<ConstantInt>(getOperand(2))->getZExtValue());
+    }
+
+    void setShaderType(uint32_t type) {
+        auto& C = this->getContext();
+        setOperand(2, ConstantInt::get(Type::getInt32Ty(C), type));
+    }
 };
 
 class FillValueIntrinsic : public GenIntrinsicInst {
@@ -1599,21 +1612,6 @@ public:
         auto& C = this->getContext();
         setOperand(1, ConstantInt::get(Type::getInt32Ty(C), Offset));
     }
-};
-
-class SpillAnchorIntrinsic : public GenIntrinsicInst {
-public:
-    // Methods for support type inquiry through isa, cast, and dyn_cast:
-    static inline bool classof(const GenIntrinsicInst *I) {
-        GenISAIntrinsic::ID ID = I->getIntrinsicID();
-        return ID == GenISAIntrinsic::GenISA_rt_spill_anchor;
-    }
-
-    static inline bool classof(const Value *V) {
-        return isa<GenIntrinsicInst>(V) && classof(cast<GenIntrinsicInst>(V));
-    }
-
-    Value* getValue() const { return getOperand(0); }
 };
 
 class StaticConstantPatchIntrinsic : public GenIntrinsicInst {

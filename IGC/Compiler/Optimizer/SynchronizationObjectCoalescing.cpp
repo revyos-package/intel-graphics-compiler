@@ -406,6 +406,9 @@ private:
     bool IsUntypedMemoryFenceOperationForGlobalAccess(const llvm::Instruction* pInst) const;
 
     ////////////////////////////////////////////////////////////////////////
+    bool IsUntypedMemoryLscFenceOperationForGlobalAccess(const llvm::Instruction* pInst) const;
+
+    ////////////////////////////////////////////////////////////////////////
     static bool IsTypedMemoryFenceOperation(const llvm::Instruction* pInst);
 
     ////////////////////////////////////////////////////////////////////////
@@ -468,7 +471,8 @@ bool SynchronizationObjectCoalescingAnalysis::runOnFunction(llvm::Function& F)
     const bool isModified = false; // this is only an analysis
     m_CurrentFunction = &F;
     const CodeGenContext* const ctx = getAnalysis<CodeGenContextWrapper>().getCodeGenContext();
-    m_HasIndependentSharedMemoryFenceFunctionality = ctx->platform.hasSLMFence();
+    m_HasIndependentSharedMemoryFenceFunctionality = ctx->platform.hasSLMFence() &&
+        IGC_IS_FLAG_DISABLED(DisableIndependentSharedMemoryFenceFunctionality);
     m_ShaderType = ctx->type;
     m_HasTypedMemoryFenceFunctionality = ctx->platform.hasLSC() && ctx->platform.LSCEnabled();
     m_HasUrbFenceFunctionality = ctx->platform.hasURBFence();
@@ -547,7 +551,7 @@ void SynchronizationObjectCoalescingAnalysis::FindRedundancies()
             //    instruction because of changing classification of the instruction.
 
             // identify partial redundancies for untyped memory fences
-            if (IsUntypedMemoryFenceOperationForGlobalAccess(pInst))
+            if (IsUntypedMemoryFenceOperationForGlobalAccess(pInst) || IsUntypedMemoryLscFenceOperationForGlobalAccess(pInst))
             {
                 if (IsUntypedMemoryFenceOperationWithInvalidationFunctionality(pInst))
                 {
@@ -759,12 +763,15 @@ InstructionMask SynchronizationObjectCoalescingAnalysis::GetDefaultWriteMemoryIn
     else if (IsLscFenceOperation(pSourceInst))
     {
         IGC_ASSERT(m_HasUrbFenceFunctionality);
-        IGC_ASSERT(m_HasIndependentSharedMemoryFenceFunctionality);
         switch (GetLscMem(pSourceInst))
         {
         case LSC_UGM: // .ugm
         case LSC_UGML: // .ugml
             result |= BufferWriteOperation;
+            if (!m_HasIndependentSharedMemoryFenceFunctionality)
+            {
+                result |= SharedMemoryWriteOperation;
+            }
             break;
         case LSC_TGM: // .tgm
             result |= TypedWriteOperation;
@@ -858,12 +865,15 @@ InstructionMask SynchronizationObjectCoalescingAnalysis::GetDefaultMemoryInstruc
     else if (IsLscFenceOperation(pSourceInst))
     {
         IGC_ASSERT(m_HasUrbFenceFunctionality);
-        IGC_ASSERT(m_HasIndependentSharedMemoryFenceFunctionality);
         switch (GetLscMem(pSourceInst))
         {
         case LSC_UGM: // .ugm
         case LSC_UGML: // .ugml
             result |= AtomicOperation | BufferWriteOperation | BufferReadOperation;
+            if (!m_HasIndependentSharedMemoryFenceFunctionality)
+            {
+                result |= SharedMemoryWriteOperation | SharedMemoryReadOperation;
+            }
             break;
         case LSC_TGM: // .tgm
             result |= AtomicOperation | TypedWriteOperation | TypedReadOperation;
@@ -1614,8 +1624,14 @@ bool SynchronizationObjectCoalescingAnalysis::IsSubsituteInstruction(
     else if (IsLscFenceOperation(pEvaluatedInst) && IsLscFenceOperation(pReferenceInst))
     {
         IGC_ASSERT(m_HasUrbFenceFunctionality);
-        IGC_ASSERT(m_HasIndependentSharedMemoryFenceFunctionality);
-        bool isDuplicate = GetLscMem(pEvaluatedInst) == GetLscMem(pReferenceInst);
+        LSC_SFID evalLscMemSync = GetLscMem(pEvaluatedInst);
+        LSC_SFID refLscMemSync = GetLscMem(pReferenceInst);
+        bool isEvaluatedStrongerOrEqual = evalLscMemSync == refLscMemSync;
+        if (!m_HasIndependentSharedMemoryFenceFunctionality)
+        {
+            isEvaluatedStrongerOrEqual |= evalLscMemSync == LSC_SFID::LSC_UGM && refLscMemSync == LSC_SFID::LSC_SLM;
+        }
+        bool isDuplicate = isEvaluatedStrongerOrEqual;
         isDuplicate &= GetLscScope(pEvaluatedInst) >= GetLscScope(pReferenceInst);
         LSC_FENCE_OP opEvaluated = GetLscFenceOp(pEvaluatedInst);
         LSC_FENCE_OP opReference = GetLscFenceOp(pReferenceInst);
@@ -2035,6 +2051,17 @@ bool SynchronizationObjectCoalescingAnalysis::IsUntypedMemoryFenceOperationForGl
     return IsUntypedMemoryFenceOperation(pInst) &&
         llvm::cast<llvm::ConstantInt>(pInst->getOperand(globalMemFenceArg))->getValue().getBoolValue() &&
         m_GlobalMemoryRedundancies.find(pInst) == m_GlobalMemoryRedundancies.end();
+}
+
+////////////////////////////////////////////////////////////////////////
+bool SynchronizationObjectCoalescingAnalysis::IsUntypedMemoryLscFenceOperationForGlobalAccess(const llvm::Instruction* pInst) const
+{
+    if (IsLscFenceOperation(pInst))
+    {
+        LSC_SFID mem = GetLscMem(pInst);
+        return mem == LSC_SFID::LSC_UGM || mem == LSC_SFID::LSC_UGML;
+    }
+    return false;
 }
 
 ////////////////////////////////////////////////////////////////////////
@@ -2641,6 +2668,14 @@ bool SynchronizationObjectCoalescing::runOnFunction(llvm::Function& F)
         {
             constexpr uint32_t globalMemFenceArg = 5;
             pGenIntrinsicInst->setOperand(globalMemFenceArg, llvm::ConstantInt::getFalse(pGenIntrinsicInst->getOperand(globalMemFenceArg)->getType()));
+            break;
+        }
+        case llvm::GenISAIntrinsic::GenISA_LSCFence:
+        {
+            constexpr uint32_t globalMemFenceArg = 0;
+            pGenIntrinsicInst->setOperand(globalMemFenceArg, llvm::ConstantInt::get(pGenIntrinsicInst->getOperand(globalMemFenceArg)->getType(), static_cast<uint32_t>(LSC_SFID::LSC_SLM)));
+            constexpr uint32_t scopeMemFenceArg = 1;
+            pGenIntrinsicInst->setOperand(globalMemFenceArg, llvm::ConstantInt::get(pGenIntrinsicInst->getOperand(scopeMemFenceArg)->getType(), static_cast<uint32_t>(LSC_SCOPE::LSC_SCOPE_GROUP)));
             break;
         }
         default:

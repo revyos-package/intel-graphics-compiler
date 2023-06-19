@@ -478,6 +478,9 @@ bool TranslateSPIRVToLLVM(
             llvm::StringRef(InputArgs.pOptions, InputArgs.OptionsSize));
     }
 
+    if (IGC_IS_FLAG_ENABLED(ShaderDumpTranslationOnly))
+        LLVMModule->dump();
+
     return success;
 }
 #endif // defined(IGC_SPIRV_ENABLED)
@@ -828,6 +831,17 @@ bool ProcessElfInput(
                 {
                     if (hasVISALinking)
                     {
+                        if (!Context.enableZEBinary()) {
+                            SetErrorMessage(
+                                "vISA linking can be used only with ZeBinary "
+                                "compiler output format. It seems that it is "
+                                "currently disabled for your platform. You can "
+                                "experiment with EnableZEBinary environmental "
+                                "flag to turn it on.",
+                                OutputArgs);
+                            return false;
+                        }
+
                         ShaderHash hash = ShaderHashOCL(
                             reinterpret_cast<const UINT*>(InputArgs.pInput),
                             InputArgs.InputSize / 4);
@@ -1000,6 +1014,11 @@ void RebuildGlobalAnnotations(IGC::OpenCLProgramContext& oclContext, Module* pKe
     // Remove old "llvm.global.annotations" that refers to kernels not requiring recompilation
     globalAnnotations->eraseFromParent();
 
+    if (newGlobalAnnotations.empty())
+    {
+        return;
+    }
+
     // Create new "llvm.global.annotations" that refers only to kernels that need to be recompiled
     Constant* Array =
         ConstantArray::get(ArrayType::get(newGlobalAnnotations[0]->getType(),
@@ -1168,6 +1187,7 @@ bool TranslateBuildSPMD(
     llvm::Module* pKernelModule = nullptr;
     LLVMContextWrapper* llvmContext = new LLVMContextWrapper;
     RegisterComputeErrHandlers(*llvmContext);
+    RegisterErrHandlers();
 
     if (IGC_IS_FLAG_ENABLED(ShaderDumpEnable))
     {

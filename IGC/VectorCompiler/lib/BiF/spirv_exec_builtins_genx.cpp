@@ -6,6 +6,7 @@ SPDX-License-Identifier: MIT
 
 ============================= end_copyright_notice ===========================*/
 
+#include <cm-cl/atomic.h>
 #include <cm-cl/exec.h>
 
 using namespace cm;
@@ -75,17 +76,16 @@ CM_NODEBUG CM_INLINE uint __spirv_BuiltInSubgroupMaxSize() {
 }
 
 CM_NODEBUG CM_INLINE uint __spirv_BuiltInNumSubgroups() {
-  return __spirv_BuiltInGlobalSize(0) * __spirv_BuiltInGlobalSize(1) *
-         __spirv_BuiltInGlobalSize(2);
+  return __spirv_BuiltInWorkgroupSize(0) * __spirv_BuiltInWorkgroupSize(1) *
+         __spirv_BuiltInWorkgroupSize(2);
 }
 
 CM_NODEBUG CM_INLINE uint __spirv_BuiltInNumEnqueuedSubgroups() {
-  return __spirv_BuiltInGlobalSize(0) * __spirv_BuiltInGlobalSize(1) *
-         __spirv_BuiltInGlobalSize(2);
+  return __spirv_BuiltInNumSubgroups();
 }
 
 CM_NODEBUG CM_INLINE uint __spirv_BuiltInSubgroupId() {
-  return __spirv_BuiltInGlobalLinearId();
+  return __spirv_BuiltInLocalInvocationIndex();
 }
 
 CM_NODEBUG CM_INLINE uint __spirv_BuiltInSubgroupLocalInvocationId() {
@@ -144,4 +144,21 @@ int __spirv_BuiltInGlobalHWThreadIDINTEL() {
   int SubDeviceId = __spirv_BuiltInSubDeviceIDINTEL();
   return cm::detail::__cm_cl_hw_thread_id() +
          SubDeviceId * __cm_cl_MaxHWThreadIDPerSubDevice;
+}
+
+int __vc_assert_print(__constant const char *fmt, ...);
+
+extern "C" _Noreturn CM_NODEBUG CM_INLINE void
+__devicelib_assert_fail(__generic const char *expr, __generic const char *file,
+                        int32_t line, __generic const char *func, uint64_t gid0,
+                        uint64_t gid1, uint64_t gid2, uint64_t lid0,
+                        uint64_t lid1, uint64_t lid2) {
+  __vc_assert_print("Assert called: %s.\n"
+                    "File %s, Line %u, Function %s, "
+                    "gid(%lu, %lu, %lu), lid(%lu, %lu, %lu).\n",
+                    expr, file, line, func, gid0, gid1, gid2, lid0, lid1, lid2);
+  atomic::execute<atomic::operation::store, memory_order_release,
+                  memory_scope_all_devices>(cm::detail::assert_flags(), 1u);
+  cm::detail::__cm_cl_debugtrap();
+  cm::detail::__cm_cl_trap();
 }

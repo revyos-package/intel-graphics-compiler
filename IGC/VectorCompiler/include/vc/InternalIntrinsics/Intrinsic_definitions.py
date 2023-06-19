@@ -139,4 +139,66 @@ Imported_Intrinsics = \
                          "attributes": "NoMem",
                        },
 
+## ``llvm.vc.internal.round.to.tf32`` : round float into tfloat32
+## ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+##
+## * arg0: input data, f32 scalar or vector (overloaded)
+##
+## * Return value: i32 scalar or vector (overloaded)
+##
+## This intrinsic represents float -> tfloat32 conversion operation
+    "round_to_tf32" : { "result": "anyfloat",
+                        "arguments": ["anyint"],
+                        "attributes": "NoMem",
+                      },
+
+### --------------------
+### Thread ID intrinsics
+### --------------------
+
+## ``llvm.vc.internal.logical.thread.id`` : logical global thread ID
+## ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+##
+## * Return value: i32 logical global thread ID within a gpu tile
+##
+    "logical_thread_id" : { "result": "int",
+                            "arguments": [],
+                            "attributes": "NoMem", },
+
+### ---------------------------
+### Print and assert intrinsics
+### ---------------------------
+
+## ``llvm.vc.internal.assert.buffer`` : read stateless pointer to assert buffer
+## ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+## ``llvm.vc.internal.assert.buffer`` : read implicit arg print assert ptr
+##
+## * return value: i64 address of assert buffer
+##
+    "assert_buffer" : { "result" : "long",
+                        "arguments" : [],
+                        "attributes" : "ReadMem", },
+
+## ``llvm.vc.internal.print.buffer`` : read stateless pointer to print buffer
+## ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+## ``llvm.vc.internal.print.buffer`` : read implicit arg print buffer ptr
+##
+## * return value: i64 address of print buffer
+##
+    "print_buffer" : { "result" : "long",
+                       "arguments" : [],
+                       "attributes" : "ReadMem", },
+
+## ``llvm.vc.internal.print.format.index`` : add printf format string to collection
+## ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+## ``llvm.vc.internal.print.format.index`` :  return index of printf format string
+##
+## * arg0: pointer for printf format string
+##
+## * Return value: the vector value read
+##
+    "print_format_index" : { "result" : "int",
+                             "arguments" : ["anyptr"],
+                             "attributes" : "NoMem", },
+
 }

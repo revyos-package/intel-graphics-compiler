@@ -45,11 +45,13 @@ set(CODEGEN_SOURCES
   GenXGEPLowering.cpp
   GenXGlobalValueLowering.cpp
   GenXGotoJoin.cpp
+  GenXGVClobberChecker.cpp
   GenXIMadPostLegalization.cpp
   GenXInitBiFConstants.cpp
   GenXInlineAsmLowering.cpp
   GenXIntrinsics.cpp
   GenXLegalization.cpp
+  GenXLiveElements.cpp
   GenXLiveRanges.cpp
   GenXLiveness.cpp
   GenXLoadStoreLowering.cpp
@@ -88,6 +90,7 @@ set(CODEGEN_SOURCES
   GenXVisa.cpp
   GenXVisaRegAlloc.cpp
   OCLRuntimeInfoPrinter.cpp
+  GenXGlobalUniform.cpp
 )
 
 add_library(VCCodeGen STATIC ${CODEGEN_SOURCES})

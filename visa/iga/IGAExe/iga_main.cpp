@@ -283,15 +283,15 @@ extern "C" int iga_main(int argc, const char **argv) {
       "EXAMPLES:\n"
       "  % iga -p=11 -Xdsd     0x0000010C  0x04025C01\n"
       "    decodes message info for a GEN11 descriptor on SFID (DC1)\n"
-      "  % iga -p=xe -Xdsd dc1     0x0  0x04025C01\n"
-      "  % iga -p=xe -Xdsd dc1 (8) a0.2 0x04025C01\n"
+      "  % iga -p=xe -Xdsd dc1         0x0  0x04025C01\n"
+      "  % iga -p=xe -Xdsd dc1 \"(8)\" a0.2 0x04025C01\n"
       "    decodes message info for a XE descriptor on SFID (DC1)\n"
       "    the latter illustrates with ExecSize of 8 and ExDesc of a0.2\n"
-      "  % iga -p=xehpg  -Xdsd  ugm         0x0   0x08200580\n"
-      "  % iga -p=xehpg  -Xdsd  ugm  \"(8)\"  a0.2  0x620A3484\n"
-      "  % iga -p=xehpg  -Xdsd  ugm         0x0   0x30607502\n"
-      "  % iga -p=xehpg  -Xdsd  ugm  \"(1)\"  0x0   0x0200D504\n"
-      "  % iga -p=xehpc  -Xdsd  ugm         0x0   0x30607502\n"
+      "  % iga -p=xehpg  -Xdsd  ugm           0x0   0x08200580\n"
+      "  % iga -p=xehpg  -Xdsd  ugm  \"(8)\"    a0.2  0x620A3484\n"
+      "  % iga -p=xehpg  -Xdsd  ugm           0x0   0x30607502\n"
+      "  % iga -p=xehpg  -Xdsd  ugm  \"(1)\"    0x0   0x0200D504\n"
+      "  % iga -p=xehpc  -Xdsd  ugm           0x0   0x30607502\n"
       "",
       opts::OptAttrs::ALLOW_UNSET,
       [](const char *, const opts::ErrorHandler &, Opts &baseOpts) {
@@ -391,8 +391,11 @@ extern "C" int iga_main(int argc, const char **argv) {
                   "For each instruction print the tracked registers that the "
                   "instruction modifies.",
                   opts::OptAttrs::ALLOW_UNSET, baseOpts.printDeps);
+  xGrp.defineFlag("print-jsonV1", nullptr, "prints output in JSON format",
+                  "Emits a JSON format with the assembly (c.f. IGAJSONv1.md)",
+                  opts::OptAttrs::ALLOW_UNSET, baseOpts.printJsonV1);
   xGrp.defineFlag("print-json", nullptr, "prints output in JSON format",
-                  "Emits a JSON format with the assembly (c.f. JSONFormat.md)",
+                  "Emits a JSON format with the assembly (c.f. IGAJSONv2.md)",
                   opts::OptAttrs::ALLOW_UNSET, baseOpts.printJson);
   xGrp.defineFlag("print-ldst", nullptr,
                   "enables load/store pseudo instructions where possible",
@@ -446,7 +449,11 @@ extern "C" int iga_main(int argc, const char **argv) {
                            " (use -p=...)");
     }
     return os;
-  };
+  }; // optsForFile
+
+  if (baseOpts.printJson && baseOpts.printJsonV1) {
+    fatalExitWithMessage("-Xprint-json mutually exclusive with -Xprint-jsonV1");
+  }
 
   // one of the files has an error
   bool hasError = false;

@@ -90,6 +90,7 @@ struct GenXBackendOptions {
 
   // Whether to enable finalizer dumps.
   bool EnableAsmDumps = false;
+  bool EnableIsaDumps = false;
   // Whether to enable dumps of kernel debug information
   bool EnableDebugInfoDumps = false;
   std::string DebugInfoDumpsNameOverride;
@@ -168,6 +169,9 @@ struct GenXBackendOptions {
 
   // Subgroup size used for cross-module calls/returns
   unsigned InteropSubgroupSize = 16;
+
+  // Run auxiliary checker/fixup for GV access clobbering cases.
+  bool CheckGVClobbering = false;
 
   // Compile until vISA stage only.
   bool EmitVisaOnly = false;
@@ -298,6 +302,7 @@ public:
   }
 
   bool asmDumpsEnabled() const { return Options.EnableAsmDumps; }
+  bool isaDumpsEnabled() const { return Options.EnableIsaDumps; }
   bool dbgInfoDumpsEnabled() const { return Options.EnableDebugInfoDumps; }
   const std::string &dbgInfoDumpsNameOverride() const {
     return Options.DebugInfoDumpsNameOverride;
@@ -373,6 +378,8 @@ public:
   unsigned getInteropSubgroupSize() const {
     return Options.InteropSubgroupSize;
   }
+
+  bool checkGVClobbering() const { return Options.CheckGVClobbering; }
 
   bool isHashMovsEnabled() const { return Options.EnableHashMovs; }
   bool isHashMovsAtPrologueEnabled() const {

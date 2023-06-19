@@ -8,6 +8,7 @@ SPDX-License-Identifier: MIT
 
 #ifndef DEBUG_INFO_H
 #define DEBUG_INFO_H
+#include "BuildCISAIR.h"
 #include "Common_BinaryEncoding.h"
 #include "FlowGraph.h"
 #include "GraphColor.h"
@@ -33,10 +34,10 @@ class DebugInfoState;
 
 int decodeAndDumpDebugInfo(char *filename, TARGET_PLATFORM platform);
 void emitDebugInfo(VISAKernelImpl *kernel,
-                   std::list<VISAKernelImpl *> &functions,
+                   CISA_IR_Builder::KernelListTy &functions,
                    std::string filename);
 void emitDebugInfoToMem(VISAKernelImpl *kernel,
-                        std::list<VISAKernelImpl *> &functions, void *&info,
+                        CISA_IR_Builder::KernelListTy &functions, void *&info,
                         unsigned &size);
 
 struct IDX_VDbgCisaByte2Gen {
@@ -67,7 +68,7 @@ void addCallFrameInfo(VISAKernelImpl *kernel);
 // For ranges colored during graph coloring
 void updateDebugInfo(vISA::G4_Kernel &kernel, vISA::G4_INST *inst,
                      const vISA::LivenessAnalysis &liveAnalysis,
-                     const LiveRangeVec& lrs, SparseBitSet &live,
+                     const LiveRangeVec& lrs, llvm_SBitVector &live,
                      vISA::DebugInfoState *state, bool closeAllOpenIntervals);
 // For ranges allocated by local RA
 void updateDebugInfo(vISA::G4_Kernel &kernel,
@@ -449,22 +450,22 @@ public:
 class DebugInfoState {
   // Class used to store state during RA.
 public:
-  void setPrevBitset(const SparseBitSet &b) { prevBitset = b; }
+  void setPrevBitset(const llvm_SBitVector &b) { prevBitset = b; }
   void setPrevInst(G4_INST *i) {
     if (i->getVISAId() != UNMAPPABLE_VISA_INDEX) {
       prevInst = i;
     }
   }
 
-  SparseBitSet *getPrevBitset() {
-    if (prevBitset.getSize() == 0)
+  llvm_SBitVector *getPrevBitset() {
+    if (prevBitset.empty())
       return nullptr;
     return &prevBitset;
   }
   G4_INST *getPrevInst() { return prevInst; }
 
 private:
-  SparseBitSet prevBitset;
+  llvm_SBitVector prevBitset;
   G4_INST *prevInst = nullptr;
 };
 } // namespace vISA

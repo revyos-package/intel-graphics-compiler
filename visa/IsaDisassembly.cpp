@@ -923,35 +923,39 @@ printInstructionControlFlow(const print_format_provider_t *header,
     return str;
   };
 
+  auto getUniqueSuffixStr = [](uint32_t labelID) {
+    std::stringstream uniqueSuffixSstr;
+    uniqueSuffixSstr << '_' << labelID;
+    return uniqueSuffixSstr.str();
+  };
+
   if (ISA_SUBROUTINE == opcode || ISA_LABEL == opcode) {
     label_id = getPrimitiveOperand<uint16_t>(inst, i++);
 
     sstr << "\n";
+    std::string labelName(
+        header->getString(header->getLabel(label_id)->name_index));
     switch (opcode) {
     case ISA_SUBROUTINE: {
-      std::stringstream uniqueSuffixSstr;
-      uniqueSuffixSstr << '_' << label_id;
-      std::string uniqueSuffixStr = uniqueSuffixSstr.str();
-
-      std::string labelName(
-          header->getString(header->getLabel(label_id)->name_index));
-
+      std::string uniqueSuffixStr = getUniqueSuffixStr(label_id);
       auto replacedName = replaceInvalidCharToUnderline(labelName);
+      bool printOrigName = replacedName != labelName;
+      // Avoid repeatedly appending the unique suffix.
+      if (!strEndsWith(replacedName, uniqueSuffixStr))
+        replacedName += uniqueSuffixStr;
 
-      sstr << ".function ";
-      encodeStringLiteral(sstr, (replacedName + uniqueSuffixStr).c_str());
+      sstr << "\n.function ";
+      encodeStringLiteral(sstr, replacedName.c_str());
       // add a comment to specify the original name if the name change
-      if (replacedName != labelName) {
+      if (printOrigName) {
         sstr << " /// Original Name: ";
-        encodeStringLiteral(sstr, (labelName + uniqueSuffixStr).c_str());
+        encodeStringLiteral(sstr, labelName.c_str());
       }
-      sstr << "\n\n"
-           << replaceInvalidCharToUnderline(labelName) << uniqueSuffixStr;
+      sstr << "\n" << replacedName;
       break;
     }
     case ISA_LABEL: {
-      sstr << replaceInvalidCharToUnderline(
-          header->getString(header->getLabel(label_id)->name_index));
+      sstr << replaceInvalidCharToUnderline(labelName);
       break;
     }
     default:
@@ -966,11 +970,14 @@ printInstructionControlFlow(const print_format_provider_t *header,
     const label_info_t *lblinfo = header->getLabel(label_id);
     const char *instName =
         (lblinfo->kind == LABEL_FC ? "fccall" : ISA_Inst_Table[opcode].str);
+    auto replacedName =
+        replaceInvalidCharToUnderline(header->getString(lblinfo->name_index));
+    std::string uniqueSuffixStr = getUniqueSuffixStr(label_id);
     sstr << printPredicate(opcode, inst->pred) << instName << " "
-         << printExecutionSize(opcode, inst->execsize) << " "
-         << replaceInvalidCharToUnderline(
-                header->getString(lblinfo->name_index))
-         << "_" << label_id;
+         << printExecutionSize(opcode, inst->execsize) << " " << replacedName;
+    // Avoid repeatedly appending the unique suffix.
+    if (!strEndsWith(replacedName, uniqueSuffixStr))
+      sstr << uniqueSuffixStr;
   } else {
     sstr << printPredicate(inst->opcode, inst->pred)
          << ISA_Inst_Table[opcode].str << " "
@@ -991,8 +998,8 @@ printInstructionControlFlow(const print_format_provider_t *header,
         sstr << " "
              << replaceInvalidCharToUnderline(
                     header->getString(header->getLabel(label_id)->name_index));
-        if (header->getLabel(label_id)->kind == LABEL_SUBROUTINE)
-          sstr << "_" << label_id;
+        vISA_ASSERT(header->getLabel(label_id)->kind != LABEL_SUBROUTINE,
+                    "JMP/GOTO are not allowed to have subroutine label target");
       }
 
       if (opcode == ISA_FCALL) {
@@ -1107,17 +1114,19 @@ static std::string printInstructionMisc(const print_format_provider_t *header,
     uint8_t numSrc0 = getPrimitiveOperand<uint8_t>(inst, i++);
     uint8_t numSrc1 = getPrimitiveOperand<uint8_t>(inst, i++);
     uint8_t numDst = getPrimitiveOperand<uint8_t>(inst, i++);
-    std::string opstring =
-        (modifiers & 0x1) == 1 ? "raw_sendsc." : "raw_sends.";
+
+    bool isCond = modifiers & (0x1 << 0);
+    bool issuesEoT = modifiers & (0x1 << 1);
+
+    std::string opstring = !issuesEoT && !isCond  ? "raw_sends."
+                           : issuesEoT && !isCond ? "raw_sends_eot."
+                           : !issuesEoT && isCond ? "raw_sendsc."
+                                                  : "raw_sendsc_eot.";
 
     sstr << printPredicate(inst->opcode, inst->pred) << opstring.c_str();
 
     uint8_t ffid = getPrimitiveOperand<uint8_t>(inst, i++);
     sstr << (unsigned)ffid << ".";
-
-    if (modifiers & 0x2) {
-      sstr << "eot.";
-    }
 
     sstr << (unsigned)numSrc0 << "." << (unsigned)numSrc1 << "."
          << (unsigned)numDst << " "
@@ -2531,7 +2540,7 @@ private:
       switch (vo.tag & 0x7) {
       case OPERAND_IMMEDIATE:
         ss << "0x" << std::uppercase << std::hex
-           << vo.opnd_val.const_opnd._val.ival << std::dec;
+           << vo.opnd_val.const_opnd._val.lval << std::dec;
         break;
       case OPERAND_GENERAL:
         ss << printVariableDeclName(header, vo.getOperandIndex(), opts,
@@ -2882,7 +2891,7 @@ private:
 
     // see the table below for operand indices
     auto fmtAddrOperand = [&]() {
-        formatAddrType(addrType, currOpIx);
+      formatAddrType(addrType, currOpIx);
       //
       ss << "[";
       if (immediateScale > 1) {
@@ -2979,22 +2988,36 @@ private:
     //   2 - SurfaceHeight
     //   3 - SurfacePitch
     //   4 - SurfaceOffsetX
-    //   5 - SurfaceOffsetY
-    //   6 - DataOperand
+    //   5 - x immediate offset
+    //   6 - SurfaceOffsetY
+    //   7 - y immediate offset
+    //   8 - DataOperand
     auto fmtAddrOperand = [&]() {
       ss << "flat";
       ss << "[";
       formatVectorOperand(currOpIx + 1);
-      ss << ", ";
+      ss << ",";
       formatVectorOperand(currOpIx + 2);
-      ss << ", ";
+      ss << ",";
       formatVectorOperand(currOpIx + 3);
-      ss << ", ";
+      ss << ",";
       formatVectorOperand(currOpIx + 4);
-      ss << ", ";
+      ss << ",";
       formatVectorOperand(currOpIx + 5);
-      ss << ", ";
-      formatVectorOperand(currOpIx + 6);
+      if ((int)getPrimitive<int16_t>(currOpIx + 6) != 0) {
+        if ((int)getPrimitive<int16_t>(currOpIx+6) > 0) {
+          ss << "+";
+        }
+        ss << (int)getPrimitive<int16_t>(currOpIx+6);
+      }
+      ss << ",";
+      formatVectorOperand(currOpIx + 7);
+      if ((int)getPrimitive<int16_t>(currOpIx+8) != 0) {
+        if ((int)getPrimitive<int16_t>(currOpIx+8) > 0) {
+          ss << "+";
+        }
+        ss << (int)getPrimitive<int16_t>(currOpIx+8);
+      }
       ss << "]";
     };
 
@@ -3005,7 +3028,7 @@ private:
     } else {
       fmtAddrOperand();
       ss << "  ";
-      formatDataOperand(currOpIx + 7);
+      formatDataOperand(currOpIx + 9);
     }
   } // formatUntypedBlock2D
 
@@ -3043,15 +3066,15 @@ private:
           // +2 skip surface and dst
           const raw_opnd &ro = getRawOperand(inst, currOpIx + 2 + i);
           auto reg =
-              printVariableDeclName(header, ro.index, opts, NOT_A_STATE_OPND);
+            printVariableDeclName(header, ro.index, opts, NOT_A_STATE_OPND);
           // TODO: for null operands, printVariableDeclName with
           // NOT_A_STATE_OPND will return %null and not V0
           // Should this be changed to return V0 for null operands?
-          if (reg == "V0")
+          if (reg == "%null")
             break;
           if (i > 0)
-            ss << ", ";
-          ss << reg;
+            ss << ",";
+          formatRawOperand(currOpIx + 2 + i);
         }
       }
       ss << "]";
@@ -3142,21 +3165,28 @@ static std::string printInstructionLsc(ISA_Opcode opcode,
   LscInstFormatter formatter(opcode, header, inst, opt);
   return formatter.format();
 }
-std::string VISAKernel_format_provider::printKernelHeader(
-    const common_isa_header &isaHeader) {
+
+std::string VISAKernel_format_provider::printKernelHeader(bool printVersion) {
   std::stringstream sstr;
 
   bool isKernel = m_kernel->getIsKernel();
+  auto builder = m_kernel->getCISABuilder();
 
-  sstr << printBuildVersion(isaHeader) << "\n";
+  if (printVersion)
+    sstr << printBuildVersion(builder->m_header) << "\n";
   sstr << printFunctionDecl(this, isKernel) << "\n";
 
-  // Print all functions in the same object
+  // Print all functions in the same vISA builder. This is just for
+  // informational purposes and does not affect codegen.
   if (isKernel) {
-    for (unsigned i = 0; i < isaHeader.num_functions; i++) {
-      sstr << ".funcdecl ";
-      encodeStringLiteral(sstr, isaHeader.functions[i].name);
-      sstr << "\n";
+    for (auto Iter = builder->kernel_begin(), IterEnd = builder->kernel_end();
+         Iter != IterEnd; ++Iter) {
+      auto KorF = *Iter;
+      if (!KorF->getIsKernel()) {
+        sstr << ".funcdecl ";
+        encodeStringLiteral(sstr, KorF->getName());
+        sstr << "\n";
+      }
     }
   }
 

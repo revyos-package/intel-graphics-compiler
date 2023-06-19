@@ -13,6 +13,109 @@ SPDX-License-Identifier: MIT
 
 using namespace vISA;
 
+static MsgOp ConvertLSCOpToMsgOp(LSC_OP op) {
+  switch (op) {
+  case LSC_OP::LSC_LOAD:
+    return MsgOp::LOAD;
+  case LSC_OP::LSC_LOAD_STRIDED:
+    return MsgOp::LOAD_STRIDED;
+  case LSC_OP::LSC_LOAD_QUAD:
+    return MsgOp::LOAD_QUAD;
+  case LSC_OP::LSC_LOAD_BLOCK2D:
+    return MsgOp::LOAD_BLOCK2D;
+  case LSC_OP::LSC_LOAD_STATUS:
+    return MsgOp::LOAD_STATUS;
+  case LSC_OP::LSC_STORE:
+    return MsgOp::STORE;
+  case LSC_OP::LSC_STORE_STRIDED:
+    return MsgOp::STORE_STRIDED;
+  case LSC_OP::LSC_STORE_QUAD:
+    return MsgOp::STORE_QUAD;
+  case LSC_OP::LSC_STORE_BLOCK2D:
+    return MsgOp::STORE_BLOCK2D;
+  //
+  case LSC_OP::LSC_ATOMIC_IINC:
+    return MsgOp::ATOMIC_IINC;
+  case LSC_OP::LSC_ATOMIC_IDEC:
+    return MsgOp::ATOMIC_IDEC;
+  case LSC_OP::LSC_ATOMIC_LOAD:
+    return MsgOp::ATOMIC_LOAD;
+  case LSC_OP::LSC_ATOMIC_STORE:
+    return MsgOp::ATOMIC_STORE;
+  //
+  case LSC_OP::LSC_ATOMIC_IADD:
+    return MsgOp::ATOMIC_IADD;
+  case LSC_OP::LSC_ATOMIC_ISUB:
+    return MsgOp::ATOMIC_ISUB;
+  //
+  case LSC_OP::LSC_ATOMIC_SMIN:
+    return MsgOp::ATOMIC_SMIN;
+  case LSC_OP::LSC_ATOMIC_SMAX:
+    return MsgOp::ATOMIC_SMAX;
+  case LSC_OP::LSC_ATOMIC_UMIN:
+    return MsgOp::ATOMIC_UMIN;
+  case LSC_OP::LSC_ATOMIC_UMAX:
+    return MsgOp::ATOMIC_UMAX;
+  //
+  case LSC_OP::LSC_ATOMIC_ICAS:
+    return MsgOp::ATOMIC_ICAS;
+  case LSC_OP::LSC_ATOMIC_FADD:
+    return MsgOp::ATOMIC_FADD;
+  case LSC_OP::LSC_ATOMIC_FSUB:
+    return MsgOp::ATOMIC_FSUB;
+  case LSC_OP::LSC_ATOMIC_FMIN:
+    return MsgOp::ATOMIC_FMIN;
+  case LSC_OP::LSC_ATOMIC_FMAX:
+    return MsgOp::ATOMIC_FMAX;
+  case LSC_OP::LSC_ATOMIC_FCAS:
+    return MsgOp::ATOMIC_FCAS;
+  //
+  case LSC_OP::LSC_ATOMIC_AND:
+    return MsgOp::ATOMIC_AND;
+  case LSC_OP::LSC_ATOMIC_XOR:
+    return MsgOp::ATOMIC_XOR;
+  case LSC_OP::LSC_ATOMIC_OR:
+    return MsgOp::ATOMIC_OR;
+  case LSC_OP::LSC_FENCE:
+    return MsgOp::FENCE;
+  default:
+    return MsgOp::INVALID;
+  }
+}
+
+static DataSize ConvertLSCDataSize(LSC_DATA_SIZE ds) {
+  switch (ds) {
+  case LSC_DATA_SIZE_8b:
+    return DataSize::D8;
+  case LSC_DATA_SIZE_16b:
+    return DataSize::D16;
+  case LSC_DATA_SIZE_32b:
+    return DataSize::D32;
+  case LSC_DATA_SIZE_64b:
+    return DataSize::D64;
+  case LSC_DATA_SIZE_8c32b:
+    return DataSize::D8U32;
+  case LSC_DATA_SIZE_16c32b:
+    return DataSize::D16U32;
+  default:
+    vISA_ASSERT_UNREACHABLE("invalid data size");
+  }
+  return DataSize::INVALID;
+}
+
+static DataOrder ConvertLSCDataOrder(LSC_DATA_ORDER dord, bool vnni = false) {
+  switch (dord) {
+  case LSC_DATA_ORDER_NONTRANSPOSE:
+    return vnni ? DataOrder::VNNI : DataOrder::NONTRANSPOSE;
+  case LSC_DATA_ORDER_TRANSPOSE:
+    return vnni ? DataOrder::TRANSPOSE_VNNI : DataOrder::TRANSPOSE;
+  default:
+    vISA_ASSERT_UNREACHABLE("invalid data order");
+  }
+  return DataOrder::INVALID;
+}
+
+
 G4_ExecSize IR_Builder::lscMinExecSize(LSC_SFID lscSfid) const {
   const TARGET_PLATFORM P = getPlatform();
   uint32_t minExecSize = ((P == Xe_DG2 || P == Xe_MTL) ? 8 : 16);
@@ -21,6 +124,57 @@ G4_ExecSize IR_Builder::lscMinExecSize(LSC_SFID lscSfid) const {
     minExecSize *= 2;
   }
   return G4_ExecSize(minExecSize);
+}
+
+static VecElems ConvertLSCDataElems(LSC_DATA_ELEMS de) {
+  switch (de) {
+  case LSC_DATA_ELEMS_1:
+    return VecElems::V1;
+  case LSC_DATA_ELEMS_2:
+    return VecElems::V2;
+  case LSC_DATA_ELEMS_3:
+    return VecElems::V3;
+  case LSC_DATA_ELEMS_4:
+    return VecElems::V4;
+  case LSC_DATA_ELEMS_8:
+    return VecElems::V8;
+  case LSC_DATA_ELEMS_16:
+    return VecElems::V16;
+  case LSC_DATA_ELEMS_32:
+    return VecElems::V32;
+  case LSC_DATA_ELEMS_64:
+    return VecElems::V64;
+  default:
+    vISA_ASSERT_UNREACHABLE("number of data elements");
+  }
+  return VecElems::INVALID;
+}
+
+
+static Caching ConvertLSCCacheOpt(LSC_CACHE_OPT co) {
+  switch (co) {
+  case LSC_CACHING_DEFAULT:
+    return Caching::DF;
+  case LSC_CACHING_UNCACHED:
+    return Caching::UC;
+  case LSC_CACHING_CACHED:
+    return Caching::CA;
+  case LSC_CACHING_WRITEBACK:
+    return Caching::WB;
+  case LSC_CACHING_WRITETHROUGH:
+    return Caching::WT;
+  case LSC_CACHING_STREAMING:
+    return Caching::ST;
+  case LSC_CACHING_READINVALIDATE:
+    return Caching::RI;
+  default:
+    vISA_ASSERT_UNREACHABLE("invalid caching");
+  }
+  return Caching::INVALID;
+}
+static std::pair<Caching, Caching> ConvertLSCCacheOpts(LSC_CACHE_OPT col1,
+                                                       LSC_CACHE_OPT col3) {
+  return std::make_pair(ConvertLSCCacheOpt(col1), ConvertLSCCacheOpt(col3));
 }
 
 static G4_Operand *lscTryPromoteSurfaceImmToExDesc(G4_Operand *surface,
@@ -116,6 +270,16 @@ int IR_Builder::translateLscUntypedInst(
     }
   };
 
+  // This enforces a64 payloads to have .decl type Q/UQ
+  // and a32* to have D/UD.
+  // Later changes will attempt to uncomment this and enforce the change.
+  //
+  vISA_ASSERT_INPUT(addrInfo.size != LSC_ADDR_SIZE_64b ||
+                    IS_QTYPE(src0Addr->getType()),
+                    ":a64 expects Q/UQ");
+  vISA_ASSERT_INPUT(addrInfo.size != LSC_ADDR_SIZE_32b ||
+                    IS_DTYPE(src0Addr->getType()), ":a32* expects D/UD");
+
   const G4_ExecSize execSize = toExecSize(visaExecSize);
   const G4_InstOpts instOpt = Get_Gen4_Emask(execCtrl, execSize);
 
@@ -123,31 +287,34 @@ int IR_Builder::translateLscUntypedInst(
 
   if (addrInfo.type == LSC_ADDR_TYPE_ARG) {
     // Translate argument loads to platform specific logic
+    // loads via base bti[255][r0[31:6]]
+    // (BTI 255 with :a32 is relative to the General State Base Address)
     vISA_ASSERT_INPUT(addrInfo.size == LSC_ADDR_SIZE_32b,
-                 "lsc_load... arg[...] must be :a32");
+                      "lsc_load... arg[...] must be :a32");
     //
-    // (W)  and (1) TMP0:ud   r0.0:ud  0xFFFFFFC0:ud
-    // (W)  add (1) TMP1:ud   TMP0:ud  src0Addr:ud
-    // ... load.ugm.a32... bti[255][TMP]
+    // (W) and (1)        TMP0:ud   r0.0:ud  0xFFFFFFC0:ud
+    // (W) add (ExecSize) TMP1:ud   TMP0:ud  src0Addr:ud
+    // ... load.ugm.a32... (ExecSize) bti[255][TMP1]
     G4_Declare *argBase = createTempVar(1, Type_UD, Even_Word);
     auto andDst = createDst(argBase->getRegVar(), 0, 0, 1, Type_UD);
     auto andSrc0 = createSrc(getBuiltinR0()->getRegVar(), 0, 0,
                              getRegionScalar(), Type_UD);
-    auto andSrc1 = createImm(0xFFFFFFC0, Type_UD);
-    (void)createBinOp(G4_and, g4::SIMD1, andDst, andSrc0, andSrc1,
+    (void)createBinOp(G4_and, g4::SIMD1, andDst, andSrc0,
+                      createImm(0xFFFFFFC0, Type_UD),
                       InstOpt_WriteEnable, true);
-    auto addDst = createDst(src0Addr->getBase(), src0Addr->getRegOff(),
-                            src0Addr->getSubRegOff(), 1, Type_UD);
-    auto addSrc0 = createSrc(src0Addr->getBase(), src0Addr->getRegOff(),
-                             src0Addr->getSubRegOff(), src0Addr->getRegion(),
-                             src0Addr->getType());
-    auto addSrc1 =
-        createSrc(argBase->getRegVar(), 0, 0, getRegionScalar(), Type_UD);
-    (void)createBinOp(G4_add, g4::SIMD1, addDst, addSrc0, addSrc1,
-                      InstOpt_WriteEnable, true);
+    auto tmpAddrs = createTempVar(int(execSize), Type_UD, getGRFAlign());
+    auto addDst = createDst(tmpAddrs->getRegVar(), 0, 0, 1, Type_UD);
+    auto addSrc0 =
+      createSrc(argBase->getRegVar(), 0, 0, getRegionScalar(), Type_UD);
+    (void)createBinOp(G4_add, execSize, addDst, addSrc0, src0Addr,
+                      instOpt, true);
     //
     addrInfo.type = LSC_ADDR_TYPE_BTI;
+
     surface = createImm(0xFF, Type_UD);
+
+    src0Addr =
+      createSrc(tmpAddrs->getRegVar(), 0, 0, getRegionStride1(), Type_UD);
   }
 
   SFID sfid = SFID::NULL_SFID;
@@ -331,15 +498,15 @@ int IR_Builder::translateLscUntypedInst(
   } else if (opInfo.isAtomic()) {
     if (opInfo.extraOperands == 0) { // e.g. lsc_atomic_iinc
       check(isNullOperand(src1Data) && isNullOperand(src2Data),
-            "atmoic unary must have null src1 and src2");
+            "atomic unary must have null src1 and src2");
     } else if (opInfo.extraOperands == 1) { // e.g. lsc_atomic_add
       check(!isNullOperand(src1Data) && isNullOperand(src2Data),
-            "atmoic binary must have non-null src1 and null src2");
+            "atomic binary must have non-null src1 and null src2");
     } else {
       // lsc_atomic_icas/lsc_atomic_fcas: coalesce parmeters into one
       check(!isNullOperand(src1Data) && !isNullOperand(src2Data),
-            "atmoic ternary must have non-null src1 and src2");
-      src1Data = coalescePayload(BYTES_PER_REG, BYTES_PER_REG,
+            "atomic ternary must have non-null src1 and src2");
+      src1Data = coalescePayload(pred, BYTES_PER_REG, BYTES_PER_REG,
                                  std::max(minExecSize, execSize), execSize,
                                  {src1Data, src2Data}, execCtrl);
     }
@@ -464,7 +631,7 @@ int IR_Builder::translateLscUntypedBlock2DInst(
     G4_DstRegRegion *dstRead, // dst can be NULL reg (e.g store)
     G4_Operand *src0Addrs[LSC_BLOCK2D_ADDR_PARAMS], // always the addresses
     G4_SrcRegRegion *src1Data                       // store data
-) {
+){
   TIME_SCOPE(VISA_BUILDER_IR_CONSTRUCTION);
 
   int status = VISA_SUCCESS;
@@ -474,6 +641,27 @@ int IR_Builder::translateLscUntypedBlock2DInst(
       status = VISA_FAILURE;
     }
   };
+
+  if (dataShape2D.order == LSC_DATA_ORDER_TRANSPOSE) {
+    switch (dataShape2D.size) {
+    case LSC_DATA_SIZE_8b:
+      check (false, "d8 not supported");
+      break;
+    case LSC_DATA_SIZE_16b:
+      check (false, "d16 not supported");
+      break;
+    case LSC_DATA_SIZE_32b:
+      check (dataShape2D.width <= 16 && dataShape2D.height <= 32,
+          "for d32, width <= 16 and height <= 32 elements");
+      break;
+    case LSC_DATA_SIZE_64b:
+      check (dataShape2D.width <= 4 && dataShape2D.height == 8,
+          "for d64, width <= 8 and height <= 32 elements");
+      break;
+    default:
+      check(false, "invalid data type");
+    }
+  }
 
   const auto opInfo = LscOpInfoGet(op);
   vISA_ASSERT_INPUT(opInfo.isBlock2D(), "not an LSC block2d op");
@@ -498,8 +686,6 @@ int IR_Builder::translateLscUntypedBlock2DInst(
   default:
     vISA_ASSERT_UNREACHABLE("invalid SFID for untyped block2d LSC message");
   }
-
-
   // send descriptor
   uint32_t desc = 0;
   uint32_t exDesc = 0;
@@ -552,6 +738,54 @@ int IR_Builder::translateLscUntypedBlock2DInst(
   return status;
 }
 
+// return (dst,src1)
+static std::pair<uint32_t,uint32_t> computeLscTypedDataRegs(
+  IR_Builder &irb,
+  const LscOpInfo &opInfo,
+  G4_ExecSize execSize,
+  int dataSizeBits,
+  bool dstIsNull,
+  int chMask)
+{
+  int numChannels = 0;
+  if (opInfo.hasChMask()) {
+    for (auto LSC_CH : {LSC_DATA_CHMASK_X, LSC_DATA_CHMASK_Y,
+                        LSC_DATA_CHMASK_Z, LSC_DATA_CHMASK_W})
+    {
+      if (chMask & LSC_CH)
+        numChannels++;
+    }
+  } else {
+    // atomics are single channel
+    numChannels = 1;
+  }
+
+  const int BYTES_PER_GRF = irb.getGRFSize();
+  const int regsPerDataChannel =
+      std::max<int>(1, dataSizeBits * (int)execSize / 8 / BYTES_PER_GRF);
+  const uint32_t dataRegs = regsPerDataChannel * numChannels;
+
+  uint32_t dstRegs = 0;
+  if (dstIsNull) {
+    dstRegs = 0; // atomic with no return or load to %null
+  } else if (opInfo.isOneOf(LSC_LOAD_STATUS, LSC_READ_STATE_INFO)) {
+    dstRegs = 1; // special cases that load an opaque register
+  } else if (opInfo.isLoad() || opInfo.isAtomic()) {
+    dstRegs = dataRegs; // normal things that load
+  } else { // store
+    dstRegs = 0;
+  }
+  uint32_t src1Len = 0;
+  if (opInfo.isStore()) {
+    src1Len = dataRegs;
+  } else if (opInfo.isAtomic()) {
+    src1Len = dataRegs * opInfo.extraOperands;
+  } else { // load
+    src1Len= 0;
+  }
+  return std::make_pair(dstRegs, src1Len);
+}
+
 int IR_Builder::translateLscTypedInst(
     LSC_OP op, G4_Predicate *pred, VISA_Exec_Size execSizeEnum,
     VISA_EMask_Ctrl emask, LSC_CACHE_OPTS cacheOpts, LSC_ADDR_TYPE addrModel,
@@ -580,16 +814,15 @@ int IR_Builder::translateLscTypedInst(
   G4_SrcRegRegion *srcAddrs[2]{};
   G4_SrcRegRegion *srcData = nullptr;
   unsigned srcAddrRegs[2]{};
-  unsigned srcDataRegs = 0;
-  uint32_t dstDataRegs = 0;
+
 
   auto checkPayloadSize = [&](const char *which, const G4_Declare *decl,
                               int expectDeclRegs) {
     int dclRegs = std::max<int>(1, decl->getTotalElems() * decl->getElemSize() /
                                        BYTES_PER_GRF);
-    // if (expectDeclRegs != dclRegs)
-    // TODO: need to fix issue with IGC codegen using offsets
-    // in raw vars
+    // (expectDeclRegs != dclRegs)
+    // cannot expect equality; the declaration could be a raw variable
+    // with consisting of an offset into a bigger block
     if (expectDeclRegs > dclRegs) {
       std::stringstream ss;
       ss << which << " .decl size ";
@@ -618,7 +851,7 @@ int IR_Builder::translateLscTypedInst(
   checkAddrPayloadSize("src0AddrVs", coord1s);
   checkAddrPayloadSize("src0AddrRs", coord2s);
 
-  if (opInfo.op == LSC_READ_STATE_INFO) {
+  if (opInfo.is(LSC_READ_STATE_INFO)) {
     // like fences, send requires *something* (at least one reg) to be
     // sent out; we pick the initial r0 value since it's known to
     // be floating around somewhere until EOT
@@ -642,84 +875,34 @@ int IR_Builder::translateLscTypedInst(
     vISA_ASSERT_INPUT(srcAddrRegs[0] < 32, "too many address registers");
 
     // each channel consumes at least one register (top padding may be 0)
-    srcData = coalescePayload(BYTES_PER_GRF, BYTES_PER_GRF,
+    srcData = coalescePayload(pred, BYTES_PER_GRF, BYTES_PER_GRF,
                               std::max(getNativeExecSize(), execSize), execSize,
                               {src1Data, src2Data}, emask);
   }
   surface = lscTryPromoteSurfaceImmToExDesc(surface, addrModel, exDesc);
 
-  int numChannels = 0;
   if (opInfo.hasChMask()) {
-    if (shape.chmask & LSC_DATA_CHMASK_X) {
-      desc |= 1 << 12;
-      numChannels++;
-    }
-    if (shape.chmask & LSC_DATA_CHMASK_Y) {
-      desc |= 1 << 13;
-      numChannels++;
-    }
-    if (shape.chmask & LSC_DATA_CHMASK_Z) {
-      desc |= 1 << 14;
-      numChannels++;
-    }
-    if (shape.chmask & LSC_DATA_CHMASK_W) {
-      desc |= 1 << 15;
-      numChannels++;
-    }
-    vISA_ASSERT_INPUT(numChannels != 0, "empty channel mask");
-  } else {
-    // atomics are single channel
-    numChannels = 1;
-  }
+    desc |= (shape.chmask & 0xF) << 12;
+    vISA_ASSERT_INPUT(shape.chmask & 0xF, "empty channel mask");
+  } // tgm atomics are single channel
+
   int addrSizeBits = lscEncodeAddrSize(addrSize, desc, status);
   int dataSizeBits = lscEncodeDataSize(shape.size, desc, status);
   (void)addrSizeBits;
-  (void)dataSizeBits;
 
   lscEncodeCachingOpts(opInfo, cacheOpts, desc, status); // Desc[19:17]
   lscEncodeAddrType(addrModel, desc, status);
 
-  if (opInfo.op != LSC_READ_STATE_INFO) {
-    const int regsPerDataChannel =
-        std::max<int>(1, dataSizeBits * (int)execSize / 8 / BYTES_PER_GRF);
-    auto checkDataDeclSize = [&](const char *which, const G4_Operand *data) {
-      if (data == nullptr || data->isNullReg()) {
-        return;
-      }
-      const G4_Declare *decl = getDeclare(data);
-      checkPayloadSize(which, decl, regsPerDataChannel * numChannels);
-    };
-    checkDataDeclSize("dstData", dstData);
-    checkDataDeclSize("src1Data", src1Data);
-    checkDataDeclSize("src2Data", src2Data);
-
-    srcDataRegs = 0;
-    if (!srcData->isNullReg()) {
-      const G4_Declare *srcDcl = getDeclare(srcData);
-      srcDataRegs =
-          srcDcl->getTotalElems() * srcDcl->getElemSize() / BYTES_PER_GRF;
-    }
-    dstDataRegs =
-        opInfo.isLoad() || (opInfo.isAtomic() && !dstData->isNullReg())
-            ? regsPerDataChannel * numChannels
-            : 0;
-  }
-  int src1Len = (int)srcDataRegs; // lsc_load_quad.tgm / lsc_atomic_icas.tgm
-
-  if (op == LSC_OP::LSC_LOAD_STATUS || op == LSC_OP::LSC_READ_STATE_INFO) {
-    dstDataRegs = 1; // just a single DW of bits (padded to 1 reg)
-  }
-  // vISA_ASSERT_INPUT(dataSrcsRegs == dataRegs, "mismatch in .decls for "
-  //     "number of data registers in actual message");
-  vISA_ASSERT_INPUT(srcDataRegs < 32, "too many data registers");
+  auto [dstRegs,src1Len] =
+    computeLscTypedDataRegs(
+      *this, opInfo, execSize, dataSizeBits,
+      dstData == nullptr || dstData->isNullReg(), shape.chmask);
 
   desc |= (srcAddrRegs[0] & 0xF) << 25; // mlen == Desc[28:25]
-  if (opInfo.isLoad() || (opInfo.isAtomic() && !dstData->isNullReg())) {
-    desc |= (dstDataRegs & 0x1F) << 20; // rlen == Desc[24:20]
-  }
+  desc |= (dstRegs & 0x1F) << 20; // rlen == Desc[24:20]
 
   G4_SendDescRaw *msgDesc =
-      createLscDesc(SFID::TGM, desc, exDesc, src1Len,
+      createLscDesc(SFID::TGM, desc, exDesc, (int)src1Len,
                     getSendAccessType(opInfo.isLoad(), opInfo.isStore()),
                     surface, LdStAttrs::NONE);
   G4_InstSend *sendInst =

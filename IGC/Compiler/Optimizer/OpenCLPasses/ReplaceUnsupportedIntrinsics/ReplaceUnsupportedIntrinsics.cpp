@@ -1,6 +1,6 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (C) 2017-2021 Intel Corporation
+Copyright (C) 2017-2023 Intel Corporation
 
 SPDX-License-Identifier: MIT
 
@@ -107,6 +107,7 @@ namespace
         void replaceExpect(IntrinsicInst* I);
         void replaceFunnelShift(IntrinsicInst* I);
         void replaceLRound(IntrinsicInst* I);
+        void replaceLRint(IntrinsicInst* I);
         void replaceCountTheLeadingZeros(IntrinsicInst* I);
 
         static const std::map< Intrinsic::ID, MemFuncPtr_t > m_intrinsicToFunc;
@@ -134,6 +135,8 @@ const std::map< Intrinsic::ID, ReplaceUnsupportedIntrinsics::MemFuncPtr_t > Repl
     { Intrinsic::expect,     &ReplaceUnsupportedIntrinsics::replaceExpect },
     { Intrinsic::lround,     &ReplaceUnsupportedIntrinsics::replaceLRound },
     { Intrinsic::llround,    &ReplaceUnsupportedIntrinsics::replaceLRound },
+    { Intrinsic::lrint,      &ReplaceUnsupportedIntrinsics::replaceLRint },
+    { Intrinsic::llrint,     &ReplaceUnsupportedIntrinsics::replaceLRint },
     { Intrinsic::ctlz,       &ReplaceUnsupportedIntrinsics::replaceCountTheLeadingZeros }
 };
 
@@ -526,9 +529,8 @@ void ReplaceUnsupportedIntrinsics::replaceMemcpy(IntrinsicInst* I)
             Align = adjust_align < Align ? adjust_align : Align;
             SrcAlign = adjust_align < SrcAlign ? adjust_align : SrcAlign;
 
-            // If NewCount is less than 6,  don't generate loop.
-            // Note that 6 is just an arbitrary number here.
-            if (NewCount < 6)
+            // If NewCount is less than the threshold, don't generate loop.
+            if (NewCount < IGC_GET_FLAG_VALUE(MemCpyLoweringUnrollThreshold))
             {
                 for (unsigned i = 0; i < NewCount; ++i)
                 {
@@ -720,11 +722,10 @@ void ReplaceUnsupportedIntrinsics::replaceMemMove(IntrinsicInst* I)
             // now emit the <8 x i32> stores
             auto* vSrc = B.CreateBitCast(SkipBitCast(Src), PointerType::get(VecTys[0], SrcAS), "memcpy_vsrc");
             auto* vDst = B.CreateBitCast(SkipBitCast(Dst), PointerType::get(VecTys[0], DstAS), "memcpy_vdst");
-            // If NewCount is less than 6,  don't generate loop.
-            // Note that 6 is just an arbitrary number here.
+            // If NewCount is less than the threshold, don't generate loop.
             uint32_t SZ = (unsigned int)(VecTys[0]->getPrimitiveSizeInBits() / 8);
             uint32_t newAlign = getLargestPowerOfTwo(Align + SZ);
-            if (NewCount < 6)
+            if (NewCount < IGC_GET_FLAG_VALUE(MemCpyLoweringUnrollThreshold))
             {
                 for (unsigned i = 0; i < NewCount; i++)
                 {
@@ -826,9 +827,8 @@ void ReplaceUnsupportedIntrinsics::replaceMemset(IntrinsicInst* I)
             uint32_t adjust_align = getLargestPowerOfTwo(SZ);
             Align = adjust_align < Align ? adjust_align : Align;
 
-            // If NewCount is less than 6,  don't generate loop.
-            // Note that 6 is just an arbitrary number here.
-            if (NewCount < 6)
+            // If NewCount is less than the threshold, don't generate loop.
+            if (NewCount < IGC_GET_FLAG_VALUE(MemCpyLoweringUnrollThreshold))
             {
                 for (unsigned i = 0; i < NewCount; ++i)
                 {
@@ -987,6 +987,32 @@ void ReplaceUnsupportedIntrinsics::replaceLRound(IntrinsicInst* I) {
     Value* add = Builder.CreateFAdd(inVal, cond);
     Value* conv = Builder.CreateFPToSI(add, dstType);
     I->replaceAllUsesWith(conv);
+    I->eraseFromParent();
+}
+
+/*
+  Replaces llvm.lrint.* and llvm.llrint.* intrinsics.
+  Both simply return the operand rounded to the nearest integer.
+  @llvm.lrint.i32.f32(float f) => (i32)(f)
+  Example:
+  %r = call i32 @llvm.lrint.i32.f32(float %f)
+  =>
+  %f.lrint = fptosi float %f.fpext to i32
+*/
+void ReplaceUnsupportedIntrinsics::replaceLRint(IntrinsicInst* I) {
+    auto IntrID = I->getIntrinsicID();
+    IGC_ASSERT(IntrID == Intrinsic::lrint || IntrID == Intrinsic::llrint);
+    Value* inVal = I->getArgOperand(0);
+    Type* dstType = I->getType();
+    Type* srcType = inVal->getType();
+    IGC_ASSERT(!(srcType->isVectorTy() || dstType->isVectorTy()));
+    IGC_ASSERT(srcType->isFloatTy() || srcType->isDoubleTy());
+    IGC_ASSERT(dstType->isIntegerTy());
+    IGCLLVM::IRBuilder<> Builder(I);
+    StringRef inValName = inVal->getName();
+    const char *suffix = IntrID == Intrinsic::lrint ? ".lrint" : ".llrint";
+    Value* FPToInt = Builder.CreateFPToSI(inVal, dstType, inValName + suffix);
+    I->replaceAllUsesWith(FPToInt);
     I->eraseFromParent();
 }
 

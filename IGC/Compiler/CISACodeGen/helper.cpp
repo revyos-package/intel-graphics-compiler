@@ -20,6 +20,7 @@ SPDX-License-Identifier: MIT
 #include "llvm/IR/GetElementPtrTypeIterator.h"
 #include <llvm/IR/InstIterator.h>
 #include <llvm/Support/KnownBits.h>
+#include <llvm/Transforms/Utils/Local.h>
 #include "llvm/Analysis/ValueTracking.h"
 #include "common/LLVMWarningsPop.hpp"
 #include "GenISAIntrinsics/GenIntrinsicInst.h"
@@ -1681,6 +1682,7 @@ namespace IGC
             opcode == llvm_waveClustered ||
             opcode == llvm_wavePrefix ||
             opcode == llvm_waveShuffleIndex ||
+            opcode == llvm_waveBallot ||
             opcode == llvm_simdShuffleDown ||
             opcode == llvm_simdBlockRead||
             opcode == llvm_simdBlockReadBindless);
@@ -2451,8 +2453,7 @@ namespace IGC
 
     // MulH implementation for 64-bit signed integers
     Value* CreateMulhS64(IRBuilder<>& B, Value* const u, Value* const v) {
-        // This comes from Hacker's Delight 8-2.
-        // Think of this as elementry schoole multiplication, but base 2^32.
+        // This comes from H.S. Warren's "Hacker's Delight", chap. 8-2, and was adapted for int64.
         ConstantInt* const loMask = getConstantSInt(B, 64, 0xFFFFFFFFll);
         ConstantInt* const hiShift = getConstantSInt(B, 64, 32);
         //
@@ -2471,12 +2472,12 @@ namespace IGC
         Value* const tRHS = B.CreateLShr(w0, hiShift, "w0.lo32");
         Value* const t = B.CreateAdd(tLHS, tRHS, "t");
         //
-        // w1 = u0*v0 + (t >> 32)
+        // w1 = u0*v1 + (t >> 32)
         Value* const u0v1 = B.CreateMul(u0, v1);
         Value* const tLO32 = B.CreateAnd(t, loMask, "t.lo32");
         Value* const w1 = B.CreateAdd(u0v1, tLO32, "w1");
         //
-        // return u0*v1 + (t >> 32) + (w1 >> 32)
+        // return u1*v1 + (t >> 32) + (w1 >> 32)
         Value* const u1v1 = B.CreateMul(u1, v1);
         Value* const tHI32 = B.CreateAShr(t, hiShift, "t.hi32");
         Value* const rLHS = B.CreateAdd(u1v1, tHI32);
@@ -2926,4 +2927,67 @@ bool PDT_dominates(llvm::PostDominatorTree& PTD,
     return &*I == I2;
 }
 
+// Mimic LLVM functions:
+//   RecursivelyDeleteTriviallyDeadInstructions()
+// The difference is that the input here are dead instructions and
+// are not necessarily trivially dead. For example, store instruction.
+void RecursivelyDeleteDeadInstructions(
+    Instruction * I, const TargetLibraryInfo * TLI, MemorySSAUpdater * MSSAU,
+    std::function<void(Value*)> AboutToDeleteCallback) {
+    SmallVector<Instruction*, 16> DeadInsts;
+    DeadInsts.push_back(I);
+    RecursivelyDeleteDeadInstructions(DeadInsts, TLI, MSSAU,
+        AboutToDeleteCallback);
+}
+
+
+void RecursivelyDeleteDeadInstructions(
+    const SmallVectorImpl<Instruction*>&DeadInsts,
+    const TargetLibraryInfo * TLI,
+    MemorySSAUpdater * MSSAU,
+    std::function<void(Value*)> AboutToDeleteCallback) {
+#if LLVM_VERSION_MAJOR < 11
+    SmallVector<Instruction*, 16> trivialDeadInsts;
+#else
+    SmallVector<WeakTrackingVH, 16> trivialDeadInsts;
+#endif
+    for (auto II : DeadInsts) {
+        Instruction& I = *II;
+        IGC_ASSERT(I.use_empty() && "Instructions with uses are not dead.");
+
+        // Don't lose the debug info while deleting the instructions.
+        salvageDebugInfo(I);
+
+        // Null out all of the instruction's operands to see if any operand becomes
+        // dead as we go.
+        for (Use& OpU : I.operands()) {
+            Value* OpV = OpU.get();
+            OpU.set(nullptr);
+
+            if (!OpV->use_empty())
+                continue;
+
+            // If the operand is an instruction that became dead as we nulled
+            // out the operand, and if it is 'trivially' dead, invoking llvm
+            // function to delete it.
+            if (Instruction* OpI = dyn_cast<Instruction>(OpV))
+                if (llvm::isInstructionTriviallyDead(OpI, TLI))
+                    trivialDeadInsts.push_back(OpI);
+        }
+        if (MSSAU)
+            MSSAU->removeMemoryAccess(&I);
+
+        I.eraseFromParent();
+    }
+
+    if (!trivialDeadInsts.empty()) {
+#if LLVM_VERSION_MAJOR < 13
+        RecursivelyDeleteTriviallyDeadInstructions(
+            trivialDeadInsts, TLI, MSSAU);
+#else
+        RecursivelyDeleteTriviallyDeadInstructions(
+            trivialDeadInsts, TLI, MSSAU, AboutToDeleteCallback);
+#endif
+    }
+}
 } // namespace IGC

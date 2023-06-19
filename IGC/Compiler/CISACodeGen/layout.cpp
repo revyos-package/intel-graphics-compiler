@@ -1,6 +1,6 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (C) 2017-2021 Intel Corporation
+Copyright (C) 2017-2023 Intel Corporation
 
 SPDX-License-Identifier: MIT
 
@@ -16,13 +16,14 @@ SPDX-License-Identifier: MIT
 #include <vector>
 #include <set>
 #include "Probe/Assertion.h"
+#include "llvmWrapper/IR/BasicBlock.h"
 
 using namespace llvm;
 using namespace IGC;
 
 #define SUCCSZANY     (true)
-#define SUCCHASINST   (succ->size() > 1)
-#define SUCCNOINST    (succ->size() <= 1)
+#define SUCCHASINST   (IGCLLVM::sizeWithoutDebug(succ) > 1)
+#define SUCCNOINST    (IGCLLVM::sizeWithoutDebug(succ) <= 1)
 #define SUCCANYLOOP   (true)
 
 #define PUSHSUCC(BLK, C1, C2) \
@@ -395,8 +396,8 @@ BasicBlock* Layout::selectSucc(
     {
         BasicBlock* succ = *SI;
         if (VisitSet.count(succ) == 0 &&
-            ((SelectNoInstBlk && succ->size() <= 1) ||
-            (!SelectNoInstBlk && succ->size() > 1)))
+            ((SelectNoInstBlk && IGCLLVM::sizeWithoutDebug(succ) <= 1) ||
+            (!SelectNoInstBlk && IGCLLVM::sizeWithoutDebug(succ) > 1)))
         {
             Succs.push_back(succ);
         }
@@ -595,7 +596,8 @@ void Layout::LayoutBlocks(Function& func, LoopInfo& LI)
                     if (predPredLoop != curLoop &&
                         (!curLoop || curLoop->contains(predPredLoop)))
                     {
-                        if (pred->size() <= BREAK_BLOCK_SIZE_LIMIT &&
+                        // Debug instructions should not be counted into considered size
+                        if (IGCLLVM::sizeWithoutDebug(pred) <= BREAK_BLOCK_SIZE_LIMIT &&
                             !HasThreadGroupBarrierInBlock(pred))
                         {
                             predSet.insert(pred);

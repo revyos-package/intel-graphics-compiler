@@ -24,6 +24,8 @@ SPDX-License-Identifier: MIT
 
 #include "Probe/Assertion.h"
 
+#include "llvmWrapper/IR/DerivedTypes.h"
+
 #include <llvm/IR/Function.h>
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/InstVisitor.h>
@@ -130,6 +132,19 @@ Value *SPIRVExpander::visitCallInst(CallInst &CI) {
     auto *ArgTy = Arg->getType();
     return emitIntrinsic(Builder, vc::InternalIntrinsic::cast_from_bf16,
                          {Ty, ArgTy}, {Arg});
+  }
+  // SPV_INTEL_tensor_float32_rounding extension.
+  if (CalleeName.contains("__spirv_RoundFToTF32INTEL") ||
+      CalleeName.contains("__spirv_ConvertFToTF32INTEL")) {
+    auto *Arg = CI.getArgOperand(0);
+    auto *ArgTy = Arg->getType();
+    Type *ResTy = Builder.getInt32Ty();
+    if (auto *ArgVTy = dyn_cast<IGCLLVM::FixedVectorType>(ArgTy))
+      ResTy = IGCLLVM::FixedVectorType::get(ResTy, ArgVTy->getNumElements());
+
+    auto *Intr = emitIntrinsic(Builder, vc::InternalIntrinsic::round_to_tf32,
+                               {ResTy, ArgTy}, {Arg});
+    return Builder.CreateBitCast(Intr, Ty);
   }
 
   // Math builtins.
@@ -241,11 +256,15 @@ void GenXTranslateSPIRVBuiltins::getAnalysisUsage(AnalysisUsage &AU) const {
 // name. Having false positives is not that critical as they won't be linked
 // anyway.
 static bool isSPIRVBuiltinDecl(const Function &F) {
+  auto Name = F.getName();
+  // __devicelib_* functions may have implementations which VC should replace
+  if (Name.startswith("__devicelib") || Name == "__assert_fail")
+    return true;
   if (!F.isDeclaration())
     return false;
   if (F.isIntrinsic() || GenXIntrinsic::isGenXIntrinsic(&F))
     return false;
-  return F.getName().contains("__spirv");
+  return Name.contains("__spirv");
 }
 
 bool GenXTranslateSPIRVBuiltins::runOnModule(Module &M) {
@@ -265,6 +284,16 @@ bool GenXTranslateSPIRVBuiltins::runOnModule(Module &M) {
       getBiFModule(BiFKind::VCSPIRVBuiltins, M.getContext());
   SPIRVBuiltinsModule->setDataLayout(M.getDataLayout());
   SPIRVBuiltinsModule->setTargetTriple(M.getTargetTriple());
+
+  // If the BiF module has the same function, we should select it
+  for (auto &FuncName : SPIRVBuiltins) {
+    auto *Func = M.getFunction(FuncName);
+    auto *NewFunc = SPIRVBuiltinsModule->getFunction(FuncName);
+    if (Func && !Func->isDeclaration() && NewFunc &&
+        !NewFunc->isDeclaration() &&
+        Func->getFunctionType() == NewFunc->getFunctionType())
+      Func->deleteBody();
+  }
 
   if (Linker::linkModules(M, std::move(SPIRVBuiltinsModule),
                           Linker::Flags::LinkOnlyNeeded)) {

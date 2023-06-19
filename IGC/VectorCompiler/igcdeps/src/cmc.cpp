@@ -1,6 +1,6 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (C) 2019-2022 Intel Corporation
+Copyright (C) 2019-2023 Intel Corporation
 
 SPDX-License-Identifier: MIT
 
@@ -120,7 +120,7 @@ class KernelArgInfoBuilder
             switch (ArgKindID)
             {
                 case ArgKind::General:
-                    return Private;
+                  return Private;
                 case ArgKind::Buffer:
                 case ArgKind::SVM:
                 case ArgKind::Image1D:
@@ -130,11 +130,14 @@ class KernelArgInfoBuilder
                 case ArgKind::Image2DMediaBlock:
                 case ArgKind::Image3D:
                 case ArgKind::BindlessBuffer:
-                    return Global;
+                  return Global;
                 case ArgKind::Sampler:
-                    return Constant;
+                  return Constant;
+                case ArgKind::SLM:
+                  return Local;
                 default:
-                    IGC_ASSERT_EXIT_MESSAGE(0, "implicit args cannot appear in kernel arg info");
+                  IGC_ASSERT_EXIT_MESSAGE(
+                      0, "implicit args cannot appear in kernel arg info");
             }
             return NotSpecified;
         }
@@ -361,6 +364,29 @@ void CMKernel::createPointerGlobalAnnotation(unsigned index, unsigned offset,
                                                index);
 }
 
+void CMKernel::createPointerLocalAnnotation(unsigned index, unsigned offset,
+                                            unsigned sizeInBytes,
+                                            unsigned alignment) {
+  auto locAnnotation = std::make_unique<iOpenCL::LocalArgumentAnnotation>();
+
+  locAnnotation->Alignment = alignment;
+
+  // TODO: offset must be aligned.
+  locAnnotation->PayloadPosition = offset;
+  locAnnotation->PayloadSizeInBytes = sizeInBytes;
+  locAnnotation->ArgumentNumber = index;
+  locAnnotation->LocationIndex = 0;
+  locAnnotation->LocationCount = 0;
+  m_kernelInfo.m_localPointerArgument.push_back(std::move(locAnnotation));
+
+  // EnableZEBinary: ZEBinary related code
+  zebin::ZEInfoBuilder::addPayloadArgumentByPointer(
+      m_kernelInfo.m_zePayloadArgs, offset, sizeInBytes, index,
+      zebin::PreDefinedAttrGetter::ArgAddrMode::slm,
+      zebin::PreDefinedAttrGetter::ArgAddrSpace::local,
+      zebin::PreDefinedAttrGetter::ArgAccessType::readwrite, alignment);
+}
+
 void CMKernel::createPrivateBaseAnnotation(unsigned argNo, unsigned byteSize,
                                            unsigned payloadPosition, int BTI,
                                            unsigned statelessPrivateMemSize,
@@ -428,6 +454,15 @@ void CMKernel::createSizeAnnotation(unsigned initPayloadPosition,
     zebin::ZEInfoBuilder::addPayloadArgumentImplicit(m_kernelInfo.m_zePayloadArgs,
         getZEArgType(Type), initPayloadPosition,
         iOpenCL::DATA_PARAMETER_DATA_SIZE * 3);
+}
+
+void CMKernel::createAssertBufferArgAnnotation(unsigned Index, unsigned BTI,
+                                               unsigned Size,
+                                               unsigned ArgOffset) {
+    // EnableZEBinary: ZEBinary related code
+    zebin::ZEInfoBuilder::addPayloadArgumentImplicit(
+        m_kernelInfo.m_zePayloadArgs,
+        zebin::PreDefinedAttrGetter::ArgType::assert_buffer, ArgOffset, Size);
 }
 
 void CMKernel::createPrintfBufferArgAnnotation(unsigned Index, unsigned BTI,
@@ -554,6 +589,7 @@ static void generateKernelArgInfo(
     case KindType::General:
     case KindType::Buffer:
     case KindType::SVM:
+    case KindType::SLM:
     case KindType::Sampler:
     case KindType::Image1D:
     case KindType::Image1DArray:
@@ -645,6 +681,10 @@ static void setArgumentsInfo(const GenXOCLRuntimeInfo::KernelInfo &Info,
       Kernel.m_kernelInfo.m_argIndexMap[Arg.getIndex()] = Arg.getBTI();
 
       break;
+    case ArgKind::SLM:
+      Kernel.createPointerLocalAnnotation(
+          Arg.getIndex(), ArgOffset, Arg.getSizeInBytes(), Arg.getAlignment());
+      break;
     case ArgKind::Sampler:
       Kernel.createSamplerAnnotation(Arg.getIndex(), Arg.getBTI());
       Kernel.m_kernelInfo.m_argIndexMap[Arg.getIndex()] = Arg.getBTI();
@@ -658,6 +698,10 @@ static void setArgumentsInfo(const GenXOCLRuntimeInfo::KernelInfo &Info,
       Kernel.createImageAnnotation(Arg.getIndex(), Arg.getBTI(), Arg.getKind(),
                                    Arg.getAccessKind());
       Kernel.m_kernelInfo.m_argIndexMap[Arg.getIndex()] = Arg.getBTI();
+      break;
+    case ArgKind::AssertBuffer:
+      Kernel.createAssertBufferArgAnnotation(Arg.getIndex(), Arg.getBTI(),
+                                             Arg.getSizeInBytes(), ArgOffset);
       break;
     case ArgKind::PrintBuffer:
       Kernel.createPrintfBufferArgAnnotation(Arg.getIndex(), Arg.getBTI(),

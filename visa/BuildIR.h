@@ -53,8 +53,7 @@ enum DeclareType {
   Spill = 2,
   Tmp = 3,
   AddrSpill = 4,
-  CoalescedFill = 5,
-  CoalescedSpill = 6
+  CoalescedSpillFill = 5,
 };
 
 // forward declaration
@@ -333,6 +332,10 @@ private:
   // We put them here instead of spillManager since there may be multiple rounds
   // of spill, and we want to use a common header
   G4_Declare *spillFillHeader = nullptr;
+
+  // for scatter spills
+  G4_Declare *scatterSpillBaseAddress = nullptr;
+  G4_Declare *scatterSpillAddress = nullptr;
 
   G4_Declare *oldA0Dot2Temp = nullptr;
 
@@ -635,6 +638,9 @@ public:
   G4_Declare *getSpillFillHeader();
   bool hasValidSpillFillHeader() { return spillFillHeader; }
 
+  G4_Declare *getScatterSpillBaseAddress();
+  G4_Declare *getScatterSpillAddress();
+
   G4_Declare *getEUFusionWATmpVar();
 
   G4_Declare *getOldA0Dot2Temp();
@@ -777,6 +783,7 @@ public:
   G4_SrcRegRegion *createScratchExDesc(uint32_t exdesc);
 
   void initScratchSurfaceOffset();
+  void initAddressesForScatterSpills();
 
   G4_Declare *getSpillSurfaceOffset() { return scratchSurfaceOffset; }
 
@@ -822,12 +829,13 @@ public:
   G4_INST *createSpill(G4_DstRegRegion *dst, G4_SrcRegRegion *header,
                        G4_SrcRegRegion *payload, G4_ExecSize execSize,
                        uint16_t numRows, uint32_t offset, G4_Declare *fp,
-                       G4_InstOption option, bool addToInstList);
+                       G4_InstOption option, bool addToInstList,
+                       bool isScatter = false);
 
   G4_INST *createSpill(G4_DstRegRegion *dst, G4_SrcRegRegion *payload,
                        G4_ExecSize execSize, uint16_t numRows, uint32_t offset,
-                       G4_Declare *fp, G4_InstOption option,
-                       bool addToInstList);
+                       G4_Declare *fp, G4_InstOption option, bool addToInstList,
+                       bool isScatter = false);
 
   G4_INST *createFill(G4_SrcRegRegion *header, G4_DstRegRegion *dstData,
                       G4_ExecSize execSize, uint16_t numRows, uint32_t offset,
@@ -1236,29 +1244,28 @@ public:
   G4_InstSend *createSendInst(
       G4_Predicate *prd, G4_opcode op, G4_ExecSize execSize,
       G4_DstRegRegion *postDst, G4_SrcRegRegion *payload, G4_Operand *msg,
-      G4_InstOpts options, // FIXME: re-order options to follow all operands
-      G4_SendDesc *msgDesc, bool addToInstList);
+      G4_InstOpts options,
+      G4_SendDescRaw *msgDesc, bool addToInstList);
 
 
   G4_InstSend *createInternalSendInst(
       G4_Predicate *prd, G4_opcode op, G4_ExecSize execSize,
       G4_DstRegRegion *postDst, G4_SrcRegRegion *payload, G4_Operand *msg,
-      G4_InstOpts options, // FIXME: re-order options to follow all operands
-      G4_SendDesc *msgDescs);
+      G4_InstOpts options,
+      G4_SendDescRaw *msgDescs);
 
   G4_InstSend *createSplitSendInst(G4_Predicate *prd, G4_opcode op,
                                    G4_ExecSize execSize, G4_DstRegRegion *dst,
                                    G4_SrcRegRegion *src1, G4_SrcRegRegion *src2,
                                    G4_Operand *msg, G4_InstOpts options,
-                                   G4_SendDesc *msgDesc, G4_Operand *src3,
+                                   G4_SendDescRaw *msgDesc, G4_Operand *src3,
                                    bool addToInstList);
 
   G4_InstSend *
   createInternalSplitSendInst(G4_ExecSize execSize, G4_DstRegRegion *dst,
                               G4_SrcRegRegion *src1, G4_SrcRegRegion *src2,
-                              // TODO: reorder parameters to put options last
                               G4_Operand *msg, G4_InstOpts options,
-                              G4_SendDesc *msgDesc, G4_Operand *src3);
+                              G4_SendDescRaw *msgDesc, G4_Operand *src3);
 
   G4_INST *createMathInst(G4_Predicate *prd, G4_Sat sat, G4_ExecSize execSize,
                           G4_DstRegRegion *dst, G4_Operand *src0,
@@ -1666,7 +1673,6 @@ public:
                       G4_ExecSize batchExSize, bool splitSendEnabled,
                       PayloadSource sources[], unsigned len);
 
-
   // Coalesce multiple payloads into a single region.  Pads each region with
   // an optional alignment argument (e.g. a GRF size).  The source region
   // sizes are determined by source dimension, so use an alias if you are
@@ -1692,7 +1698,8 @@ public:
   //    a DW and pad the result out to a GRF.
   //
   G4_SrcRegRegion *
-  coalescePayload(unsigned alignSourcesTo, unsigned alignPayloadTo,
+  coalescePayload(G4_Predicate *pred,
+                  unsigned alignSourcesTo, unsigned alignPayloadTo,
                   uint32_t payloadSize, uint32_t srcSize,
                   std::initializer_list<G4_SrcRegRegion *> srcs,
                   VISA_EMask_Ctrl emask);
@@ -2300,7 +2307,6 @@ public:
 
 private:
   G4_SrcRegRegion *createBindlessExDesc(uint32_t exdesc);
-  bool isSamplerMsgWithPO(VISASampler3DSubOpCode samplerOp) const;
   uint32_t createSamplerMsgDesc(VISASampler3DSubOpCode samplerOp,
                                 bool isNativeSIMDSize, bool isFP16Return,
                                 bool isFP16Input) const;

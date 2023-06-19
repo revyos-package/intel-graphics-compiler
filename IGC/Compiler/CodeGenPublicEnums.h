@@ -317,9 +317,19 @@ namespace IGC
         CANDIDATE_INST_CONTRIBUTION_TO_HITGROUP_INDEX = 36,
         GEOMETRY_INDEX_TRIANGLE = 37,
         GEOMETRY_INDEX_PROCEDURAL = 38,
+        RAY_MASK = 41,
         RAY_INFO_UNKNOWN = 0xFF
     };
 
+
+    enum class CS_WALK_ORDER : unsigned char {
+        WO_XYZ = 0,
+        WO_XZY = 1,
+        WO_YXZ = 2,
+        WO_ZXY = 3,
+        WO_YZX = 4,
+        WO_ZYX = 5
+    };
 }
 
 #endif //CODE_GEN_PUBLIC_ENUMS_H_

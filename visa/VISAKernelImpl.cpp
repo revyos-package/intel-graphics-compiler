@@ -438,165 +438,7 @@ void *VISAKernelImpl::encodeAndEmit(unsigned int &binarySize) {
   if (getOptions()->getOption(vISA_GenerateKernelInfo)) {
     auto kernel = getKernel();
     m_kernelInfo = new KERNEL_INFO();
-
-    for (auto decl : kernel->Declares) {
-      auto regVar = decl->getRegVar();
-      if (regVar != nullptr) {
-        if (regVar->isRegVar()) {
-          m_kernelInfo->numReg++;
-        } else if (regVar->isRegVarTmp()) {
-          m_kernelInfo->numTmpReg++;
-          m_kernelInfo->bytesOfTmpReg += decl->getByteSize();
-        } else if (regVar->isRegVarSpill()) {
-          // hasSpillFills = true;
-          m_kernelInfo->numSpillReg++;
-        } else if (regVar->isRegVarFill()) {
-          // hasSpillFills = true;
-          m_kernelInfo->numFillReg++;
-        }
-      }
-    }
-
-    for (auto bb : kernel->fg) {
-      for (auto instr : bb->getInstList()) {
-        if (instr->getExecSize() == g4::SIMD1) {
-          m_kernelInfo->countSIMD1++;
-        } else if (instr->getExecSize() == g4::SIMD2) {
-          m_kernelInfo->countSIMD2++;
-        } else if (instr->getExecSize() == g4::SIMD4) {
-          m_kernelInfo->countSIMD4++;
-        } else if (instr->getExecSize() == g4::SIMD8) {
-          m_kernelInfo->countSIMD8++;
-        } else if (instr->getExecSize() == g4::SIMD16) {
-          m_kernelInfo->countSIMD16++;
-        } else if (instr->getExecSize() == g4::SIMD32) {
-          m_kernelInfo->countSIMD32++;
-        }
-
-        if (instr->isSend()) {
-          G4_InstSend *SendInst = instr->asSendInst();
-          auto sendDesc = SendInst->getMsgDescRaw();
-          if (!sendDesc->isLSC()) {
-#define COUNT_HDC_SEND(SEND, isWRITE)                                          \
-  case SEND:                                                                   \
-    m_kernelInfo->hdcSends.count##SEND++;                                      \
-    m_kernelInfo->hdcSends.hasAnyHDCSend = true;                               \
-    break;
-
-            auto funcID = sendDesc->getSFID();
-            switch (funcID) {
-            case SFID::DP_DC0:
-              switch (sendDesc->getHdcMessageType()) {
-                // Load
-                COUNT_HDC_SEND(DC_OWORD_BLOCK_READ, false)
-                COUNT_HDC_SEND(DC_ALIGNED_OWORD_BLOCK_READ, false)
-                COUNT_HDC_SEND(DC_DWORD_SCATTERED_READ, false)
-                COUNT_HDC_SEND(DC_BYTE_SCATTERED_READ, false)
-                COUNT_HDC_SEND(DC_QWORD_SCATTERED_READ, false)
-                // Store
-                COUNT_HDC_SEND(DC_OWORD_BLOCK_WRITE, true)
-                COUNT_HDC_SEND(DC_DWORD_SCATTERED_WRITE, true)
-                COUNT_HDC_SEND(DC_BYTE_SCATTERED_WRITE, true)
-                COUNT_HDC_SEND(DC_QWORD_SCATTERED_WRITE, true)
-              default:
-                break;
-              }
-              break;
-            case SFID::DP_DC1:
-              switch (sendDesc->getHdcMessageType()) {
-                // Load
-                COUNT_HDC_SEND(DC1_UNTYPED_SURFACE_READ, false)
-                COUNT_HDC_SEND(DC1_MEDIA_BLOCK_READ, false)
-                COUNT_HDC_SEND(DC1_TYPED_SURFACE_READ, false)
-                COUNT_HDC_SEND(DC1_A64_SCATTERED_READ, false)
-                COUNT_HDC_SEND(DC1_A64_UNTYPED_SURFACE_READ, false)
-                COUNT_HDC_SEND(DC1_A64_BLOCK_READ, false)
-                // Store
-                COUNT_HDC_SEND(DC1_UNTYPED_SURFACE_WRITE, true)
-                COUNT_HDC_SEND(DC1_MEDIA_BLOCK_WRITE, true)
-                COUNT_HDC_SEND(DC1_TYPED_SURFACE_WRITE, true)
-                COUNT_HDC_SEND(DC1_A64_BLOCK_WRITE, true)
-                COUNT_HDC_SEND(DC1_A64_UNTYPED_SURFACE_WRITE, true)
-                COUNT_HDC_SEND(DC1_A64_SCATTERED_WRITE, true)
-              default:
-                break;
-              }
-              break;
-            case SFID::DP_DC2:
-              switch (sendDesc->getHdcMessageType()) {
-                // Load
-                COUNT_HDC_SEND(DC2_UNTYPED_SURFACE_READ, false)
-                COUNT_HDC_SEND(DC2_A64_SCATTERED_READ, false)
-                COUNT_HDC_SEND(DC2_A64_UNTYPED_SURFACE_READ, false)
-                COUNT_HDC_SEND(DC2_BYTE_SCATTERED_READ, false)
-                // Store
-                COUNT_HDC_SEND(DC2_UNTYPED_SURFACE_WRITE, true)
-                COUNT_HDC_SEND(DC2_A64_UNTYPED_SURFACE_WRITE, true)
-                COUNT_HDC_SEND(DC2_A64_SCATTERED_WRITE, true)
-                COUNT_HDC_SEND(DC2_BYTE_SCATTERED_WRITE, true)
-              default:
-                break;
-              }
-              break;
-            case SFID::URB:
-              switch (sendDesc->getHdcMessageType()) {
-                // Load
-                COUNT_HDC_SEND(URB_READ_HWORD, false)
-                COUNT_HDC_SEND(URB_READ_OWORD, false)
-                COUNT_HDC_SEND(URB_SIMD8_READ, false)
-                // Store
-                COUNT_HDC_SEND(URB_WRITE_HWORD, true)
-                COUNT_HDC_SEND(URB_WRITE_OWORD, true)
-                COUNT_HDC_SEND(URB_SIMD8_WRITE, true)
-              default:
-                break;
-              }
-              break;
-            default:
-              break;
-            }
-#undef COUNT_HDC_SEND
-          } else {
-#define COUNT_LSC_SEND(SEND, isWRITE)                                          \
-  case LSC_OP::SEND:                                                           \
-    m_kernelInfo->lscSends.count##SEND++;                                      \
-    m_kernelInfo->lscSends.hasAnyLSCSend = true;                               \
-    break;
-
-            switch (sendDesc->getLscOp()) {
-              // Load
-              COUNT_LSC_SEND(LSC_LOAD, false)
-              COUNT_LSC_SEND(LSC_LOAD_STRIDED, false)
-              COUNT_LSC_SEND(LSC_LOAD_QUAD, false)
-              COUNT_LSC_SEND(LSC_LOAD_BLOCK2D, false)
-              // Store
-              COUNT_LSC_SEND(LSC_STORE, true)
-              COUNT_LSC_SEND(LSC_STORE_STRIDED, true)
-              COUNT_LSC_SEND(LSC_STORE_QUAD, true)
-              COUNT_LSC_SEND(LSC_STORE_BLOCK2D, true)
-              COUNT_LSC_SEND(LSC_STORE_UNCOMPRESSED, true)
-            default:
-              break;
-            }
-#undef COUNT_LSC_SEND
-          }
-        }
-
-        if (instr->isSpillIntrinsic()) {
-          auto payload = instr->getSrc(1)->asSrcRegRegion();
-          auto dcl = payload->getTopDcl();
-          m_kernelInfo->spillFills.countBytesSpilled += dcl->getByteSize();
-
-          m_kernelInfo->spillFills.AddVirtualVar(dcl->getName());
-          m_kernelInfo->spillFills.spillInstrOrder.push_back(
-              instr->getVISAId());
-
-        } else if (instr->isFillIntrinsic()) {
-          m_kernelInfo->spillFills.spillInstrOrder.push_back(
-              instr->getVISAId());
-        }
-      }
-    }
+    m_kernelInfo->collectStats(*kernel);
   }
 
   if (m_options->getOption(vISA_asmToConsole)) {
@@ -628,6 +470,164 @@ void *VISAKernelImpl::encodeAndEmit(unsigned int &binarySize) {
   }
 
   return binary;
+}
+
+
+void KERNEL_INFO::collectStats(G4_Kernel &kernel) {
+  for (auto decl : kernel.Declares) {
+    auto regVar = decl->getRegVar();
+    if (regVar != nullptr) {
+      if (regVar->isRegVar()) {
+        numReg++;
+      } else if (regVar->isRegVarTmp()) {
+        numTmpReg++;
+        bytesOfTmpReg += decl->getByteSize();
+      } else if (regVar->isRegVarSpill()) {
+        numSpillReg++;
+      } else if (regVar->isRegVarFill()) {
+        numFillReg++;
+      }
+    }
+  }
+
+  for (auto bb : kernel.fg) {
+    for (auto instr : bb->getInstList()) {
+      if (instr->getExecSize() == g4::SIMD1) {
+        countSIMD1++;
+      } else if (instr->getExecSize() == g4::SIMD2) {
+        countSIMD2++;
+      } else if (instr->getExecSize() == g4::SIMD4) {
+        countSIMD4++;
+      } else if (instr->getExecSize() == g4::SIMD8) {
+        countSIMD8++;
+      } else if (instr->getExecSize() == g4::SIMD16) {
+        countSIMD16++;
+      } else if (instr->getExecSize() == g4::SIMD32) {
+        countSIMD32++;
+      }
+
+      if (instr->isSend()) {
+        G4_InstSend *SendInst = instr->asSendInst();
+        auto sendDesc = SendInst->getMsgDescRaw();
+        if (!sendDesc->isLSC()) {
+#define COUNT_HDC_SEND(SEND, isWRITE)                                          \
+  case SEND:                                                                   \
+    hdcSends.count##SEND++;                                                    \
+    hdcSends.hasAnyHDCSend = true;                                             \
+    break;
+
+          auto funcID = sendDesc->getSFID();
+          switch (funcID) {
+          case SFID::DP_DC0:
+            switch (sendDesc->getHdcMessageType()) {
+              // Load
+              COUNT_HDC_SEND(DC_OWORD_BLOCK_READ, false)
+              COUNT_HDC_SEND(DC_ALIGNED_OWORD_BLOCK_READ, false)
+              COUNT_HDC_SEND(DC_DWORD_SCATTERED_READ, false)
+              COUNT_HDC_SEND(DC_BYTE_SCATTERED_READ, false)
+              COUNT_HDC_SEND(DC_QWORD_SCATTERED_READ, false)
+              // Store
+              COUNT_HDC_SEND(DC_OWORD_BLOCK_WRITE, true)
+              COUNT_HDC_SEND(DC_DWORD_SCATTERED_WRITE, true)
+              COUNT_HDC_SEND(DC_BYTE_SCATTERED_WRITE, true)
+              COUNT_HDC_SEND(DC_QWORD_SCATTERED_WRITE, true)
+            default:
+              break;
+            }
+            break;
+          case SFID::DP_DC1:
+            switch (sendDesc->getHdcMessageType()) {
+              // Load
+              COUNT_HDC_SEND(DC1_UNTYPED_SURFACE_READ, false)
+              COUNT_HDC_SEND(DC1_MEDIA_BLOCK_READ, false)
+              COUNT_HDC_SEND(DC1_TYPED_SURFACE_READ, false)
+              COUNT_HDC_SEND(DC1_A64_SCATTERED_READ, false)
+              COUNT_HDC_SEND(DC1_A64_UNTYPED_SURFACE_READ, false)
+              COUNT_HDC_SEND(DC1_A64_BLOCK_READ, false)
+              // Store
+              COUNT_HDC_SEND(DC1_UNTYPED_SURFACE_WRITE, true)
+              COUNT_HDC_SEND(DC1_MEDIA_BLOCK_WRITE, true)
+              COUNT_HDC_SEND(DC1_TYPED_SURFACE_WRITE, true)
+              COUNT_HDC_SEND(DC1_A64_BLOCK_WRITE, true)
+              COUNT_HDC_SEND(DC1_A64_UNTYPED_SURFACE_WRITE, true)
+              COUNT_HDC_SEND(DC1_A64_SCATTERED_WRITE, true)
+            default:
+              break;
+            }
+            break;
+          case SFID::DP_DC2:
+            switch (sendDesc->getHdcMessageType()) {
+              // Load
+              COUNT_HDC_SEND(DC2_UNTYPED_SURFACE_READ, false)
+              COUNT_HDC_SEND(DC2_A64_SCATTERED_READ, false)
+              COUNT_HDC_SEND(DC2_A64_UNTYPED_SURFACE_READ, false)
+              COUNT_HDC_SEND(DC2_BYTE_SCATTERED_READ, false)
+              // Store
+              COUNT_HDC_SEND(DC2_UNTYPED_SURFACE_WRITE, true)
+              COUNT_HDC_SEND(DC2_A64_UNTYPED_SURFACE_WRITE, true)
+              COUNT_HDC_SEND(DC2_A64_SCATTERED_WRITE, true)
+              COUNT_HDC_SEND(DC2_BYTE_SCATTERED_WRITE, true)
+            default:
+              break;
+            }
+            break;
+          case SFID::URB:
+            switch (sendDesc->getHdcMessageType()) {
+              // Load
+              COUNT_HDC_SEND(URB_READ_HWORD, false)
+              COUNT_HDC_SEND(URB_READ_OWORD, false)
+              COUNT_HDC_SEND(URB_SIMD8_READ, false)
+              // Store
+              COUNT_HDC_SEND(URB_WRITE_HWORD, true)
+              COUNT_HDC_SEND(URB_WRITE_OWORD, true)
+              COUNT_HDC_SEND(URB_SIMD8_WRITE, true)
+            default:
+              break;
+            }
+            break;
+          default:
+            break;
+          }
+#undef COUNT_HDC_SEND
+        } else {
+#define COUNT_LSC_SEND(SEND, isWRITE)                                          \
+  case LSC_OP::SEND:                                                           \
+    lscSends.count##SEND++;                                                    \
+    lscSends.hasAnyLSCSend = true;                                             \
+    break;
+
+          switch (sendDesc->getLscOp()) {
+            // Load
+            COUNT_LSC_SEND(LSC_LOAD, false)
+            COUNT_LSC_SEND(LSC_LOAD_STRIDED, false)
+            COUNT_LSC_SEND(LSC_LOAD_QUAD, false)
+            COUNT_LSC_SEND(LSC_LOAD_BLOCK2D, false)
+            // Store
+            COUNT_LSC_SEND(LSC_STORE, true)
+            COUNT_LSC_SEND(LSC_STORE_STRIDED, true)
+            COUNT_LSC_SEND(LSC_STORE_QUAD, true)
+            COUNT_LSC_SEND(LSC_STORE_BLOCK2D, true)
+            COUNT_LSC_SEND(LSC_STORE_UNCOMPRESSED, true)
+          default:
+            break;
+          }
+#undef COUNT_LSC_SEND
+        }
+      }
+
+      if (instr->isSpillIntrinsic()) {
+        auto payload = instr->getSrc(1)->asSrcRegRegion();
+        auto dcl = payload->getTopDcl();
+        spillFills.countBytesSpilled += dcl->getByteSize();
+
+        spillFills.AddVirtualVar(dcl->getName());
+        spillFills.spillInstrOrder.push_back(instr->getVISAId());
+
+      } else if (instr->isFillIntrinsic()) {
+        spillFills.spillInstrOrder.push_back(instr->getVISAId());
+      }
+    }
+  }
 }
 
 // dump PERF_STATS into the .stats.json file
@@ -1547,6 +1547,11 @@ int VISAKernelImpl::AddAttributeToVarGeneric(CISA_GEN_VAR *decl,
       }
       if (Attributes::isAttribute(Attributes::ATTR_DoNotSpill, attrName)) {
         rootDcl->setDoNotSpill();
+      }
+      if (Attributes::isAttribute(Attributes::ATTR_ForceSpill, attrName)) {
+        rootDcl->setForceSpilled();
+        vISA_ASSERT_INPUT(!rootDcl->isDoNotSpill(),
+                          "DoNotSpill cannot be set together with ForceSpill attribute");
       }
       if (Attributes::isAttribute(Attributes::ATTR_PayloadLiveOut, attrName)) {
         rootDcl->setPayloadLiveOut();
@@ -7789,7 +7794,7 @@ VISA_BUILDER_API int VISAKernelImpl::AppendVISALscUntypedBlock2DInst(
     VISA_EMask_Ctrl emask, LSC_CACHE_OPTS cacheOpts,
     LSC_DATA_SHAPE_BLOCK2D dataShape2D, VISA_RawOpnd *dstData,
     VISA_VectorOpnd *src0Addrs[LSC_BLOCK2D_ADDR_PARAMS],
-    VISA_RawOpnd *src1Data) {
+    int xImmOffset, int yImmOffset, VISA_RawOpnd *src1Data) {
   TIME_SCOPE(VISA_BUILDER_APPEND_INST);
 
   vISA_ASSERT_INPUT(lscSfid != LSC_TGM, "cannot use TGM on an untyped message");
@@ -7837,9 +7842,19 @@ VISA_BUILDER_API int VISAKernelImpl::AppendVISALscUntypedBlock2DInst(
              CreateOtherOpnd(dataShape2D.vnni ? 1 : 0, ISA_TYPE_UB));
     //
     ADD_OPND(numOpnds, opnds, dstData);
-    for (size_t i = 0; i < LSC_BLOCK2D_ADDR_PARAMS; i++) {
+    size_t i = 0;
+    for (; i < 4; i++) {
       ADD_OPND(numOpnds, opnds, src0Addrs[i]);
     }
+
+    // Block x and x offset
+    ADD_OPND(numOpnds, opnds, src0Addrs[4]);
+    ADD_OPND(numOpnds, opnds, CreateOtherOpnd(xImmOffset, ISA_TYPE_D));
+
+    // Block Y and y offset
+    ADD_OPND(numOpnds, opnds, src0Addrs[5]);
+    ADD_OPND(numOpnds, opnds, CreateOtherOpnd(yImmOffset, ISA_TYPE_D));
+
     ADD_OPND(numOpnds, opnds, src1Data);
 
     CisaFramework::CisaInst *inst = new (m_mem) CisaFramework::CisaInst(m_mem);
@@ -7853,7 +7868,6 @@ VISA_BUILDER_API int VISAKernelImpl::AppendVISALscUntypedBlock2DInst(
                                 opnds, numOpnds, instDesc, verifier);
     addInstructionToEnd(inst);
   }
-
   return status;
 }
 
@@ -8001,7 +8015,7 @@ VISA_BUILDER_API int VISAKernelImpl::AppendVISALscFence(LSC_SFID lscSfid,
 
   if (getOptions()->getOption(vISA_LSCFenceWA) && lscSfid == LSC_UGM &&
       scope > LSC_SCOPE_LOCAL && fenceOp == LSC_FENCE_OP_NONE)
-    fenceOp = LSC_FENCE_OP_TYPE6;
+    fenceOp = LSC_FENCE_OP_INVALIDATE;
 
   if (IS_GEN_BOTH_PATH) {
     SFID sfid = LSC_SFID_To_SFID(lscSfid);
@@ -8614,8 +8628,7 @@ int VISAKernelImpl::SetGTPinInit(void *buffer) {
 
   auto gtpin = m_kernel->getGTPinData();
   if (gtpin) {
-    if (getOptions()->getOption(vISA_GTPinReRA) ||
-        getOptions()->getOption(vISA_GetFreeGRFInfo) ||
+    if (getOptions()->getOption(vISA_GetFreeGRFInfo) ||
         getOptions()->getuInt32Option(vISA_GTPinScratchAreaSize)) {
       // GTPin init set by L0 driver through flags
       gtpin->setGTPinInitFromL0(true);
@@ -8992,19 +9005,38 @@ const char *VISAKernelImpl::getFunctionName() const {
   return m_kernel->getName();
 }
 
+static const VISAKernelImpl *getFmtKernelForISADump(
+    const VISAKernelImpl *kernel,
+    const CISA_IR_Builder &cisaBuilder) {
+  // Assuming there's no too many payload kernels. Use the logic in
+  // CisaBinary::isaDump to select the kernel for format provider.
+  if (!kernel->getIsPayload())
+    return kernel;
+
+  vASSERT(cisaBuilder.kernel_begin() != cisaBuilder.kernel_end());
+  VISAKernelImpl *fmtKernel = *cisaBuilder.kernel_begin();
+  for (auto it = cisaBuilder.kernel_begin();
+         it != cisaBuilder.kernel_end(); ++it) {
+    if (*it == kernel)
+      break;
+    if ((*it)->getIsKernel())
+      fmtKernel = *it;
+  }
+  return fmtKernel;
+}
+
 std::string VISAKernelImpl::getVISAAsm() const {
   // Return an empty string if the builder option is GEN only.
   if (IS_GEN_PATH)
     return std::string();
 
-  const VISAKernelImpl *fmtKernel =
-      m_CISABuilder->m_cisaBinary->getFmtKernelForISADump(
-          this, m_CISABuilder->getKernels());
-  return m_CISABuilder->m_cisaBinary->isaDump(this, fmtKernel);
+  const VISAKernelImpl *fmtKernel = getFmtKernelForISADump(
+          this, *m_CISABuilder);
+  return m_CISABuilder->isaDump(this, fmtKernel);
 }
 
-void VISAKernelImpl::computeAndEmitDebugInfo(VISAKernelImplListTy &functions) {
-  std::list<VISAKernelImpl *> compilationUnitsForDebugInfo;
+void VISAKernelImpl::computeAndEmitDebugInfo(KernelListTy &functions) {
+  KernelListTy compilationUnitsForDebugInfo;
   compilationUnitsForDebugInfo.push_back(this);
   auto funcEndIt = functions.end();
   for (auto funcIt = functions.begin(); funcIt != funcEndIt; funcIt++) {
@@ -9061,8 +9093,6 @@ void VISAKernelImpl::addFuncPerfStats(const PERF_STATS_VERBOSE& input) {
       m_kernel->fg.builder->getJitInfo()->statsVerbose;
 
   myStats.numALUInst += input.numALUInst;
-  myStats.numALUOnlyDst += input.numALUOnlyDst;
-  myStats.numALUOnlySrc += input.numALUOnlySrc;
   myStats.accSubDef += input.accSubDef;
   myStats.accSubUse += input.accSubUse;
   myStats.accSubCandidateDef += input.accSubCandidateDef;
@@ -9084,8 +9114,6 @@ void VISAKernelImpl::emitPerfStats(std::ostream & os) {
   PERF_STATS_VERBOSE &stats = m_kernel->fg.builder->getJitInfo()->statsVerbose;
   os << "\n\n";
   os << "//.numALUInst: " << stats.numALUInst << "\n";
-  os << "//.numALUOnlyDst: " << stats.numALUOnlyDst << "\n";
-  os << "//.numALUOnlySrc: " << stats.numALUOnlySrc << "\n";
   os << "//.accSubDef: " << stats.accSubDef << "\n";
   os << "//.accSubUse: " << stats.accSubUse << "\n";
   os << "//.accSubCandidateDef: " << stats.accSubCandidateDef << "\n";

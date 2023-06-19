@@ -33,12 +33,13 @@ namespace IGC
 
     enum EmuKind : uint8_t {
         EMU_UNUSED = 0,
-        EMU_I64DIVREM = 0x1,    // bit 0: original emulation lib, mostly i64 div/rem
-        EMU_DP = 0x2,           // bit 1: IEEE-compliant double emulation (+-*/,cmp,convert,etc)
-        EMU_DP_DIV_SQRT = 0x4,  // bit 2: IEEE-compliant double emulation for div and sqrt (EMU_DP subset)
-        EMU_SP_DIV = 0x8,       // bit 3: IEEE-complaint float div emulation (float)
-        EMU_I32DIVREM = 0x10,   // bit 4: emulation lib for i32 div/rem
-        EMU_I32DIVREM_SP = 0x20 // bit 5: emulation lib for i32 div/rem using fp32
+        EMU_I64DIVREM = 0x1,      // bit 0: original emulation lib, mostly i64 div/rem
+        EMU_DP = 0x2,             // bit 1: IEEE-compliant double emulation (+-*/,cmp,convert,etc)
+        EMU_DP_DIV_SQRT = 0x4,    // bit 2: IEEE-compliant double emulation for div and sqrt (EMU_DP subset)
+        EMU_SP_DIV = 0x8,         // bit 3: IEEE-complaint float div emulation (float)
+        EMU_I32DIVREM = 0x10,     // bit 4: emulation lib for i32 div/rem
+        EMU_I32DIVREM_SP = 0x20,  // bit 5: emulation lib for i32 div/rem using fp32
+        EMU_FP64_FP16_CONV = 0x40 // bit 6: fp64 to fp32 conversion
     };
 
     class PreCompiledFuncImport : public llvm::ModulePass, public llvm::InstVisitor<PreCompiledFuncImport>
@@ -63,6 +64,8 @@ namespace IGC
             LIBMOD_DP_SQRT_NOMADM,   // dp_sqrt_nomadm_ieee & dp_sqrt_nomadm_fast
             LIBMOD_SP_DIV,           // sp_div
             LIBMOD_DP_CONV_I64,      // dp_to_[u]int64 & [u]int64_to_dp
+            LIBMOD_INT64_DIV_REM_SP, // [u|s][div|rem], for 64 bit integers using fp32
+            LIBMOD_INT64_DIV_REM_DP, // [u|s][div|rem], for 64 bit integers using fp64
 
             // This must be the last entry
             NUM_LIBMODS
@@ -160,6 +163,15 @@ namespace IGC
             return "PreCompiledFuncImport";
         }
 
+        void releaseMemory() override
+        {
+            FuncNeedIA.clear();
+            NewFuncWithIA.clear();
+            FuncsImpArgs.clear();
+            m_DPEmuFlagTemp.clear();
+            m_allNewCallInsts.clear();
+        }
+
         virtual bool runOnModule(llvm::Module& M) override;
 
         void visitBinaryOperator(llvm::BinaryOperator& I);
@@ -173,6 +185,7 @@ namespace IGC
 
     private:
         void processDivide(llvm::BinaryOperator& inst, EmulatedFunctions function);
+        void getInt64DivideEmuType(EmulatedFunctions function, unsigned int elementIndex, const char*& functionName, LibraryModules& module);
         llvm::BinaryOperator* upcastTo32Bit(llvm::BinaryOperator* I);
         void processInt32Divide(llvm::BinaryOperator& inst, Int32EmulatedFunctions function);
 
@@ -210,7 +223,7 @@ namespace IGC
         // Check if subroutine call is needed and set it if so.
         void checkAndSetEnableSubroutine();
         CodeGenContext* m_pCtx;
-        bool m_enableSubroutineCallForEmulation;
+        int m_enableCallForEmulation; // subroutine/stackcall
 
         IGCMD::MetaDataUtils* m_pMdUtils;
         llvm::Module* m_pModule;
@@ -218,17 +231,20 @@ namespace IGC
         /// @brief  Indicates if the pass changed the processed function
         bool m_changed;
 
-        const static char* m_sFunctionNames[NUM_FUNCTIONS][NUM_TYPES];
+        const static char* m_Int64DivRemFunctionNames[NUM_FUNCTIONS][NUM_TYPES];
+        const static char* m_Int64SpDivRemFunctionNames[NUM_FUNCTIONS][NUM_TYPES];
+        const static char* m_Int64DpDivRemFunctionNames[NUM_FUNCTIONS][NUM_TYPES];
         const static char* m_Int32EmuFunctionNames[NUM_INT32_EMU_FUNCTIONS];
 
         /// @brief  Kind of emulations. Its bits are defined by EmuKind.
-        const uint32_t m_emuKind;
+        uint32_t m_emuKind;
         bool isDPEmu() const { return (m_emuKind & EmuKind::EMU_DP) > 0; }
         bool isDPDivSqrtEmu() const { return (m_emuKind & EmuKind::EMU_DP_DIV_SQRT) > 0; }
         bool isI64DivRem() const { return (m_emuKind & EmuKind::EMU_I64DIVREM) > 0; }
         bool isI32DivRem() const { return (m_emuKind & EmuKind::EMU_I32DIVREM) > 0; }
         bool isI32DivRemSP() const { return (m_emuKind & EmuKind::EMU_I32DIVREM_SP) > 0; }
         bool isSPDiv() const { return (m_emuKind & EmuKind::EMU_SP_DIV) > 0; }
+        bool isFP64toFP16() const { return (m_emuKind & EmuKind::EMU_FP64_FP16_CONV) > 0; }
         bool isDPConvFunc(llvm::Function* F) const;
 
         bool m_libModuleToBeImported[NUM_LIBMODS];
@@ -238,6 +254,10 @@ namespace IGC
 
         static const PreCompiledFuncInfo m_functionInfos[NUM_FUNCTION_IDS];
         static const LibraryModuleInfo m_libModInfos[NUM_LIBMODS];
+        // This is for creating a single flag temp for some of double emulation
+        // As this is never used, we need to remove this flag from emulation
+        // function completely.
+        llvm::DenseMap<llvm::Function*, Value*> m_DPEmuFlagTemp;
 
         unsigned m_roundingMode = 0;
         unsigned m_flushDenorm = 0;

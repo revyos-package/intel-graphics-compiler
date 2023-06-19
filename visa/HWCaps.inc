@@ -248,7 +248,8 @@ bool hasRSForSpecificPlatform() const {
 }
 
 bool hasDPASFuseRSWA() const {
-  return getOption(vISA_DPASFuseRSWA);
+  return VISA_WA_CHECK(getPWaTable(), Wa_18023229625) ||
+         getOption(vISA_DPASFuseRSWA);
 }
 
 bool hasSrc1ReadSuppressionIssue() const {
@@ -443,11 +444,12 @@ G4_Type getMixModeType() const {
 uint32_t getNumFlagRegisters(void) { return getPlatform() >= Xe_PVC ? 8 : 4; }
 
 uint32_t getNumScalarRegisters(void) {
-  if (hasScalarRegister()) {
+  if (enableSendIndirect()) {
     return 1;
   }
   return 0;
 }
+
 
 bool encodeAccWrEn() const { return getPlatform() < Xe_PVC; }
 
@@ -530,7 +532,7 @@ bool hasByteALU() const {
 
 bool hasSingleALUPipe() const { return getPlatform() == GENX_TGLLP; }
 
-bool hasMathRSIsuue() const { return getPlatform() == GENX_TGLLP; }
+bool hasMathRSIsuue() const { return getPlatform() == GENX_TGLLP && getOption(vISA_InsertDummyMovForHWRSWA); }
 
 bool supportsSampler() const {
   return getPlatform() != Xe_PVC && getPlatform() != Xe_PVCXT;
@@ -664,7 +666,7 @@ bool hasDPASSrc2ReadSuppressionDepIssue() const {
 }
 
 bool hasIntraReadSuppressionIssue() const {
-  return getPlatform() == GENX_TGLLP;
+  return (VISA_WA_CHECK(getPWaTable(), Wa_14018126777));
 }
 
 bool hasMathDpasConflict() const {
@@ -680,8 +682,7 @@ bool hasWriteCombine() const {
 }
 
 bool hasA0WARHWissue() {
-  return (getPlatform() == Xe_XeHPSDV || getPlatform() == Xe_DG2 ||
-          getPlatform() == Xe_MTL || getPlatform() == Xe_PVC);
+  return getPlatform() >= Xe_XeHPSDV;
 }
 
 bool hasFtoPackedHFMove() const { return getPlatform() >= Xe_DG2; }
@@ -692,7 +693,7 @@ bool hasQ2FInIntegerPipe() const {
   return false;
 }
 
-bool hasScalarRegister() const {
+bool enableSendIndirect() const {
   return false;
 }
 
@@ -741,6 +742,32 @@ bool needBarrierWA() const {
       (getPlatform() == Xe_XeHPSDV || getPlatform() == Xe_PVC ||
       getPlatform() == Xe_PVCXT || getPlatform() == Xe_DG2 ||
       getPlatform() == Xe_MTL));
+}
+
+bool hasSelWDstDwExecTypeAlignIssue() const {
+  return getPlatform() == Xe_PVCXT || VISA_WA_CHECK(getPWaTable(), Wa_18027439769);
+}
+
+bool hasGatherReadSuppressionWARA() const {
+  return (VISA_WA_CHECK(getPWaTable(), Wa_14019028097));
+}
+
+bool needEmaskSetupProlog() const {
+  if (!getOption(vISA_addEmaskSetupProlog))
+    return false;
+  // Disable the WA for TGLLP for now because of a possible RS issue.
+  return getPlatform() > GENX_TGLLP && getPlatform() <= Xe_PVCXT;
+}
+
+bool needIndirectSrcForCompressedInstWA() const {
+  if (getOption(vISA_noIndirectSrcForCompressedInstWA))
+    return false;
+
+  return VISA_WA_CHECK(getPWaTable(), Wa_13010473643);
+}
+
+bool hasPackedRestrictedFloatVector() const {
+  return true;
 }
 
 // end HW capabilities

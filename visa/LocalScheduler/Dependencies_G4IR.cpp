@@ -54,11 +54,11 @@ static DepType DoMemoryInterfereSend(G4_InstSend *send1, G4_InstSend *send2,
       G4_SendDescRaw *msgDesc = send->getMsgDescRaw();
       if (msgDesc && msgDesc->isLSC() &&
           msgDesc->getLscAddrType() == LSC_ADDR_TYPE_BTI &&
-          msgDesc->getSurface() == nullptr) {
+          msgDesc->getBti() == nullptr) {
         // LSC messages
         bti = msgDesc->getExtendedDesc() >> 24;
         return true;
-      } else if (msgDesc && msgDesc->isHDC() && msgDesc->getSurface() &&
+      } else if (msgDesc && msgDesc->isHDC() && msgDesc->getBti() &&
                  send->getMsgDescOperand()->isImm()) {
         // HDC messages
         bti = (unsigned int)send->getMsgDescOperand()->asImm()->getInt() &
@@ -192,11 +192,11 @@ DepType vISA::CheckBarrier(G4_INST *inst) {
   }
   if (inst->isSend()) {
 
-    if (inst->asSendInst()->isSendc()) {
+    if (inst->isSendConditional()) {
       // sendc may imply synchronization
       return SEND_BARRIER;
     }
-    if (inst->getMsgDesc()->isEOT()) {
+    if (inst->isEOT()) {
       // Send with the EOT message desciptor is a barrier.
       return SEND_BARRIER;
     } else if (inst->getMsgDesc()->getSFID() == SFID::GATEWAY ||

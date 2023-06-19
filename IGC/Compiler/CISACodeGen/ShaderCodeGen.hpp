@@ -48,6 +48,7 @@ class DeSSA;
 class CoalescingEngine;
 class GenXFunctionGroupAnalysis;
 class VariableReuseAnalysis;
+class EmitPass;
 
 struct PushInfo;
 
@@ -125,7 +126,7 @@ public:
     // if true, HW will pass one GRF NOS of inlinedata to payload, (compute only right now)
     virtual bool passNOSInlineData() { return false; }
     virtual bool loadThreadPayload() { return false; }
-    virtual unsigned getAnnotatedNumThreads() { return 0; }
+    virtual int getAnnotatedNumThreads() { return -1; }
     virtual bool IsRegularGRFRequested() { return false; }
     virtual bool IsLargeGRFRequested() { return false; }
     virtual bool hasReadWriteImage(llvm::Function& F)
@@ -263,8 +264,8 @@ public:
     virtual void MapPushedInputs();
     void        CreateGatherMap();
     void        CreateConstantBufferOutput(SKernelProgram* pKernelProgram);
-    void        CreateFunctionSymbol(llvm::Function* pFunc);
-    void        CreateGlobalSymbol(llvm::GlobalVariable* pGlobal);
+    CVariable*  CreateFunctionSymbol(llvm::Function* pFunc);
+    CVariable*  CreateGlobalSymbol(llvm::GlobalVariable* pGlobal);
 
     CVariable*  GetStructVariable(llvm::Value* v);
 
@@ -277,12 +278,36 @@ public:
     void        SetCoalescingEngineHelper(CoalescingEngine* ce) { m_coalescingEngine = ce; }
     void        SetCodeGenHelper(CodeGenPatternMatch* CG) { m_CG = CG; }
     void        SetPushInfoHelper(PushInfo* PI) { pushInfo = *PI; }
+    void        SetEmitPassHelper(EmitPass* EP) { m_EmitPass = EP; }
     void        SetDominatorTreeHelper(llvm::DominatorTree* DT) { m_DT = DT; }
     void        SetDataLayout(const llvm::DataLayout* DL) { m_DL = DL; }
-    void        SetFunctionGroupAnalysis(GenXFunctionGroupAnalysis* FGA) { m_FGA = FGA; }
     void        SetVariableReuseAnalysis(VariableReuseAnalysis* VRA) { m_VRA = VRA; }
     void        SetMetaDataUtils(IGC::IGCMD::MetaDataUtils* pMdUtils) { m_pMdUtils = pMdUtils; }
     void        SetScratchSpaceSize(uint size) { m_ScratchSpaceSize = size; }
+
+    // Set FGA and also FunctionGroup attributes
+    void SetFunctionGroupAnalysis(GenXFunctionGroupAnalysis* FGA)
+    {
+        m_FGA = FGA;
+        FunctionGroup* FG = (FGA && entry) ? FGA->getGroupForHead(entry) : nullptr;
+        if (FG)
+        {
+            m_HasStackCall = FG->hasStackCall();
+            m_HasIndirectCall = FG->hasIndirectCall();
+            m_HasNestedCall = FG->hasNestedCall();
+            m_IsIntelSymbolTableVoidProgram = FGA->isIndirectCallGroup(FG);
+        }
+        if (IGC_IS_FLAG_ENABLED(ForceAddingStackcallKernelPrerequisites))
+        {
+            m_HasStackCall = true;
+        }
+    }
+
+    bool HasStackCalls() const { return m_HasStackCall; }
+    bool HasNestedCalls() const { return m_HasNestedCall; }
+    bool HasIndirectCalls() const { return m_HasIndirectCall; }
+    bool IsIntelSymbolTableVoidProgram() const { return m_IsIntelSymbolTableVoidProgram; }
+
     IGCMD::MetaDataUtils* GetMetaDataUtils() { return m_pMdUtils; }
 
     virtual  void SetShaderSpecificHelper(EmitPass* emitPass) { IGC_UNUSED(emitPass); }
@@ -353,6 +378,7 @@ public:
     SIMDMode m_SIMDSize;
     uint8_t m_numberInstance = 0;
     PushInfo pushInfo;
+    EmitPass* m_EmitPass;
     bool isInputsPulled; //true if any input is pulled, false otherwise
     bool isMessageTargetDataCacheDataPort;
     uint m_sendStallCycle = 0;
@@ -573,11 +599,6 @@ public:
     unsigned int GetScalarTypeSizeInRegisterInBits(const llvm::Type* Ty) const;
     unsigned int GetScalarTypeSizeInRegister(const llvm::Type* Ty) const;
 
-    bool HasStackCalls() const { return m_HasStackCalls; }
-    void SetHasStackCalls() { m_HasStackCalls = true; }
-    bool IsIntelSymbolTableVoidProgram() const { return m_isIntelSymbolTableVoidProgram; }
-    void SetIsIntelSymbolTableVoidProgram() { m_isIntelSymbolTableVoidProgram = true; }
-
     ////////////////////////////////////////////////////////////////////
     // NOTE: for vector load/stores instructions pass the
     // optional instruction argument checks additional constraints
@@ -734,11 +755,15 @@ protected:
 
     DebugInfoData diData;
 
-    bool m_HasStackCalls = false;
-    bool m_isIntelSymbolTableVoidProgram = false;
     // Shader has LSC store messages with non-default L1 cache control
     bool m_HasLscStoresWithNonDefaultL1CacheControls = false;
     bool m_HasSample = false;
+
+    // Program function attributes
+    bool m_HasStackCall = false;
+    bool m_HasNestedCall = false;
+    bool m_HasIndirectCall = false;
+    bool m_IsIntelSymbolTableVoidProgram = false;
 };
 
 struct SInstContext

@@ -1,6 +1,6 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (C) 2021 Intel Corporation
+Copyright (C) 2021-2023 Intel Corporation
 
 SPDX-License-Identifier: MIT
 
@@ -38,10 +38,10 @@ printf_fmt_impl(vector<BufferElementTy, TransferDataSize> TransferData,
 // String argument requires a special treatment.
 // It could've been covered in standard arg routine, but in this case pointer
 // would have to pass through several bitcast, plus under condition. It would
-// cause some problems as llvm.genx.print.format.index should get pointer
-// directly from global constant. It would require several IR transformations
-// to get rid of those bitcasts and conditions. Which can be avoided by this
-// "specialization" for string argument.
+// cause some problems as `@llvm.vc.internal.print.format.index` should get
+// pointer directly from global constant. It would require several IR
+// transformations to get rid of those bitcasts and conditions. Which can be
+// avoided by this "specialization" for string argument.
 template <typename T>
 vector<BufferElementTy, TransferDataSize>
 printf_arg_str_impl(vector<BufferElementTy, TransferDataSize> TransferData,
@@ -55,6 +55,11 @@ printf_arg_str_impl(vector<BufferElementTy, TransferDataSize> TransferData,
   CurAddress = writeElementToBuffer(CurAddress, Index);
   setCurAddress(TransferData, CurAddress);
   return TransferData;
+}
+
+extern "C" cl_vector<BufferElementTy, TransferDataSize>
+__vc_assert_init(cl_vector<int, ArgsInfoVector::Size> ArgsInfo) {
+  return printf_init_impl<StringAnnotationSize, true>(ArgsInfo).cl_vector();
 }
 
 extern "C" cl_vector<BufferElementTy, TransferDataSize>

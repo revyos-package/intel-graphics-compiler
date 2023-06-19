@@ -299,6 +299,8 @@ private:
 
   void processBarrier(preNode *curNode, DepType Dep);
   void processSend(preNode *curNode);
+  void addSrcOpndDep(preNode *curNode, G4_Declare *dcl,
+                     Gen4_Operand_Number OpNum);
   void processReadWrite(preNode *curNode);
   void prune();
 };
@@ -1235,9 +1237,7 @@ public:
 
   // Add a new node to queue.
   void push(preNode *N) override {
-    if (N->getInst() && N->getInst()->isPseudoKill())
-      pseudoKills.push_back(N);
-    else if (config.SkipHoldList)
+    if (config.SkipHoldList)
       ReadyList.push(N);
     else
       HoldList.push(N);
@@ -1245,19 +1245,13 @@ public:
 
   // Schedule the top node.
   preNode *pop() override {
-    // Pop all pseudo-kills if any.
-    if (!pseudoKills.empty()) {
-      preNode *N = pseudoKills.back();
-      pseudoKills.pop_back();
-      return N;
-    }
     vASSERT(!ReadyList.empty());
     preNode *N = ReadyList.top();
     ReadyList.pop();
     return N;
   }
 
-  bool empty() const { return pseudoKills.empty() && ReadyList.empty(); }
+  bool empty() const { return ReadyList.empty(); }
 
   // move instruction from HoldList to ReadyList,
   // also update current-cycle and current-group
@@ -1314,8 +1308,7 @@ private:
 
   bool compareHold(preNode *N1, preNode *N2);
 
-  // The ready pseudo kills.
-  std::vector<preNode *> pseudoKills;
+  bool comparePseudoKill(preNode *N1, preNode *N2) const;
 };
 
 } // namespace
@@ -1701,7 +1694,7 @@ unsigned LatencyQueue::calculatePriority(preNode *N) {
 bool LatencyQueue::compareReady(preNode *N1, preNode *N2) {
   vASSERT(N1->getID() != N2->getID());
   vASSERT(N1->getInst() && N2->getInst());
-  vASSERT(!N1->getInst()->isPseudoKill() && !N2->getInst()->isPseudoKill());
+
   auto isSendNoReturn = [](G4_INST *Inst) {
     if (Inst->isSend() &&
         (Inst->getDst() == nullptr || Inst->getDst()->isNullReg()))
@@ -1711,6 +1704,8 @@ bool LatencyQueue::compareReady(preNode *N1, preNode *N2) {
 
   G4_INST *Inst1 = N1->getInst();
   G4_INST *Inst2 = N2->getInst();
+  if (Inst1->isPseudoKill() || Inst2->isPseudoKill())
+    return comparePseudoKill(N1, N2);
 
   // Group ID has higher priority, smaller ID means higher priority.
   unsigned GID1 = GroupInfo[N1->getInst()];
@@ -1749,9 +1744,10 @@ bool LatencyQueue::compareReady(preNode *N1, preNode *N2) {
 bool LatencyQueue::compareHold(preNode *N1, preNode *N2) {
   vASSERT(N1->getID() != N2->getID());
   vASSERT(N1->getInst() && N2->getInst());
-  vASSERT(!N1->getInst()->isPseudoKill() && !N2->getInst()->isPseudoKill());
   G4_INST *Inst1 = N1->getInst();
   G4_INST *Inst2 = N2->getInst();
+  if (Inst1->isPseudoKill() || Inst2->isPseudoKill())
+    return comparePseudoKill(N1, N2);
 
   // Group ID has higher priority, smaller ID means higher priority.
   unsigned GID1 = GroupInfo[Inst1];
@@ -1772,6 +1768,20 @@ bool LatencyQueue::compareHold(preNode *N1, preNode *N2) {
   // Otherwise, break tie on ID.
   // Larger ID means higher priority.
   return N2->getID() > N1->getID();
+}
+
+bool LatencyQueue::comparePseudoKill(preNode *N1, preNode *N2) const {
+  vASSERT(N1->getID() != N2->getID());
+  vASSERT(N1->getInst() && N2->getInst());
+  vASSERT(N1->getInst()->isPseudoKill() || N2->getInst()->isPseudoKill());
+  // Break tie when both are pseudo_kill and larger ID means higher priority.
+  if (N1->getInst()->isPseudoKill() && N2->getInst()->isPseudoKill())
+    return N2->getID() > N1->getID();
+  // Make pseudo_kill higher priority.
+  if (N2->getInst()->isPseudoKill())
+    return true;
+  else
+    return false;
 }
 
 // Find the edge with smallest ID.
@@ -2007,16 +2017,6 @@ void preDDD::buildGraph() {
   reset();
 }
 
-static bool isPhyicallyAllocatedRegVar(G4_Operand *opnd) {
-  vASSERT(opnd);
-  G4_AccRegSel Acc = opnd->getAccRegSel();
-  if (Acc != G4_AccRegSel::ACC_UNDEFINED && Acc != G4_AccRegSel::NOACC)
-    return true;
-  if (opnd->getBase() && opnd->getBase()->isRegVar())
-    return opnd->getBase()->asRegVar()->getPhyReg() != nullptr;
-  return false;
-}
-
 void preDDD::addNodeToGraph(preNode *N) {
   NewLiveOps.clear();
   DepType Dep = N->getBarrier();
@@ -2033,13 +2033,21 @@ void preDDD::addNodeToGraph(preNode *N) {
   // add Y X 2
   for (auto &Item : NewLiveOps) {
     preNode *N = std::get<0>(Item);
+    G4_INST *inst = N->getInst();
     Gen4_Operand_Number OpNum = std::get<1>(Item);
-    G4_Operand *Opnd = N->getInst()->getOperand(OpNum);
+    G4_Operand *Opnd = inst->getOperand(OpNum);
     vASSERT(Opnd != nullptr);
     G4_Declare *Dcl = Opnd->getTopDcl();
-    LiveNodes[Dcl].emplace_back(N, OpNum);
+    if (inst->isPseudoAddrMovIntrinsic() &&
+        OpNum != Gen4_Operand_Number::Opnd_dst) {
+      Dcl = Opnd->asAddrExp()->getRegVar()->getDeclare();
+    }
+    vASSERT(Dcl || Opnd->isPhysicallyAllocatedRegVar());
+    if (Dcl) {
+      LiveNodes[Dcl].emplace_back(N, OpNum);
+    }
 
-    if (isPhyicallyAllocatedRegVar(Opnd))
+    if (Opnd->isPhysicallyAllocatedRegVar())
       LivePhysicalNodes.emplace_back(N, OpNum);
   }
 
@@ -2189,6 +2197,50 @@ getDepAndRel(G4_Operand *Opnd, const preDDD::LiveNode &LN, DepType Dep) {
   return std::make_pair(Dep, Rel);
 }
 
+//Add the dependence edge for source operand
+//Also, add the node to the active live list
+void preDDD::addSrcOpndDep(preNode *curNode, G4_Declare *Dcl,
+                           Gen4_Operand_Number OpNum) {
+  G4_Operand *opnd = curNode->getInst()->getOperand(OpNum);
+
+  if (Dcl) {
+    auto &Nodes = LiveNodes[Dcl];
+    // Iterate all live nodes associated to the same declaration.
+    for (auto &liveNode : Nodes) {
+      // Skip read live nodes.
+      if (liveNode.isRead())
+        continue;
+
+      DepType Dep = getDep(opnd, liveNode);
+      if (Dep == DepType::NODEP)
+        continue;
+      std::pair<DepType, G4_CmpRelation> DepRel =
+          getDepAndRel(opnd, liveNode, Dep);
+      if (DepRel.first != DepType::NODEP)
+        addEdge(curNode, liveNode.N, DepRel.first);
+    }
+  }
+
+  // If this is a physically allocated regvar, then check dependency on the
+  // physically allocated live nodes. This should be a cold path.
+  if (opnd->isPhysicallyAllocatedRegVar()) {
+    for (auto &liveNode : LivePhysicalNodes) {
+      // Skip read live nodes.
+      if (liveNode.isRead())
+        continue;
+      DepType Dep = getDep(opnd, liveNode);
+      if (Dep == DepType::NODEP)
+        continue;
+      std::pair<DepType, G4_CmpRelation> DepRel =
+          getDepAndRel(opnd, liveNode, Dep);
+      if (DepRel.first != DepType::NODEP)
+        addEdge(curNode, liveNode.N, DepRel.first);
+    }
+  }
+
+  NewLiveOps.emplace_back(curNode, OpNum);
+}
+
 // This is not a label nor a barrier and check the dependency
 // introduced by this node.
 void preDDD::processReadWrite(preNode *curNode) {
@@ -2199,30 +2251,32 @@ void preDDD::processReadWrite(preNode *curNode) {
     G4_Operand *opnd = Inst->getOperand(OpNum);
     if (opnd == nullptr || opnd->getBase() == nullptr || opnd->isNullReg())
       continue;
-    G4_Declare *Dcl = opnd->getTopDcl();
-    auto &Nodes = LiveNodes[Dcl];
-    // Iterate all live nodes associated to the same declaration.
-    for (auto Iter = Nodes.begin(); Iter != Nodes.end(); /*empty*/) {
-      LiveNode &liveNode = *Iter;
-      DepType Dep = getDep(opnd, liveNode);
-      if (Dep == DepType::NODEP) {
-        ++Iter;
-      } else {
-        auto DepRel = getDepAndRel(opnd, liveNode, Dep);
-        if (DepRel.first != DepType::NODEP) {
-          addEdge(curNode, liveNode.N, Dep);
-          // Check if this kills current live node. If yes, remove it.
-          bool pred = DepRel.second == G4_CmpRelation::Rel_eq ||
-                      DepRel.second == G4_CmpRelation::Rel_gt;
-          Iter = kill_if(pred, Nodes, Iter);
-        } else
+    vASSERT(opnd->getTopDcl() || opnd->isPhysicallyAllocatedRegVar());
+    if (G4_Declare *Dcl = opnd->getTopDcl()) {
+      auto &Nodes = LiveNodes[Dcl];
+      // Iterate all live nodes associated to the same declaration.
+      for (auto Iter = Nodes.begin(); Iter != Nodes.end(); /*empty*/) {
+        LiveNode &liveNode = *Iter;
+        DepType Dep = getDep(opnd, liveNode);
+        if (Dep == DepType::NODEP) {
           ++Iter;
+        } else {
+          auto DepRel = getDepAndRel(opnd, liveNode, Dep);
+          if (DepRel.first != DepType::NODEP) {
+            addEdge(curNode, liveNode.N, Dep);
+            // Check if this kills current live node. If yes, remove it.
+            bool pred = DepRel.second == G4_CmpRelation::Rel_eq ||
+                        DepRel.second == G4_CmpRelation::Rel_gt;
+            Iter = kill_if(pred, Nodes, Iter);
+          } else
+            ++Iter;
+        }
       }
     }
 
     // If this is a physically allocated regvar, then check dependency on the
     // physically allocated live nodes. This should be a cold path.
-    if (isPhyicallyAllocatedRegVar(opnd)) {
+    if (opnd->isPhysicallyAllocatedRegVar()) {
       for (auto Iter = LivePhysicalNodes.begin();
            Iter != LivePhysicalNodes.end();
            /*empty*/) {
@@ -2247,49 +2301,31 @@ void preDDD::processReadWrite(preNode *curNode) {
     NewLiveOps.emplace_back(curNode, OpNum);
   }
 
-  for (auto OpNum :
-       {Gen4_Operand_Number::Opnd_src0, Gen4_Operand_Number::Opnd_src1,
-        Gen4_Operand_Number::Opnd_src2, Gen4_Operand_Number::Opnd_src3,
-        Gen4_Operand_Number::Opnd_pred, Gen4_Operand_Number::Opnd_implAccSrc}) {
-    G4_Operand *opnd = curNode->getInst()->getOperand(OpNum);
-    if (opnd == nullptr || opnd->getBase() == nullptr || opnd->isNullReg())
-      continue;
-
-    G4_Declare *Dcl = opnd->getTopDcl();
-    auto &Nodes = LiveNodes[Dcl];
-    // Iterate all live nodes associated to the same declaration.
-    for (auto &liveNode : Nodes) {
-      // Skip read live nodes.
-      if (liveNode.isRead())
+  if (Inst->isPseudoAddrMovIntrinsic()) {
+    for (auto OpNum :
+         {Gen4_Operand_Number::Opnd_src0, Gen4_Operand_Number::Opnd_src1,
+          Gen4_Operand_Number::Opnd_src2, Gen4_Operand_Number::Opnd_src3,
+          Gen4_Operand_Number::Opnd_src4, Gen4_Operand_Number::Opnd_src5,
+          Gen4_Operand_Number::Opnd_src6, Gen4_Operand_Number::Opnd_src7}) {
+      G4_Operand *opnd = curNode->getInst()->getOperand(OpNum);
+      if (opnd == nullptr || opnd->isNullReg())
         continue;
-
-      DepType Dep = getDep(opnd, liveNode);
-      if (Dep == DepType::NODEP)
+      G4_Declare *Dcl = opnd->asAddrExp()->getRegVar()->getDeclare();
+      addSrcOpndDep(curNode, Dcl, OpNum);
+    }
+  } else {
+    for (auto OpNum :
+         {Gen4_Operand_Number::Opnd_src0, Gen4_Operand_Number::Opnd_src1,
+          Gen4_Operand_Number::Opnd_src2, Gen4_Operand_Number::Opnd_src3,
+          Gen4_Operand_Number::Opnd_pred,
+          Gen4_Operand_Number::Opnd_implAccSrc}) {
+      G4_Operand *opnd = curNode->getInst()->getOperand(OpNum);
+      if (opnd == nullptr || opnd->getBase() == nullptr || opnd->isNullReg())
         continue;
-      std::pair<DepType, G4_CmpRelation> DepRel =
-          getDepAndRel(opnd, liveNode, Dep);
-      if (DepRel.first != DepType::NODEP)
-        addEdge(curNode, liveNode.N, DepRel.first);
+      G4_Declare *Dcl = opnd->getTopDcl();
+      vASSERT(Dcl || opnd->isPhysicallyAllocatedRegVar());
+      addSrcOpndDep(curNode, Dcl, OpNum);
     }
-
-    // If this is a physically allocated regvar, then check dependency on the
-    // physically allocated live nodes. This should be a cold path.
-    if (isPhyicallyAllocatedRegVar(opnd)) {
-      for (auto &liveNode : LivePhysicalNodes) {
-        // Skip read live nodes.
-        if (liveNode.isRead())
-          continue;
-        DepType Dep = getDep(opnd, liveNode);
-        if (Dep == DepType::NODEP)
-          continue;
-        std::pair<DepType, G4_CmpRelation> DepRel =
-            getDepAndRel(opnd, liveNode, Dep);
-        if (DepRel.first != DepType::NODEP)
-          addEdge(curNode, liveNode.N, DepRel.first);
-      }
-    }
-
-    NewLiveOps.emplace_back(curNode, OpNum);
   }
 }
 

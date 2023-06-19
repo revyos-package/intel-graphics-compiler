@@ -31,17 +31,7 @@ SPDX-License-Identifier: MIT
 
 namespace vc {
 
-namespace ocl {
 using CompileOutput = llvm::GenXOCLRuntimeInfo::CompiledModuleT;
-} // namespace ocl
-
-namespace cm {
-struct CompileOutput {
-  std::string IsaBinary;
-};
-} // namespace cm
-
-using CompileOutput = std::variant<cm::CompileOutput, ocl::CompileOutput>;
 
 enum class FileType { SPIRV, LLVM_TEXT, LLVM_BINARY };
 
@@ -160,6 +150,8 @@ struct CompileOptions {
   unsigned ForceLoopUnrollThreshold = 0;
   bool IgnoreLoopUnrollThresholdOnPragma = false;
   unsigned InteropSubgroupSize = 16;
+
+  bool CheckGVClobbering = false;
 
   bool EnableHashMovs = false;
   bool EnableHashMovsAtPrologue = false;

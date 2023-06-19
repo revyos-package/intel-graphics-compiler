@@ -83,6 +83,23 @@ public:
   BankConflictPass(GlobalRA &g, bool global) : gra(g), forGlobal(global) {}
 };
 
+// The forbidden kind for the forbidden bit of each register files.
+// Note that:
+// a) There is no forbidden regsiter for address and flag regsiters.
+// We keep them just in case.
+// b) All the forbidden kinds from EOT to RESERVEGRF are for GRF
+enum class forbiddenKind {
+  FBD_ADDR = 0,
+  FBD_FLAG = 1,
+  FBD_RESERVEDGRF,
+  FBD_EOT,
+  FBD_LASTGRF,
+  FBD_EOTLASTGRF,
+  FBD_CALLERSAVE,
+  FBD_CALLEESAVE,
+  FBD_NUM,
+};
+
 enum class AugmentationMasks {
   Undetermined = 0,
   Default16Bit = 1,
@@ -96,8 +113,8 @@ class LiveRange final {
   G4_RegVar *const var;
   G4_Declare *const dcl;
   const G4_RegFileKind regKind;
-  bool *forbidden = nullptr;
-  int numForbidden = -1;
+  forbiddenKind forbiddenType;
+  BitSet *forbidden = nullptr;
   bool spilled = false;
   bool isUnconstrained = false;
 
@@ -132,10 +149,17 @@ class LiveRange final {
     };
   };
 
-public:
   LiveRange(G4_RegVar *v, GlobalRA &);
 
-  void *operator new(size_t sz, vISA::Mem_Manager &m) { return m.alloc(sz); }
+public:
+  static LiveRange *createNewLiveRange(G4_Declare *dcl, GlobalRA &gra);
+
+  void initialize();
+  void initializeForbidden();
+
+  void *operator new(size_t sz, llvm::SpecificBumpPtrAllocator<LiveRange> &m) { return m.Allocate(); }
+
+  void setBitFieldUnionValue(uint16_t v) { bunch = v; }
 
   void setDegree(unsigned d) { degree = d; }
   unsigned getDegree() const { return degree; }
@@ -209,33 +233,10 @@ public:
 
   // From VarBasis
 public:
-  void allocForbidden(vISA::Mem_Manager &mem, bool reserveStackCallRegs,
-                      unsigned reserveSpillSize, unsigned rerservedRegNum);
-  void allocForbiddenCallerSave(vISA::Mem_Manager &mem, G4_Kernel *kernel);
-  void allocForbiddenCalleeSave(vISA::Mem_Manager &mem, G4_Kernel *kernel);
-  const bool *getForbidden() const { return forbidden; }
-  void markForbidden(int reg, int numReg) {
-    vISA_ASSERT(((int)getForbiddenVectorSize()) >= reg + numReg,
-                "forbidden register is out of bound");
-    for (int i = reg; i < reg + numReg; ++i) {
-      forbidden[i] = true;
-    }
-    numForbidden = -1;
-  }
-  int getNumForbidden() {
-    if (forbidden == nullptr) {
-      return 0;
-    }
-    if (numForbidden == -1) {
-      numForbidden = 0;
-      for (int i = 0, size = getForbiddenVectorSize(); i < size; ++i) {
-        if (forbidden[i]) {
-          ++numForbidden;
-        }
-      }
-    }
-    return numForbidden;
-  }
+  void setForbidden(forbiddenKind f);
+  void markForbidden(vISA::Mem_Manager &GCMem, int reg, int numReg);
+  BitSet *getForbidden();
+  int getNumForbidden();
   G4_RegVar *getVar() const { return var; }
   G4_Declare *getDcl() const { return dcl; }
   G4_RegFileKind getRegKind() const { return regKind; }
@@ -256,10 +257,17 @@ public:
   bool isSpilled() const { return spilled; }
   void setSpilled(bool v) { spilled = v; }
 
+  void setCandidate(bool v) { isCandidate = v; }
+  bool getCandidate() const { return isCandidate; }
+
+  void resetForbidden() {
+    forbidden = nullptr;
+    forbiddenType = forbiddenKind::FBD_NUM;
+  }
+
 private:
   // const Options *m_options;
   unsigned getForbiddenVectorSize() const;
-  void allocForbiddenVector(vISA::Mem_Manager &mem);
 }; // class LiveRange
 } // namespace vISA
 using LIVERANGE_LIST = std::list<vISA::LiveRange *>;
@@ -303,7 +311,7 @@ namespace vISA {
 class Augmentation {
 private:
   // pair of default mask, non-default mask
-  using MaskDeclares = std::pair<SparseBitSet, SparseBitSet>;
+  using MaskDeclares = std::pair<llvm_SBitVector, llvm_SBitVector>;
   G4_Kernel &kernel;
   Interference &intf;
   GlobalRA &gra;
@@ -315,7 +323,9 @@ private:
   std::vector<G4_Declare *> sortedIntervals;
   AugmentPriorityQueue defaultMaskQueue{criticalCmpForEndInterval(gra)};
   AugmentPriorityQueue nonDefaultMaskQueue{criticalCmpForEndInterval(gra)};
-  std::unordered_map<FuncInfo *, MaskDeclares> callsiteDeclares;
+  // overlapDclsWithFunc holds default and non-default range live across
+  // all call sites of func.
+  std::unordered_map<FuncInfo *, MaskDeclares> overlapDclsWithFunc;
   std::unordered_map<G4_Declare *, MaskDeclares> retDeclares;
 
   bool updateDstMaskForGather(G4_INST *inst, std::vector<unsigned char> &mask);
@@ -365,11 +375,11 @@ private:
   void expireIntervals(unsigned startIdx);
   void buildSIMDIntfDcl(G4_Declare *newDcl, bool isCall);
   void buildSIMDIntfAll(G4_Declare *newDcl);
-  void buildSIMDIntfAllOld(G4_Declare *newDcl);
   void handleSIMDIntf(G4_Declare *firstDcl, G4_Declare *secondDcl, bool isCall);
   bool weakEdgeNeeded(AugmentationMasks, AugmentationMasks);
 
-  void addSIMDIntfDclForCallSite(MaskDeclares *maskDeclares);
+  void addSIMDIntfDclForCallSite(G4_BB* callBB);
+
   void addSIMDIntfForRetDclares(G4_Declare *newDcl);
 
 public:
@@ -382,6 +392,134 @@ public:
   const std::vector<G4_Declare *> &getSortedLiveIntervals() const {
     return sortedIntervals;
   }
+};
+
+// This class contains implementation of various methods to implement
+// incremental intf computation. Instance of this class is created
+// once and stored in GlobalRA. This class should therefore not
+// hold pointer to GraphColor/Interference or such other short-living
+// instances.
+class IncrementalRA {
+private:
+  GlobalRA &gra;
+  G4_Kernel &kernel;
+  LiveRangeVec lrs;
+  G4_RegFileKind selectedRF = G4_RegFileKind::G4_UndefinedRF;
+  unsigned int level = 0;
+  std::unordered_set<G4_Declare *> needIntfUpdate;
+  unsigned int maxDclId = 0;
+  // Map of root G4_Declare* -> id assigned to its G4_RegVar
+  // This allows us to reuse ids from previous iteration.
+  std::unordered_map<G4_Declare *, unsigned int> varIdx;
+  unsigned int maxVarIdx = 0;
+
+  // Reset state to mark start of new type of GRA (eg, from flag to GRF)
+  void reset();
+
+public:
+  llvm::SpecificBumpPtrAllocator<LiveRange> mem;
+
+  IncrementalRA(GlobalRA &g);
+
+  bool isEnabled() { return level > 0; }
+  bool isEnabledWithVerification() { return level == 2; }
+
+  static bool isEnabled(G4_Kernel &kernel) {
+    // 0 - disabled
+    // 1 - enabled
+    // 2 - enabled with verification
+    return kernel.getOptions()->getuInt32Option(vISA_IncrementalRA) >= 1;
+  }
+
+  static bool isEnabledWithVerification(G4_Kernel &kernel) {
+    return kernel.getOptions()->getuInt32Option(vISA_IncrementalRA) == 2;
+  }
+
+  void registerNextIter(G4_RegFileKind rf,
+                        const LivenessAnalysis *liveness = nullptr);
+  // After computing interference incrementally, GraphColor needs to clear
+  // candidate list to prepare for new incremental RA temps.
+  void clearCandidates() { needIntfUpdate.clear(); }
+
+  LiveRangeVec &getLRs() { return lrs; }
+
+  G4_RegFileKind getSelectedRF() const { return selectedRF; }
+
+  // This method is invoked when a new G4_Declare is created and a
+  // LiveRange instance needs to be added for it.
+  void addNewRAVariable(G4_Declare *dcl);
+  // This method is invoked when an existing RA variable is either
+  // removed from the program or a change is expected in liveness
+  // of a variable due to optimization.
+  void markForIntfUpdate(G4_Declare *dcl);
+
+  void skipIncrementalRANextIter();
+
+  void moveFromHybridToGlobalGRF() {
+    varIdx.clear();
+    maxVarIdx = 0;
+    reset();
+  }
+
+  // Return idx of a G4_RegVar if it was given an id in previous
+  // iteration. If dcl was present in previous id assign phase
+  // return pair <true, id>. When dcl is seen for first time,
+  // return <false, X>. Second field of pair contains legal value
+  // only if first field is true.
+  std::pair<bool, unsigned int> getIdFromPrevIter(G4_Declare *dcl);
+
+  // Record new dcl and id assigned to its G4_RegVar. Update
+  // maxVarIdx so we know first free id in next RA iteration.
+  void recordVarId(G4_Declare* dcl, unsigned int id);
+
+  // Return next id that can be assigned to a new variable. In 1st
+  // RA iteration, this returns 0 because no variables exist in
+  // incremental RA. In 2nd RA iteration, this method returns
+  // first available index that can be assigned to new variable.
+  unsigned int getNextVarId(unsigned char RF) {
+    if ((RF & selectedRF) == 0) {
+      varIdx.clear();
+      maxVarIdx = 0;
+    }
+    if (varIdx.size() == 0)
+      return 0;
+    return maxVarIdx + 1;
+  }
+
+  // Handle local split here. reduceBy argument tells us how many
+  // G4_Declares were removed by resetGlobalRAStates().
+  // TODO: Deprecate this method once we stop erasing old partial
+  // dcls from kernel.Declares
+  void reduceMaxDclId(unsigned int reduceBy) {
+    if (!level)
+      return;
+    maxDclId -= reduceBy;
+  }
+
+private:
+  // For verification only
+  std::vector<llvm_SBitVector> def_in;
+  std::vector<llvm_SBitVector> def_out;
+  std::vector<llvm_SBitVector> use_in;
+  std::vector<llvm_SBitVector> use_out;
+  std::vector<llvm_SBitVector> use_gen;
+  std::vector<llvm_SBitVector> use_kill;
+
+  std::unique_ptr<VarReferences> prevIterRefs;
+
+  // Return true if verification passes, false otherwise
+  bool verify(const LivenessAnalysis *curLiveness) const;
+
+  // Copy over liveness sets from current iteration's liveness
+  void copyLiveness(const LivenessAnalysis *liveness);
+
+public:
+  std::unordered_set<G4_Declare *> unassignedVars;
+
+  // Compute variables that are left over in sorted list when
+  // computing color order. This is to aid debugging only.
+  void computeLeftOverUnassigned(const LiveRangeVec &sorted,
+                       const LivenessAnalysis &liveAnalysis);
 };
 
 class Interference {
@@ -404,6 +542,7 @@ class Interference {
   unsigned *matrix = nullptr;
   const LivenessAnalysis *const liveAnalysis;
   Augmentation aug;
+  IncrementalRA &incRA;
 
   std::vector<std::vector<unsigned>> sparseIntf;
 
@@ -412,12 +551,16 @@ class Interference {
   // like dense matrix, interference is not symmetric (that is, if v1 and v2
   // interfere and v1 < v2, we insert (v1, v2) but not (v2, v1)) for better
   // cache behavior
-  std::vector<std::unordered_set<uint32_t>> sparseMatrix;
+  std::vector<llvm_SBitVector> sparseMatrix;
 
   unsigned int denseMatrixLimit = 0;
 
-  static void updateLiveness(SparseBitSet &live, uint32_t id, bool val) {
-    live.set(id, val);
+  static void updateLiveness(llvm_SBitVector &live, uint32_t id, bool val) {
+    if (val) {
+      live.set(id);
+    } else {
+      live.reset(id);
+    }
   }
 
   G4_Declare *getGRFDclForHRA(int GRFNum) const;
@@ -439,11 +582,21 @@ class Interference {
       unsigned col = v2 / BITS_DWORD;
       matrix[v1 * rowSize + col] |= 1 << (v2 % BITS_DWORD);
     } else {
-      sparseMatrix[v1].emplace(v2);
+      sparseMatrix[v1].set(v2);
     }
   }
 
-  inline void setBlockInterferencesOneWay(unsigned v1, unsigned col,
+inline void safeClearInterference(unsigned v1, unsigned v2) {
+    // Assume v1 < v2
+    if (useDenseMatrix()) {
+      unsigned col = v2 / BITS_DWORD;
+      matrix[v1 * rowSize + col] &= ~(1 << (v2 % BITS_DWORD));
+    } else {
+      sparseMatrix[v1].reset(v2);
+    }
+  }
+
+inline void setBlockInterferencesOneWay(unsigned v1, unsigned col,
                                           unsigned block) {
     if (useDenseMatrix()) {
 #ifdef _DEBUG
@@ -458,7 +611,7 @@ class Interference {
       for (int i = 0; i < BITS_DWORD; ++i) {
         if (block & (1 << i)) {
           uint32_t v2 = col * BITS_DWORD + i;
-          intfSet.emplace(v2);
+          intfSet.set(v2);
         }
       }
     }
@@ -469,23 +622,22 @@ class Interference {
     return matrix[idx];
   }
 
-  void addCalleeSaveBias(const SparseBitSet &live);
+  void addCalleeSaveBias(const llvm_SBitVector &live);
 
-  void buildInterferenceAtBBExit(const G4_BB *bb, SparseBitSet &live);
-  void buildInterferenceWithinBB(G4_BB *bb, SparseBitSet &live);
-  void buildInterferenceForDst(G4_BB *bb, SparseBitSet &live, G4_INST *inst,
+  void buildInterferenceAtBBExit(const G4_BB *bb, llvm_SBitVector &live);
+  void buildInterferenceWithinBB(G4_BB *bb, llvm_SBitVector &live);
+  void buildInterferenceForDst(G4_BB *bb, llvm_SBitVector &live, G4_INST *inst,
                                std::list<G4_INST *>::reverse_iterator i,
                                G4_DstRegRegion *dst);
-  void buildInterferenceForFcall(G4_BB *bb, SparseBitSet &live, G4_INST *inst,
+  void buildInterferenceForFcall(G4_BB *bb, llvm_SBitVector &live, G4_INST *inst,
                                  std::list<G4_INST *>::reverse_iterator i,
                                  const G4_VarBase *regVar);
 
   inline void filterSplitDclares(unsigned startIdx, unsigned endIdx, unsigned n,
                                  unsigned col, unsigned &elt, bool is_split);
-
-  void buildInterferenceWithLive(const SparseBitSet &live, unsigned i);
+  void buildInterferenceWithLive(const llvm_SBitVector &live, unsigned i);
   void buildInterferenceWithSubDcl(unsigned lr_id, G4_Operand *opnd,
-                                   SparseBitSet &live, bool setLive,
+                                   llvm_SBitVector &live, bool setLive,
                                    bool setIntf);
   void buildInterferenceWithAllSubDcl(unsigned v1, unsigned v2);
 
@@ -500,6 +652,8 @@ class Interference {
 
   void generateSparseIntfGraph();
   void countNeighbors();
+
+  void setupLRs(G4_BB* bb);
 
 public:
   Interference(const LivenessAnalysis *l, const LiveRangeVec& lr, unsigned n,
@@ -583,11 +737,31 @@ class GraphColor {
   const unsigned numVar;
   const unsigned numSplitStartID;
   const unsigned numSplitVar;
+  // The original code has no comments whatsoever (sigh), but best as I can tell
+  // this vector is used to track the active values held by each of A0's
+  // phyiscal subreg. The values themselves correspond to a word in the
+  // GRF home location of a spilled address variable. Each GRF home location is
+  // represented by its allocation order and assumed to be 16-word wide
+  // regardless of its actual size; in other words,
+  // AddrSpillLoc0 has [0-15],
+  // AddrSpillLoc1 has [16-31],
+  // and so on.
+  // When the clean up code sees a address fill of the form
+  //    mov (N) a0.i AddrSpillLoc(K).S<1;1,0>:uw
+  // it updates spAddrRegSig[i, i+N) = [K*16+S, K*16+S+N)
+  // When it sees a write to AddrSpillLoc, i.e., a spill of the form
+  //    mov (N) AddrSpillLoc(k) a0.i<1;1,0>:uw
+  // it clears spAddrRegSig's entries that hold AddrSpillLoc(k).
+  // If it encounters a non-fill write to A0 (e.g., send message descriptor
+  // write), it also clears the corresponding bits in spAddrRegSig.
+  //
+  // FIXME: This code is very likely to be buggy, since its initial value is 0
+  // and this conflicts with AddrSpillLoc0's first word.
   std::vector<unsigned> spAddrRegSig;
   Interference intf;
   PhyRegPool &regPool;
   IR_Builder &builder;
-  LiveRangeVec lrs;
+  LiveRangeVec &lrs;
   bool isHybrid;
   LIVERANGE_LIST spilledLRs;
   bool forceSpill;
@@ -622,7 +796,8 @@ class GraphColor {
   void relaxNeighborDegreeGRF(LiveRange *lr);
   void relaxNeighborDegreeARF(LiveRange *lr);
   bool assignColors(ColorHeuristic heuristicGRF, bool doBankConflict,
-                    bool highInternalConflict, bool honorHints = true);
+                    bool highInternalConflict, bool doBundleConflict = false,
+                    bool honorHints = true);
 
   void clearSpillAddrLocSignature() {
     std::fill(spAddrRegSig.begin(), spAddrRegSig.end(), 0);
@@ -644,11 +819,10 @@ public:
   const Options *getOptions() const { return m_options; }
 
   bool regAlloc(bool doBankConflictReduction, bool highInternalConflict,
-                bool reserveSpillReg, unsigned &spillRegSize,
-                unsigned &indrSpillRegSize, const RPE *rpe);
+                const RPE *rpe);
   bool requireSpillCode() const { return !spilledLRs.empty(); }
   const Interference *getIntf() const { return &intf; }
-  void createLiveRanges(unsigned reserveSpillSize = 0);
+  void createLiveRanges();
   const LiveRangeVec& getLiveRanges() const { return lrs; }
   const LIVERANGE_LIST &getSpilledLiveRanges() const { return spilledLRs; }
   void confirmRegisterAssignments();
@@ -665,6 +839,8 @@ public:
   unsigned int getNumVars() const { return numVar; }
   float getSpillRatio() const { return (float) spilledLRs.size() / numVar; }
   void markFailSafeIter(bool f) { failSafeIter = f; }
+  void setTotalGRFRegCount(unsigned c) { totalGRFRegCount = c; }
+  unsigned getTotalGRFRegCount() { return totalGRFRegCount; }
 };
 
 struct BundleConflict {
@@ -750,7 +926,37 @@ public:
 };
 
 class PointsToAnalysis;
+
+class ForbiddenRegs {
+  IR_Builder &builder;
+  std::vector<BitSet> forbiddenVec;
+
+public:
+  ForbiddenRegs(IR_Builder &b): builder(b) {
+    // Initialize forbidden bits
+    forbiddenVec.resize((size_t)forbiddenKind::FBD_NUM);
+    forbiddenVec[(size_t)forbiddenKind::FBD_ADDR].resize(
+        getForbiddenVectorSize(G4_ADDRESS));
+    forbiddenVec[(size_t)forbiddenKind::FBD_FLAG].resize(
+        getForbiddenVectorSize(G4_FLAG));
+  };
+  ~ForbiddenRegs(){};
+
+  unsigned getForbiddenVectorSize(G4_RegFileKind regKind) const;
+  void generateReservedGRFForbidden(unsigned reserveSpillSize);
+  void generateLastGRFForbidden();
+  void generateEOTGRFForbidden();
+  void generateEOTLastGRFForbidden();
+  void generateCallerSaveGRFForbidden();
+  void generateCalleeSaveGRFForbidden();
+
+  BitSet *getForbiddenRegs(forbiddenKind type) {
+    return &forbiddenVec[(size_t)type];
+  }
+};
+
 class GlobalRA {
+
 private:
   std::unordered_set<G4_INST *> EUFusionCallWAInsts;
   bool m_EUFusionCallWANeeded;
@@ -782,7 +988,8 @@ public:
     return true;
   }
   static const char StackCallStr[];
-
+  //The pre assigned forbidden register bits for different kinds
+  ForbiddenRegs fbdRegs;
 private:
   template <class REGION_TYPE>
   static unsigned getRegionDisp(REGION_TYPE *region, const IR_Builder &irb);
@@ -884,6 +1091,7 @@ private:
   bool spillFillIntrinUsesLSC(G4_INST *spillFillIntrin);
   void expandFillLSC(G4_BB *bb, INST_LIST_ITER &instIt);
   void expandSpillLSC(G4_BB *bb, INST_LIST_ITER &instIt);
+  void expandScatterSpillLSC(G4_BB *bb, INST_LIST_ITER &instIt);
   void expandFillNonStackcall(uint32_t numRows, uint32_t offset,
                               short rowOffset, G4_SrcRegRegion *header,
                               G4_DstRegRegion *resultRgn, G4_BB *bb,
@@ -927,8 +1135,13 @@ public:
   FCALL_RET_MAP fcallRetMap;
 
   bool useLscForSpillFill = false;
+  bool useLscForScatterSpill = false;
   bool useLscForNonStackCallSpillFill = false;
 
+  IncrementalRA incRA;
+
+
+  bool avoidBundleConflict = false;
   VarSplitPass *getVarSplitPass() const { return kernel.getVarSplitPass(); }
 
   unsigned getSubRetLoc(const G4_BB *bb) {
@@ -1049,8 +1262,11 @@ public:
 
   LSLiveRange *getSafeLSLR(const G4_Declare *dcl) const {
     auto dclid = dcl->getDeclId();
-    vASSERT(dclid < vars.size());
-    return vars[dclid].LSLR;
+    if (dclid < vars.size()) {
+      return vars[dclid].LSLR;
+    } else {
+      return nullptr;
+    }
   }
 
   LSLiveRange *getLSLR(const G4_Declare *dcl) const { return getVar(dcl).LSLR; }
@@ -1240,7 +1456,8 @@ public:
   LocalLiveRange *GetOrCreateLocalLiveRange(G4_Declare *topdcl);
 
   GlobalRA(G4_Kernel &k, PhyRegPool &r, PointsToAnalysis &p2a)
-      : kernel(k), builder(*k.fg.builder), regPool(r), pointsToAnalysis(p2a) {
+      : kernel(k), builder(*k.fg.builder), regPool(r), pointsToAnalysis(p2a),
+        fbdRegs(*k.fg.builder), incRA(*this) {
     vars.resize(k.Declares.size());
     varMasks.resize(k.Declares.size());
 
@@ -1263,7 +1480,6 @@ public:
   void reportSpillInfo(const LivenessAnalysis &liveness,
                        const GraphColor &coloring) const;
   static uint32_t getRefCount(int loopNestLevel);
-  bool isReRAPass();
   void updateSubRegAlignment(G4_SubReg_Align subAlign);
   bool isChannelSliced();
   void evenAlign();
@@ -1293,6 +1509,17 @@ public:
                 LocalRA &lra);
   void assignRegForAliasDcl();
   void removeSplitDecl();
+  std::pair<unsigned, unsigned> reserveGRFSpillReg(GraphColor &coloring);
+  void generateForbiddenTemplates(unsigned reserveSpillSize);
+
+  BitSet *getForbiddenRegs(forbiddenKind type) {
+    return fbdRegs.getForbiddenRegs(type);
+  }
+
+  unsigned getForbiddenVectorSize(G4_RegFileKind regKind) {
+    return fbdRegs.getForbiddenVectorSize(regKind);
+  }
+
   int coloringRegAlloc();
   void restoreRegs(unsigned startReg, unsigned owordSize,
                    G4_Declare *scratchRegDcl, G4_Declare *framePtr,
@@ -1327,6 +1554,9 @@ public:
       if (dcl->getAliasDeclare())
         continue;
 
+      if (dcl->getDeclId() >= vars.size()) {
+        allocVar(dcl);
+      }
       if (!hasAlignSetup(dcl)) {
         // Var may be temp created in RA
         setSubRegAlign(dcl, dcl->getSubRegAlign());

@@ -2477,8 +2477,12 @@ namespace IGC
         bool nonUniformState)
     {
 
-        if (!m_program->m_Platform->hasSamplerSupport())
+        if (!m_program->m_Platform->hasSamplerSupport()) {
+            CodeGenContext *context = m_program->GetContext();
+            context->EmitError(
+                "sampler messages not supported on this platform", nullptr);
             return;
+        }
 
         int numMsgSpecificOpnds = numSources;
         VISA_PredOpnd* predOpnd = GetFlagOperand(m_encoderState.m_flag);
@@ -2535,9 +2539,12 @@ namespace IGC
         bool zeroLOD,
         bool feedbackEnable)
     {
-
-        if (!m_program->m_Platform->hasSamplerSupport())
+        if (!m_program->m_Platform->hasSamplerSupport()) {
+            CodeGenContext *context = m_program->GetContext();
+            context->EmitError(
+                "sampler messages not supported on this platform", nullptr);
             return;
+        }
 
         VISA_PredOpnd* predOpnd = GetFlagOperand(m_encoderState.m_flag);
         VISA_StateOpndHandle* surfOpnd = GetVISASurfaceOpnd(resource);
@@ -2599,8 +2606,12 @@ namespace IGC
         bool feedbackEnable)
     {
 
-        if (!m_program->m_Platform->hasSamplerSupport())
+        if (!m_program->m_Platform->hasSamplerSupport()) {
+            CodeGenContext *context = m_program->GetContext();
+            context->EmitError(
+                "sampler messages not supported on this platform", nullptr);
             return;
+        }
 
         VISA_PredOpnd* predOpnd = GetFlagOperand(m_encoderState.m_flag);
         bool isIdxLT16;
@@ -3832,22 +3843,29 @@ namespace IGC
                 params.push_back(param_uptr(OptName, literal_deleter));
                 std::string Low = std::to_string((DWORD)Hash);
                 std::string High = std::to_string((DWORD)(Hash >> 32));
-                params.push_back(param_uptr(_strdup(Low.c_str()), dup_deleter));
                 params.push_back(param_uptr(_strdup(High.c_str()), dup_deleter));
+                params.push_back(param_uptr(_strdup(Low.c_str()), dup_deleter));
             };
 
             QWORD AssemblyHash = context->hash.getAsmHash();
 
 
             addHash("-hashmovs", AssemblyHash);
+            if (context->type == ShaderType::OPENCL_SHADER)
+            {
+                uint32_t kernelId = context->getFunctionID(m_program->entry);
+                addHash("-hashmovs1", (QWORD)kernelId);
+            }
+            else {
 
-            QWORD NosHash = context->hash.getNosHash();
-            QWORD PsoHash = context->hash.getPsoHash();
-            QWORD hashToUse = NosHash != 0 ? NosHash : PsoHash;
-            if (hashToUse)
-                addHash("-hashmovs1", hashToUse);
-            else if (context->hash.getPerShaderPsoHash() != 0)
-                addHash("-hashmovs1", context->hash.getPerShaderPsoHash());
+                QWORD NosHash = context->hash.getNosHash();
+                QWORD PsoHash = context->hash.getPsoHash();
+                QWORD hashToUse = NosHash != 0 ? NosHash : PsoHash;
+                if (hashToUse)
+                    addHash("-hashmovs1", hashToUse);
+                else if (context->hash.getPerShaderPsoHash() != 0)
+                    addHash("-hashmovs1", context->hash.getPerShaderPsoHash());
+            }
         }
     }
 
@@ -4205,6 +4223,14 @@ namespace IGC
             (m_program->m_Platform->preemptionSupported() || IGC_IS_FLAG_ENABLED(ForcePreemptionWA)) &&
             IGC_IS_FLAG_ENABLED(EnablePreemption))
         {
+            // Note that debugger requires r0 to be preserved across platforms.
+            // vISA_enablePreemption switch is used as a proxy to reserve r0 up
+            // to, but excluding, PVC. For PVC+, vISA_enablePreemption may not be
+            // set so we rely on another switch vISA_PreserveR0InR0. There are
+            // differences in behavior of these switches. Latter not only reserves
+            // r0 but VISA refer to r0 directly (BuiltInR0 == RealR0). Whereas,
+            // reserving r0 via vISA_enablePreemption simply forbids RA from
+            // using r0 for assignments.
             SaveOption(vISA_enablePreemption, true);
         }
 
@@ -4294,7 +4320,7 @@ namespace IGC
             {
                 SaveOption(vISA_fusedCallWA, (uint32_t)2);
             }
-            else if (m_program->HasStackCalls() || m_program->IsIntelSymbolTableVoidProgram())
+            else if (m_program->HasNestedCalls() || m_program->HasIndirectCalls() || m_program->IsIntelSymbolTableVoidProgram())
             {
                 SaveOption(vISA_fusedCallWA, (uint32_t)1);
             }
@@ -4307,6 +4333,11 @@ namespace IGC
             {
                 SaveOption(vISA_ignoreBFRounding, true);
             }
+        }
+
+        if (IGC_IS_FLAG_ENABLED(DisableGatherRSFusionSyncWA))
+        {
+            SaveOption(vISA_gatherRSFusionSyncWA, false);
         }
 
         if (IGC_IS_FLAG_ENABLED(DisableCSEL))
@@ -4326,6 +4357,12 @@ namespace IGC
         if (IGC_IS_FLAG_ENABLED(EnableVISABinary))
         {
             SaveOption(vISA_GenerateBinary, true);
+            m_enableVISAdump = true;
+        }
+        if (IGC_IS_FLAG_ENABLED(EnableVISADumpCombinedCISA))
+        {
+            SaveOption(vISA_DumpvISA, true);
+            SaveOption(vISA_GenerateCombinedISAASM, true);
             m_enableVISAdump = true;
         }
         if (IGC_IS_FLAG_ENABLED(EnableVISADumpCommonISA))
@@ -4378,6 +4415,13 @@ namespace IGC
         if (auto *regex = IGC_GET_REGKEYSTRING(ShaderDumpFilter))
         {
             SaveOption(vISA_ShaderDumpFilter, regex);
+        }
+
+        auto *forceSpillVaraibles = IGC_GET_REGKEYSTRING(ForceSpillVariables);
+        std::string fSVStr(forceSpillVaraibles);
+        if (!fSVStr.empty()) {
+            SaveOption(vISA_ForceSpillVariables, forceSpillVaraibles);
+            SaveOption(vISA_LocalRA, false);
         }
 
         if (auto *str = IGC_GET_REGKEYSTRING(ForceAssignRhysicalReg))
@@ -4460,13 +4504,26 @@ namespace IGC
                 else if (m_program->getAnnotatedNumThreads() > 0)
                 {
                     // Number of threads per EU is set per kernel function (by user annotation)
-                    SaveOption(vISA_HWThreadNumberPerEU, m_program->getAnnotatedNumThreads());
+                    SaveOption(vISA_HWThreadNumberPerEU, unsigned(m_program->getAnnotatedNumThreads()));
+                }
+                else if (m_program->getAnnotatedNumThreads() == 0)
+                {
+                    // "Auto" mode per kernel function (by user annotation) - use compiler heuristics to determin number of threads per EU
+                    SaveOption(vISA_TotalGRFNum, unsigned(0));
+                    SaveOption(vISA_RegSharingHeuristics, true);
                 }
                 else if (ClContext->getNumThreadsPerEU() > 0)
                 {
                     // Number of threads per EU is set per module (by compiler option)
-                    SaveOption(vISA_HWThreadNumberPerEU, ClContext->getNumThreadsPerEU());
-                } else if (ClContext->getExpGRFSize() > 0) {
+                    SaveOption(vISA_HWThreadNumberPerEU, unsigned(ClContext->getNumThreadsPerEU()));
+                }
+                else if (ClContext->getNumThreadsPerEU() == 0)
+                {
+                    // "Auto" mode per module (by compiler option) - use compiler heuristics to determine number of threads per EU
+                    SaveOption(vISA_TotalGRFNum, unsigned(0));
+                    SaveOption(vISA_RegSharingHeuristics, true);
+                }
+                else if (ClContext->getExpGRFSize() > 0) {
                     // Explicit GRF size set per module (by compiler option)
                     SaveOption(vISA_TotalGRFNum, ClContext->getExpGRFSize());
                 }
@@ -4566,10 +4623,6 @@ namespace IGC
         {
             SaveOption(vISA_AvoidUsingR0R1, true);
         }
-        if (IGC_IS_FLAG_ENABLED(UseOldSubRoutineAugIntf))
-        {
-            SaveOption(vISA_UseOldSubRoutineAugIntf, true);
-        }
         if (IGC_IS_FLAG_ENABLED(FastCompileRA)
             && (!hasStackCall || IGC_IS_FLAG_ENABLED(PartitionWithFastHybridRA)))
         {
@@ -4600,6 +4653,12 @@ namespace IGC
             m_program->m_Platform->limitedBCR())
         {
             SaveOption(vISA_enableBCR, true);
+        }
+        if (context->type == ShaderType::OPENCL_SHADER &&
+            m_program->m_Platform->supportDpasInstruction())
+        {
+            //3: Enable bundle conflict reduction for all instructions.
+            SaveOption(vISA_enableBundleCR, (uint32_t)3);
         }
         if (IGC_IS_FLAG_ENABLED(ForceBCR))
         {
@@ -4933,8 +4992,6 @@ namespace IGC
             SaveOption(vISA_CoalesceScalarMoves, true);
         }
 
-
-
         if (IGC_IS_FLAG_ENABLED(NewSpillCostFunction) ||
             context->getCompilerOption().NewSpillCostFunction)
         {
@@ -5068,7 +5125,7 @@ namespace IGC
         }
     }
 
-    void CEncoder::InitEncoder(bool canAbortOnSpill, bool hasStackCall, bool hasInlineAsmCall, bool hasAdditionalVisaAsmToLink, uint numThreadsPerEU, VISAKernel* prevKernel)
+    void CEncoder::InitEncoder(bool canAbortOnSpill, bool hasStackCall, bool hasInlineAsmCall, bool hasAdditionalVisaAsmToLink, int numThreadsPerEU, VISAKernel* prevKernel)
     {
         m_aliasesMap.clear();
         m_encoderState.m_SubSpanDestination = false;
@@ -5124,7 +5181,12 @@ namespace IGC
         if (numThreadsPerEU > 0)
         {
             // Number of threads per EU is set per kernel (by function MD)
-            SaveOption(vISA_HWThreadNumberPerEU, numThreadsPerEU);
+            SaveOption(vISA_HWThreadNumberPerEU, unsigned(numThreadsPerEU));
+        }
+        else if (numThreadsPerEU == 0)
+        {
+            // "Auto" mode per kernel function - use compiler heuristics to determin number of threads per EU
+            SaveOption(vISA_RegSharingHeuristics, true);
         }
 
         // Pass all build options to builder
@@ -5186,7 +5248,8 @@ namespace IGC
         IGC_ASSERT(nullptr != vKernel);
         uint scratchSpaceSizeTemp = m_program->m_ScratchSpaceSize;
 
-        if (scratchSpaceSizeTemp == 0)
+        if (scratchSpaceSizeTemp == 0 ||
+            !m_program->GetContext()->getModuleMetaData()->compOpt.UseScratchSpacePrivateMemory)
             return;
         // slot1 is used for spilling only when SeparatingSpillAndPrivateScratchMemorySpace is on
         // and Slot0 is used for IGC private memory
@@ -5505,17 +5568,7 @@ namespace IGC
                 memset(fEntry.s_name, '0', vISA::MAX_SYMBOL_NAME_LENGTH);
                 strcpy_s(fEntry.s_name, vISA::MAX_SYMBOL_NAME_LENGTH, F.getName().str().c_str());
 
-                bool isTrue = false;
-
-                if (!F.isDeclaration())
-                {
-                    auto& funcMD = modMD->FuncMD;
-                    auto MD = funcMD.find(&F);
-                    IGC_ASSERT_MESSAGE(MD != funcMD.end(), "Missing metadata?");
-                    isTrue = IGC::isContinuation(MD->second);
-                }
-
-                if (F.isDeclaration() || isTrue)
+                if (F.isDeclaration())
                 {
                     // If the function is only declared, set as undefined type
                     fEntry.s_type = vISA::GenSymType::S_UNDEF;
@@ -5567,7 +5620,11 @@ namespace IGC
                 else
                 {
                     uint32_t type = vISA::GenSymType::S_GLOBAL_VAR_CONST;
-                    if (addrSpace == ADDRESS_SPACE_GLOBAL)
+                    // For Zebin always use constant type for string constants
+                    // because of the relaxed address space requirement of
+                    // printf strings.
+                    IGC_ASSERT(modMD->stringConstants.empty() || m_program->GetContext()->enableZEBinary());
+                    if (addrSpace == ADDRESS_SPACE_GLOBAL && !modMD->stringConstants.count(pGlobal))
                         type = vISA::GenSymType::S_GLOBAL_VAR;
                     if (!pGlobal->hasInitializer())
                         type = vISA::GenSymType::S_UNDEF;
@@ -6277,6 +6334,8 @@ namespace IGC
             CreateFuncAttributeTable(pMainKernel, pFGA);
 
         pOutput->m_scratchSpaceUsedBySpills =
+            IGC_IS_FLAG_SET(ForceScratchSpaceSize) ?
+            IGC_GET_FLAG_VALUE(ForceScratchSpaceSize) :
             getSpillMemSizeWithFG(*m_program->entry, jitInfo->stats.spillMemUsed, pFGA);
         pOutput->m_numGRFSpillFill = jitInfo->stats.numGRFSpillFillWeighted;
 
@@ -6307,10 +6366,6 @@ namespace IGC
         // we reserve a magic large size. Reserving max PTSS is ideal, but it can
         // lead to OOM on machines with large number of threads.
         auto visaplt = GetVISAPlatform(&(m_program->GetContext()->platform));
-        // Workaround unknown TGL issue that smaller scratch size caused regressions.
-        if (visaplt <= TARGET_PLATFORM::GENX_TGLLP && fg->hasStackCall())
-          return 128 * 1024;
-
         if (fg->hasIndirectCall() || fg->hasRecursion()) {
             if(visaplt == TARGET_PLATFORM::Xe_PVCXT)
                 return 64 * 1024;
@@ -6548,7 +6603,7 @@ namespace IGC
                 else if (IGC_GET_FLAG_VALUE(AllowStackCallRetry) == 2)
                     ss << "AllowStackCallRetry=2 (Only the spilled functions will be retried with 2nd try states)" << endl << endl;
                 if (IGC_IS_FLAG_ENABLED(PrintStackCallDebugInfo))
-                    std::cout << ss.str() << endl;
+                    dbgs() << ss.str() << "\n";
             }
         }
 
@@ -8615,8 +8670,9 @@ namespace IGC
             dataShape2D,
             dstVar,
             blockAddrs,
+            0,
+            0,
             srcVar));
-
     }
 
     void CEncoder::LSC_TypedReadWrite(
@@ -8679,26 +8735,6 @@ namespace IGC
             pLODOffset,
             pSrc,
             nullptr));
-    }
-
-    int CEncoder::GetThreadCount(SIMDMode simdMode)
-    {
-        int simdsize = 0;
-        switch (m_program->m_dispatchSize)
-        {
-        case SIMDMode::SIMD8:
-            simdsize = 8;
-            break;
-        case SIMDMode::SIMD16:
-            simdsize = 16;
-            break;
-        case SIMDMode::SIMD32:
-            simdsize = 32;
-            break;
-        default:
-            break;
-        }
-        return simdsize;
     }
 
 }

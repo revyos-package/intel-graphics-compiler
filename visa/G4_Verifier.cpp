@@ -277,7 +277,8 @@ void G4Verifier::verifySend(G4_INST *inst) {
     G4_SrcRegRegion *src1 =
         inst->isSplitSend() ? inst->getSrc(1)->asSrcRegRegion() : nullptr;
 
-    if (inst->isEOT() && kernel.fg.builder->hasEOTGRFBinding()) {
+    bool checkEoT = inst->isEOT() && kernel.fg.builder->hasEOTGRFBinding();
+    if (checkEoT) {
       auto checkEOTSrc = [this](G4_SrcRegRegion *src) {
         const unsigned int EOTStart = 112 * kernel.numEltPerGRF<Type_UB>();
         if (src->isNullReg()) {
@@ -348,6 +349,11 @@ void G4Verifier::verifyOpnd(G4_Operand *opnd, G4_INST *inst) {
     // conditional modifier for sel is a don't care, so we can skip verification
     return;
   }
+
+  // Skip verifying operands of an intrinsic as it usually does not follow
+  // region rules.
+  if (inst->isIntrinsic())
+    return;
 
   // FIXME: If isImm() condition is removed then some assertions are hit.
   // This means somewhere in Jitter operand sharing is happening for
@@ -465,20 +471,8 @@ void G4Verifier::verifyOpnd(G4_Operand *opnd, G4_INST *inst) {
       newRgn.computeLeftBound(*kernel.fg.builder);
       newRgn.computeRightBound(execSize);
 
-      if (inst->isPseudoUse()) {
-        G4_Declare *topdcl = newRgn.getBase()->asRegVar()->getDeclare();
-
-        while (topdcl->getAliasDeclare() != NULL) {
-          topdcl = topdcl->getAliasDeclare();
-        }
-
-        newRgn.setLeftBound(0);
-        newRgn.setRightBound(topdcl->getByteSize() - 1);
-      }
-
       if ((opnd->getRightBound() - opnd->getLeftBound()) >
-              (2u * kernel.numEltPerGRF<Type_UB>()) &&
-          (inst->isPseudoUse() == false)) {
+              (2u * kernel.numEltPerGRF<Type_UB>())) {
         if (!(inst->opcode() == G4_pln && inst->getSrc(1) == opnd)) {
           DEBUG_VERBOSE(
               "Difference between left/right bound is greater than 2 GRF for "
@@ -558,20 +552,9 @@ void G4Verifier::verifyOpnd(G4_Operand *opnd, G4_INST *inst) {
       newRgn.computeLeftBound(*kernel.fg.builder);
       newRgn.computeRightBound(execSize);
 
-      if (inst->isPseudoKill()) {
-        G4_Declare *topdcl = newRgn.getBase()->asRegVar()->getDeclare();
-
-        while (topdcl->getAliasDeclare() != NULL) {
-          topdcl = topdcl->getAliasDeclare();
-        }
-
-        newRgn.setLeftBound(0);
-        newRgn.setRightBound(topdcl->getByteSize() - 1);
-      }
-
       if ((opnd->getRightBound() - opnd->getLeftBound()) >
               (2u * kernel.numEltPerGRF<Type_UB>()) &&
-          (inst->isPseudoKill() == false) && (inst->opcode() != G4_madw)) {
+          (inst->opcode() != G4_madw)) {
         DEBUG_VERBOSE(
             "Difference between left/right bound is greater than 2 GRF for dst "
             "region. Single non-send opnd cannot span 2 GRFs. lb = "

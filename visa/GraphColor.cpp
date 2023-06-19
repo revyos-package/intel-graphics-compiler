@@ -59,8 +59,10 @@ Interference::Interference(const LivenessAnalysis *l,
                            unsigned n, unsigned ns, unsigned nm, GlobalRA &g)
     : gra(g), kernel(g.kernel), lrs(lr), builder(*g.kernel.fg.builder),
       maxId(n), splitStartId(ns), splitNum(nm), liveAnalysis(l),
-      rowSize(maxId / BITS_DWORD + 1), aug(g.kernel, *this, *l, lr, g) {
+      rowSize(maxId / BITS_DWORD + 1), aug(g.kernel, *this, *l, lr, g),
+      incRA(g.incRA) {
   denseMatrixLimit = builder.getuint32Option(vISA_DenseMatrixLimit);
+  incRA.registerNextIter((G4_RegFileKind)l->getSelectedRF(), l);
 }
 
 criticalCmpForEndInterval::criticalCmpForEndInterval(GlobalRA &g) : gra(g) {}
@@ -821,7 +823,7 @@ void BankConflictPass::setupBankConflictsforMad(G4_INST *inst) {
     opndDcls[i] = nullptr;
 
     G4_Operand *src = inst->getSrc(i);
-    if (!src || !src->isSrcRegRegion() || src->isAccReg()) {
+    if (!src || !src->isSrcRegRegion() || src->isAreg()) {
       // bank conflict not possible
       continue;
     }
@@ -852,16 +854,17 @@ void BankConflictPass::setupBankConflictsforMad(G4_INST *inst) {
       }
     }
   }
-
   // Add potential bundle conflicts, so that RA can handle it when option
-  // -enableBundleCR is enabled
-  if (dcls[0] && dcls[1]) {
-    gra.addBundleConflictDcl(dcls[0], dcls[1], offset[0] - offset[1]);
-    gra.addBundleConflictDcl(dcls[1], dcls[0], offset[1] - offset[0]);
-  }
-  if (dcls[1] && dcls[2]) {
-    gra.addBundleConflictDcl(dcls[2], dcls[1], offset[2] - offset[1]);
-    gra.addBundleConflictDcl(dcls[1], dcls[2], offset[1] - offset[2]);
+  // -enableBundleCR with value 2 or 3
+  if (gra.kernel.getuInt32Option(vISA_enableBundleCR) & 2) {
+    if (dcls[0] && dcls[1]) {
+      gra.addBundleConflictDcl(dcls[0], dcls[1], offset[0] - offset[1]);
+      gra.addBundleConflictDcl(dcls[1], dcls[0], offset[1] - offset[0]);
+    }
+    if (dcls[1] && dcls[2]) {
+      gra.addBundleConflictDcl(dcls[2], dcls[1], offset[2] - offset[1]);
+      gra.addBundleConflictDcl(dcls[1], dcls[2], offset[1] - offset[2]);
+    }
   }
 
   for (int k = 0; k < 2; k++) {
@@ -1195,7 +1198,7 @@ void GlobalRA::emitFGWithLiveness(const LivenessAnalysis &liveAnalysis) const {
           continue;
 
         if (dcl->getRegVar()->isRegAllocPartaker()) {
-          if (liveAnalysis.use_gen[bb->getId()].isSet(
+          if (liveAnalysis.use_gen[bb->getId()].test(
                   dcl->getRegVar()->getId())) {
             std::cout << dcl->getName() << ", ";
           }
@@ -1208,7 +1211,7 @@ void GlobalRA::emitFGWithLiveness(const LivenessAnalysis &liveAnalysis) const {
           continue;
 
         if (dcl->getRegVar()->isRegAllocPartaker()) {
-          if (liveAnalysis.use_kill[bb->getId()].isSet(
+          if (liveAnalysis.use_kill[bb->getId()].test(
                   dcl->getRegVar()->getId())) {
             std::cout << dcl->getName() << ", ";
           }
@@ -1318,6 +1321,60 @@ LiveRange::LiveRange(G4_RegVar *v, GlobalRA &g)
     // number of GRFs
     numRegNeeded = v->getDeclare()->getNumRows();
   }
+}
+
+void LiveRange::initializeForbidden() {
+  auto rf = gra.incRA.getSelectedRF();
+  if (LivenessAnalysis::livenessClass(rf, G4_ADDRESS)) {
+    setForbidden(forbiddenKind::FBD_ADDR);
+  } else if (LivenessAnalysis::livenessClass(rf, G4_FLAG)) {
+    setForbidden(forbiddenKind::FBD_FLAG);
+  } else {
+    setForbidden(forbiddenKind::FBD_RESERVEDGRF);
+  };
+
+  bool hasStackCall =
+      gra.kernel.fg.getHasStackCalls() || gra.kernel.fg.getIsStackCallFunc();
+  setCallerSaveBias(hasStackCall);
+  if (getRegKind() == G4_GRF) {
+    if (gra.kernel.fg.isPseudoVCADcl(dcl)) {
+      setForbidden(forbiddenKind::FBD_CALLERSAVE);
+    } else if (gra.kernel.fg.isPseudoVCEDcl(dcl)) {
+      setForbidden(forbiddenKind::FBD_CALLEESAVE);
+    } else if (dcl == gra.getOldFPDcl()) {
+      setForbidden(forbiddenKind::FBD_CALLERSAVE);
+    }
+  }
+}
+
+void LiveRange::initialize() {
+  if (gra.kernel.fg.isPseudoDcl(dcl)) {
+    setIsPseudoNode();
+  }
+  if (dcl->getIsPartialDcl()) {
+    if (G4_Declare *parentDcl = gra.getSplittedDeclare(dcl)) {
+      setParentLRID(parentDcl->getRegVar()->getId());
+      setIsPartialDcl();
+    }
+  }
+  if (dcl->getIsSplittedDcl()) {
+    setIsSplittedDcl(true);
+  }
+  setBC(gra.getBankConflict(dcl));
+
+  initializeForbidden();
+}
+
+LiveRange *LiveRange::createNewLiveRange(G4_Declare *dcl, GlobalRA &gra) {
+  auto &IncRAMem = gra.incRA.mem;
+  G4_RegVar *var = dcl->getRegVar();
+  vISA_ASSERT(!dcl->getAliasDeclare(),
+              "error: attempt to create LiveRange for non-root dcl");
+  auto *lr = new (IncRAMem) LiveRange(var, gra);
+
+  lr->initialize();
+
+  return lr;
 }
 
 void LiveRange::checkForInfiniteSpillCost(
@@ -1491,8 +1548,9 @@ bool Interference::interfereBetween(unsigned v1, unsigned v2) const {
     unsigned col = v2 / BITS_DWORD;
     return matrix[v1 * rowSize + col] & (1 << (v2 % BITS_DWORD));
   } else {
-    auto &&set = sparseMatrix[v1];
-    return set.find(v2) != set.end();
+    auto &set1 = sparseMatrix[v1];
+    auto &set2 = sparseMatrix[v2];
+    return set1.test(v2) || set2.test(v1);
   }
 }
 
@@ -1503,7 +1561,7 @@ bool Interference::interfereBetween(unsigned v1, unsigned v2) const {
 // hence is not a candidate for being marked with an infinite spill cost.
 //
 void Interference::buildInterferenceAtBBExit(const G4_BB *bb,
-                                             SparseBitSet &live) {
+                                             llvm_SBitVector &live) {
 
   // live must be empty at this point
   live = liveAnalysis->use_out[bb->getId()];
@@ -1551,89 +1609,59 @@ inline void Interference::filterSplitDclares(unsigned startIdx, unsigned endIdx,
 // partial declare does not interference with hybrid declares added by local RA,
 // the reason is simple, these declares are assigned register already.
 //
-void Interference::buildInterferenceWithLive(const SparseBitSet &live,
+void Interference::buildInterferenceWithLive(const llvm_SBitVector &live,
                                              unsigned i) {
+  // set interference between variable with index "i" and variable set in "live".
+  // j is the valid bit index in the live.
+  for (unsigned j : live) {
+    if (!varSplitCheckBeforeIntf(i, j)) {
+      if (j < i) {
+        safeSetInterference(j, i);
+      } else if (j > i) {
+        safeSetInterference(i, j);
+      }
+    }
+  }
   const LiveRange *lr = lrs[i];
   bool is_partial = lr->getIsPartialDcl();
   bool is_splitted = lr->getIsSplittedDcl();
   unsigned n = 0;
-
-  // For none partial varaible, interference with all varaibles
-  unsigned numDwords = maxId / BITS_DWORD;
-  unsigned numBits = maxId % BITS_DWORD;
-
-  if (numBits) {
-    numDwords++;
-  }
-
-  unsigned start_idx = 0;
-  unsigned end_idx = 0;
+  unsigned start_idx = 0; // The variable index of the first child declare, the
+                          // child variables' indexes are contigious.
+  unsigned end_idx = 0;   // The variable index of the last child declare
   if (is_splitted) // if current is splitted dcl, don't interference with all
                    // its child nodes.
   {
     start_idx = lr->getDcl()->getSplitVarStartID();
     end_idx = start_idx + gra.getSplitVarNum(lr->getDcl());
   }
-
   if (is_partial) // if current is partial dcl, don't interference with all
                   // other partial dcls, and it's parent dcl.
   {
+    // n is the variable ID of the splitted(parent) declare
     n = gra.getSplittedDeclare(lr->getDcl())->getRegVar()->getId();
     start_idx = splitStartId;
     end_idx = splitStartId + splitNum;
   }
 
-  unsigned colEnd = i / BITS_DWORD;
-
-  // Set column bits in intf graph
-  for (unsigned k = 0; k < colEnd; k++) {
-    unsigned elt = live.getElt(k);
-
-    if (elt != 0) {
-      if (is_partial || is_splitted) {
-        filterSplitDclares(start_idx, end_idx, n, k, elt, is_partial);
-      }
-
-      for (unsigned j = 0; j < BITS_DWORD; j++) {
-        if (elt & (1 << j)) {
-          unsigned curPos = j + (k * BITS_DWORD);
-          safeSetInterference(curPos, i);
-        }
-      }
+  if (is_partial) { // Don't interference with parent
+    if (i < n) {
+      safeClearInterference(i, n);
+    } else {
+      safeClearInterference(n, i);
     }
   }
-
-  // Set dword at transition point from column to row
-  unsigned elt = live.getElt(colEnd);
-  // checkAndSetIntf guarantee partial and splitted cases
-  if (elt != 0) {
-    for (unsigned j = 0; j < BITS_DWORD; j++) {
-      if (elt & (1 << j)) {
-        unsigned curPos = j + (colEnd * BITS_DWORD);
-        if (!varSplitCheckBeforeIntf(i, curPos)) {
-          checkAndSetIntf(i, curPos);
-        }
-      }
-    }
-  }
-
-  colEnd++;
-  // Set row intf graph
-  for (unsigned k = colEnd; k < numDwords; k++) {
-    unsigned elt = live.getElt(k);
-
-    if (is_partial || is_splitted) {
-      filterSplitDclares(start_idx, end_idx, n, k, elt, is_partial);
-    }
-
-    if (elt != 0) {
-      setBlockInterferencesOneWay(i, k, elt);
+  for (unsigned j = start_idx; j < end_idx; j++) { //Don't inteference with the child
+    if (j < i) {
+      safeClearInterference(j, i);
+    } else {
+      safeClearInterference(i, j);
     }
   }
 }
 
 void Interference::buildInterferenceWithSubDcl(unsigned lr_id, G4_Operand *opnd,
-                                               SparseBitSet &live, bool setLive,
+                                               llvm_SBitVector &live, bool setLive,
                                                bool setIntf) {
 
   const G4_Declare *dcl = lrs[lr_id]->getDcl();
@@ -1648,7 +1676,7 @@ void Interference::buildInterferenceWithSubDcl(unsigned lr_id, G4_Operand *opnd,
         buildInterferenceWithLive(live, subID);
       }
       if (setLive) {
-        live.set(subID, true);
+        live.set(subID);
       }
     }
   }
@@ -1682,9 +1710,9 @@ void Interference::buildInterferenceWithAllSubDcl(unsigned v1, unsigned v2) {
 // always save/restore before/after call and are better assigned to the
 // caller-save space.
 //
-void Interference::addCalleeSaveBias(const SparseBitSet &live) {
+void Interference::addCalleeSaveBias(const llvm_SBitVector &live) {
   for (unsigned i = 0; i < maxId; i++) {
-    if (live.isSet(i)) {
+    if (live.test(i)) {
       lrs[i]->setCallerSaveBias(false);
       lrs[i]->setCalleeSaveBias(true);
     }
@@ -1734,7 +1762,9 @@ void Interference::buildInterferenceAmongLiveIns() {
   //
   const G4_BB *entryBB = kernel.fg.getEntryBB();
 
-  for (unsigned i = 0; i < liveAnalysis->getNumSelectedGlobalVar(); i++) {
+  for (auto it = liveAnalysis->globalVars.begin();
+       it != liveAnalysis->globalVars.end(); ++it) {
+    auto i = (*it);
     if (liveAnalysis->isLiveAtEntry(entryBB, i)) {
       // Mark reference can not gaurantee all the varaibles are local, update
       // here
@@ -1743,8 +1773,9 @@ void Interference::buildInterferenceAmongLiveIns() {
         lrs[i]->setIsSplittedDcl(false);
       }
 
-      for (unsigned j = i + 1; j < liveAnalysis->getNumSelectedGlobalVar();
-           j++) {
+      auto nextIt = it;
+      for (auto nit = ++nextIt; nit != liveAnalysis->globalVars.end(); ++nit) {
+        auto j = (*nit);
         if (liveAnalysis->isLiveAtEntry(entryBB, j)) {
           if (lrs[i]->getDcl()->getRegFile() == G4_INPUT &&
               lrs[i]->getVar()->getPhyReg() != NULL &&
@@ -1865,7 +1896,9 @@ void Interference::markInterferenceToAvoidDstSrcOverlap(G4_BB *bb,
     if (dst->getBase()->isRegAllocPartaker()) {
       isDstRegAllocPartaker = true;
       dstId = ((G4_RegVar *)dst->getBase())->getId();
-      dstOpndNumRows = dst->getLinearizedEnd() - dst->getLinearizedStart() + 1 >
+      dstOpndNumRows = dst->getSubRegOff() * dst->getTypeSize() +
+                           dst->getLinearizedEnd() - dst->getLinearizedStart() +
+                           1 >
                        kernel.numEltPerGRF<Type_UB>();
     } else if (kernel.getOption(vISA_LocalRA)) {
       LocalLiveRange *localLR = NULL;
@@ -1882,7 +1915,7 @@ void Interference::markInterferenceToAvoidDstSrcOverlap(G4_BB *bb,
         isDstLocallyAssigned = true;
         dstPreg = preg->asGreg()->getRegNum();
         dstNumRows = localLR->getTopDcl()->getNumRows();
-        dstOpndNumRows =
+        dstOpndNumRows = dst->getSubRegOff() * dst->getTypeSize() +
             dst->getLinearizedEnd() - dst->getLinearizedStart() + 1 >
             kernel.numEltPerGRF<Type_UB>();
         isDstEvenAlign = (dstPreg % 2 == 0);
@@ -1904,7 +1937,9 @@ void Interference::markInterferenceToAvoidDstSrcOverlap(G4_BB *bb,
             int srcOffset =
                 src->getLeftBound() / kernel.numEltPerGRF<Type_UB>();
             bool srcOpndNumRows =
-                srcRgn->getLinearizedEnd() - srcRgn->getLinearizedStart() + 1 >
+                srcRgn->getSubRegOff() * srcRgn->getTypeSize() +
+                                      srcRgn->getLinearizedEnd() -
+                                      srcRgn->getLinearizedStart() + 1 >
                 kernel.numEltPerGRF<Type_UB>();
 
             int srcReg = 0;
@@ -2032,33 +2067,21 @@ uint32_t GlobalRA::getRefCount(int loopNestLevel) {
 
 // handle return value interference for fcall
 void Interference::buildInterferenceForFcall(
-    G4_BB *bb, SparseBitSet &live, G4_INST *inst,
+    G4_BB *bb, llvm_SBitVector &live, G4_INST *inst,
     std::list<G4_INST *>::reverse_iterator i, const G4_VarBase *regVar) {
   vISA_ASSERT(inst->opcode() == G4_pseudo_fcall, "expect fcall inst");
-  unsigned refCount = GlobalRA::getRefCount(
-      kernel.getOption(vISA_ConsiderLoopInfoInRA) ? bb->getNestLevel() : 0);
-
   if (regVar->isRegAllocPartaker()) {
     unsigned id = static_cast<const G4_RegVar *>(regVar)->getId();
-    lrs[id]->setRefCount(lrs[id]->getRefCount() + refCount);
 
     buildInterferenceWithLive(live, id);
     updateLiveness(live, id, false);
   }
 }
 
-bool GlobalRA::isReRAPass() {
-  auto gtPinInfo = kernel.getGTPinData();
-  bool reRAPass = gtPinInfo && gtPinInfo->isReRAPass();
-  return reRAPass;
-}
-
 
 void Interference::buildInterferenceForDst(
-    G4_BB *bb, SparseBitSet &live, G4_INST *inst,
+    G4_BB *bb, llvm_SBitVector &live, G4_INST *inst,
     std::list<G4_INST *>::reverse_iterator i, G4_DstRegRegion *dst) {
-  unsigned refCount = GlobalRA::getRefCount(
-      kernel.getOption(vISA_ConsiderLoopInfoInRA) ? bb->getNestLevel() : 0);
 
   if (dst->getBase()->isRegAllocPartaker()) {
     unsigned id = ((G4_RegVar *)dst->getBase())->getId();
@@ -2074,9 +2097,6 @@ void Interference::buildInterferenceForDst(
     // pseudo_kill nodes.
     //
     if (!inst->isPseudoKill() && !inst->isLifeTimeEnd()) {
-      lrs[id]->setRefCount(lrs[id]->getRefCount() +
-                           refCount); // update reference count
-
       buildInterferenceWithLive(live, id);
       if (lrs[id]->getIsSplittedDcl()) {
         buildInterferenceWithSubDcl(id, (G4_Operand *)dst, live, false, true);
@@ -2096,14 +2116,11 @@ void Interference::buildInterferenceForDst(
              i < lrs[id]->getDcl()->getSplitVarStartID() +
                      gra.getSplitVarNum(lrs[id]->getDcl());
              i++) {
-          live.set(i, false); // kill all childs, there may be not used childs
+          live.reset(i); // kill all childs, there may be not used childs
                               // generated due to splitting, killed also.
         }
       }
     }
-
-    // Indirect defs are actually uses of address reg
-    lrs[id]->checkForInfiniteSpillCost(bb, i);
   } else if (dst->isIndirect() && liveAnalysis->livenessClass(G4_GRF)) {
     //
     // add interferences to the list of potential indirect destination accesses.
@@ -2113,19 +2130,13 @@ void Interference::buildInterferenceForDst(
     for (auto pt : pointsToSet) {
       if (pt.var->isRegAllocPartaker()) {
         buildInterferenceWithLive(live, pt.var->getId());
-        if (kernel.getOption(vISA_IncSpillCostAllAddrTaken)) {
-          lrs[pt.var->getId()]->setRefCount(
-              lrs[pt.var->getId()]->getRefCount() + refCount);
-        }
       }
     }
   }
 }
 
-void Interference::buildInterferenceWithinBB(G4_BB *bb, SparseBitSet &live) {
+void Interference::buildInterferenceWithinBB(G4_BB *bb, llvm_SBitVector &live) {
   DebugInfoState state;
-  unsigned refCount = GlobalRA::getRefCount(
-      kernel.getOption(vISA_ConsiderLoopInfoInRA) ? bb->getNestLevel() : 0);
 
   for (auto i = bb->rbegin(); i != bb->rend(); i++) {
     G4_INST *inst = (*i);
@@ -2167,19 +2178,6 @@ void Interference::buildInterferenceWithinBB(G4_BB *bb, SparseBitSet &live) {
     } else if (kernel.fg.builder->avoidDstSrcOverlap() && dst &&
                !dst->isNullReg()) {
       markInterferenceToAvoidDstSrcOverlap(bb, inst);
-    }
-
-    if ((inst->isSend() || inst->isFillIntrinsic()) && !dst->isNullReg()) {
-      // r127 must not be used for return address when there is a src and dest
-      // overlap in send instruction. This applies to split-send as well
-      if (kernel.fg.builder->needsToReserveR127() &&
-          liveAnalysis->livenessClass(G4_GRF)) {
-        if (dst->getBase()->isRegAllocPartaker() &&
-            !dst->getBase()->asRegVar()->isPhyRegAssigned()) {
-          int dstId = dst->getBase()->asRegVar()->getId();
-          lrs[dstId]->markForbidden(kernel.getNumRegTotal() - 1, 1);
-        }
-      }
     }
 
     if (inst->isSplitSend() && !inst->getSrc(1)->isNullReg()) {
@@ -2226,26 +2224,12 @@ void Interference::buildInterferenceWithinBB(G4_BB *bb, SparseBitSet &live) {
         G4_SrcRegRegion *srcRegion = src->asSrcRegRegion();
         if (srcRegion->getBase()->isRegAllocPartaker()) {
           unsigned id = ((G4_RegVar *)(srcRegion)->getBase())->getId();
-          lrs[id]->setRefCount(lrs[id]->getRefCount() +
-                               refCount); // update reference count
 
           if (!inst->isLifeTimeEnd()) {
             updateLiveness(live, id, true);
             if (lrs[id]->getIsSplittedDcl()) {
               buildInterferenceWithSubDcl(id, src, live, true, false);
             }
-          }
-
-          if (inst->isEOT() && liveAnalysis->livenessClass(G4_GRF)) {
-            // mark the liveRange as the EOT source
-            lrs[id]->setEOTSrc();
-            if (builder.hasEOTGRFBinding()) {
-              lrs[id]->markForbidden(0, kernel.getNumRegTotal() - 16);
-            }
-          }
-
-          if (inst->isReturn()) {
-            lrs[id]->setRetIp();
           }
         } else if (srcRegion->isIndirect() &&
                    liveAnalysis->livenessClass(G4_GRF)) {
@@ -2256,10 +2240,6 @@ void Interference::buildInterferenceWithinBB(G4_BB *bb, SparseBitSet &live) {
           for (auto pt : pointsToSet) {
             if (pt.var->isRegAllocPartaker()) {
               updateLiveness(live, pt.var->getId(), true);
-              if (kernel.getOption(vISA_IncSpillCostAllAddrTaken)) {
-                lrs[pt.var->getId()]->setRefCount(
-                    lrs[pt.var->getId()]->getRefCount() + refCount);
-              }
             }
           }
         }
@@ -2272,7 +2252,7 @@ void Interference::buildInterferenceWithinBB(G4_BB *bb, SparseBitSet &live) {
     if (dst) {
       if (dst->getBase()->isRegAllocPartaker() &&
           dst->getRegAccess() != Direct) {
-        live.set(dst->getBase()->asRegVar()->getId(), true);
+        live.set(dst->getBase()->asRegVar()->getId());
       }
     }
 
@@ -2285,15 +2265,11 @@ void Interference::buildInterferenceWithinBB(G4_BB *bb, SparseBitSet &live) {
       if (flagReg != NULL) {
         unsigned id = flagReg->asRegVar()->getId();
         if (flagReg->asRegVar()->isRegAllocPartaker()) {
-          lrs[id]->setRefCount(lrs[id]->getRefCount() +
-                               refCount); // update reference count
           buildInterferenceWithLive(live, id);
 
           if (liveAnalysis->writeWholeRegion(bb, inst, flagReg)) {
             updateLiveness(live, id, false);
           }
-
-          lrs[id]->checkForInfiniteSpillCost(bb, i);
         }
       } else {
         vISA_ASSERT((inst->opcode() == G4_sel || inst->opcode() == G4_csel) &&
@@ -2310,9 +2286,7 @@ void Interference::buildInterferenceWithinBB(G4_BB *bb, SparseBitSet &live) {
       G4_VarBase *flagReg = predicate->getBase();
       unsigned id = flagReg->asRegVar()->getId();
       if (flagReg->asRegVar()->isRegAllocPartaker()) {
-        lrs[id]->setRefCount(lrs[id]->getRefCount() +
-                             refCount); // update reference count
-        live.set(id, true);
+        live.set(id);
       }
     }
 
@@ -2330,7 +2304,7 @@ void Interference::applyPartitionBias() {
   // code around fcall. Save/restore may still be needed in case this is a
   // stack call function (vs kernel), but a single save/restore sequence can
   // free the callee save register throughout the function.
-  for (unsigned int i = 0; i != liveAnalysis->getNumSelectedGlobalVar(); i++) {
+  for (auto i : liveAnalysis->globalVars) {
     if (kernel.fg.isPseudoVCADcl(lrs[i]->getDcl())) {
       const auto &intfs = sparseIntf[i];
       for (const auto edge : intfs) {
@@ -2345,12 +2319,151 @@ void Interference::applyPartitionBias() {
   }
 }
 
+// Any setting of LiveRange property that is discovered during interference
+// must be done here. Because with incremental RA, we may not run interference
+// computation for all BBs.
+void Interference::setupLRs(G4_BB *bb) {
+  unsigned refCount = GlobalRA::getRefCount(
+      kernel.getOption(vISA_ConsiderLoopInfoInRA) ? bb->getNestLevel() : 0);
+  bool incSpillCostAddrTaken = kernel.getOption(vISA_IncSpillCostAllAddrTaken);
+
+  for (auto i = bb->rbegin(); i != bb->rend(); i++) {
+    G4_INST *inst = (*i);
+
+    auto dst = inst->getDst();
+    if (dst) {
+      if (dst->getBase()->isRegAllocPartaker()) {
+        unsigned id = ((G4_RegVar *)dst->getBase())->getId();
+        if (!inst->isPseudoKill() && !inst->isLifeTimeEnd()) {
+          lrs[id]->setRefCount(lrs[id]->getRefCount() +
+                               refCount); // update reference count
+        }
+        lrs[id]->checkForInfiniteSpillCost(bb, i);
+      } else if (dst->isIndirect() && liveAnalysis->livenessClass(G4_GRF)) {
+        const REGVAR_VECTOR &pointsToSet =
+            liveAnalysis->getPointsToAnalysis().getAllInPointsToOrIndrUse(dst,
+                                                                          bb);
+        for (auto pt : pointsToSet) {
+          if (!pt.var->isRegAllocPartaker() || !incSpillCostAddrTaken)
+            continue;
+
+          lrs[pt.var->getId()]->setRefCount(
+              lrs[pt.var->getId()]->getRefCount() + refCount);
+        }
+      }
+    }
+
+    if (inst->opcode() == G4_pseudo_fcall &&
+        liveAnalysis->livenessClass(G4_GRF)) {
+      auto fcall = kernel.fg.builder->getFcallInfo(bb->back());
+      G4_Declare *ret = kernel.fg.builder->getStackCallRet();
+      vISA_ASSERT(fcall != std::nullopt, "fcall info not found");
+      uint16_t retSize = fcall->getRetSize();
+      if (ret && retSize > 0 && ret->getRegVar() &&
+          ret->getRegVar()->isRegAllocPartaker()) {
+        unsigned id = static_cast<const G4_RegVar *>(ret->getRegVar())->getId();
+        lrs[id]->setRefCount(lrs[id]->getRefCount() + refCount);
+      }
+    }
+
+    if ((inst->isSend() || inst->isFillIntrinsic()) && !dst->isNullReg()) {
+      // r127 must not be used for return address when there is a src and dest
+      // overlap in send instruction. This applies to split-send as well
+      if (kernel.fg.builder->needsToReserveR127() &&
+          liveAnalysis->livenessClass(G4_GRF) &&
+          dst->getBase()->isRegAllocPartaker() &&
+          !dst->getBase()->asRegVar()->isPhyRegAssigned()) {
+        int dstId = dst->getBase()->asRegVar()->getId();
+        lrs[dstId]->setForbidden(forbiddenKind::FBD_LASTGRF);
+      }
+    }
+
+    //
+    // process each source operand
+    //
+    for (unsigned j = 0, numSrc = inst->getNumSrc(); j < numSrc; j++) {
+      G4_Operand *src = inst->getSrc(j);
+      if (!src || !src->isSrcRegRegion())
+        continue;
+
+      G4_SrcRegRegion *srcRegion = src->asSrcRegRegion();
+      if (srcRegion->getBase()->isRegAllocPartaker()) {
+        unsigned id = ((G4_RegVar *)(srcRegion)->getBase())->getId();
+        lrs[id]->setRefCount(lrs[id]->getRefCount() +
+                             refCount); // update reference count
+        if (inst->isEOT() && liveAnalysis->livenessClass(G4_GRF)) {
+          // mark the liveRange as the EOT source
+          lrs[id]->setEOTSrc();
+          if (builder.hasEOTGRFBinding()) {
+            lrs[id]->setForbidden(forbiddenKind::FBD_EOT);
+          }
+        }
+        if (inst->isReturn()) {
+          lrs[id]->setRetIp();
+        }
+      } else if (srcRegion->isIndirect() &&
+                 liveAnalysis->livenessClass(G4_GRF)) {
+        // make every var in points-to set live
+        const REGVAR_VECTOR &pointsToSet =
+            liveAnalysis->getPointsToAnalysis().getAllInPointsToOrIndrUse(
+                srcRegion, bb);
+        for (auto pt : pointsToSet) {
+          if (!pt.var->isRegAllocPartaker() || !incSpillCostAddrTaken)
+            continue;
+
+          lrs[pt.var->getId()]->setRefCount(
+              lrs[pt.var->getId()]->getRefCount() + refCount);
+        }
+      }
+    }
+
+    //
+    // Process condMod
+    //
+    if (auto mod = inst->getCondMod()) {
+      G4_VarBase *flagReg = mod->getBase();
+      if (flagReg) {
+        unsigned id = flagReg->asRegVar()->getId();
+        if (flagReg->asRegVar()->isRegAllocPartaker()) {
+          lrs[id]->setRefCount(lrs[id]->getRefCount() +
+                               refCount); // update reference count
+
+          lrs[id]->checkForInfiniteSpillCost(bb, i);
+        }
+      } else {
+        vISA_ASSERT((inst->opcode() == G4_sel || inst->opcode() == G4_csel) &&
+                        inst->getCondMod() != NULL,
+                    "Invalid CondMod");
+      }
+    }
+
+    //
+    // Process predicate
+    //
+    if (auto predicate = inst->getPredicate()) {
+      G4_VarBase *flagReg = predicate->getBase();
+      unsigned id = flagReg->asRegVar()->getId();
+      if (flagReg->asRegVar()->isRegAllocPartaker()) {
+        lrs[id]->setRefCount(lrs[id]->getRefCount() +
+                             refCount); // update reference count
+      }
+    }
+  }
+}
+
 void Interference::computeInterference() {
   startTimer(TimerID::INTERFERENCE);
+
+  for (auto bb : kernel.fg) {
+    // Initialize LR properties like ref count and forbidden here.
+    // This method is invoked for all BBs even with incremental RA.
+    setupLRs(bb);
+  }
+
   //
   // create bool vector, live, to track live ranges that are currently live
   //
-  SparseBitSet live(maxId);
+  llvm_SBitVector live;
 
   buildInterferenceAmongLiveOuts();
 
@@ -2366,7 +2479,6 @@ void Interference::computeInterference() {
     //
     // traverse inst in the reverse order
     //
-
     buildInterferenceWithinBB(bb, live);
   }
 
@@ -2396,13 +2508,21 @@ void Interference::computeInterference() {
   aug.augmentIntfGraph();
 
   generateSparseIntfGraph();
+
   countNeighbors();
+
+  if (IncrementalRA::isEnabled(kernel)) {
+    // Incremental interference was computed for current iteration.
+    // Now prepare for incremental temps in next iteration.
+    gra.incRA.clearCandidates();
+  }
 
   // apply callee save bias after augmentation as interference graph is
   // up-to-date.
   if (kernel.fg.getHasStackCalls()) {
     applyPartitionBias();
   }
+  stopTimer(TimerID::INTERFERENCE);
 }
 
 void Interference::getNormIntfNum() {
@@ -2432,8 +2552,8 @@ void Interference::getNormIntfNum() {
     }
   } else {
     for (uint32_t v1 = 0; v1 < maxId; ++v1) {
-      auto &&intfSet = sparseMatrix[v1];
-      numEdges += intfSet.size();
+      auto &intfSet = sparseMatrix[v1];
+      numEdges += intfSet.count();
     }
   }
 
@@ -2475,14 +2595,13 @@ void Interference::generateSparseIntfGraph() {
     }
   } else {
     for (uint32_t v1 = 0; v1 < maxId; ++v1) {
-      auto &&intfSet = sparseMatrix[v1];
+      auto &intfSet = sparseMatrix[v1];
       for (uint32_t v2 : intfSet) {
         sparseIntf[v1].emplace_back(v2);
         sparseIntf[v2].emplace_back(v1);
       }
     }
   }
-  stopTimer(TimerID::INTERFERENCE);
 }
 
 void Interference::countNeighbors() {
@@ -2677,7 +2796,8 @@ bool Augmentation::updateDstMaskForGatherRaw(G4_INST *inst,
   unsigned char curEMBit = (unsigned char)inst->getMaskOffset();
   unsigned short elemSize = dst->getElemSize();
 
-  if (inst->isWriteEnableInst()) {
+  if (inst->isWriteEnableInst() ||
+      kernel.fg.builder->hasGatherReadSuppressionWARA()) {
     curEMBit = NOMASK_BYTE;
   }
 
@@ -2858,22 +2978,7 @@ bool Augmentation::updateDstMaskForGatherRaw(G4_INST *inst,
 
   return false;
 }
-#if 0  // TODO: replace with newer approach
-bool Augmentation::updateDstMaskForGatherLdSt(
-    G4_INST* inst, std::vector<unsigned char>& mask, const G4_SendDescLdSt *msgDesc)
-{
-    // as in the raw case only support SIMT
-    if (msgDesc->op != MsgOp::LOAD || msgDesc->order == LdStOrder::SCALAR) {
-        return false;
-    }
-    unsigned char curEMBit = (unsigned char)inst->getMaskOffset();
-    unsigned char execSize = inst->getExecSize();
-    updateMaskSIMT(curEMBit, execSize, mask,
-        msgDesc->elemBitsReg, msgDesc->elemPerAddr);
 
-    return true;
-}
-#endif
 
 // Value stored at each byte in mask determines which bits
 // of EM enable that byte for writing. When checkCmodOnly
@@ -3574,7 +3679,7 @@ void Augmentation::buildLiveIntervals() {
 
   // Live-in variables have their start interval start with
   // first instruction of entry BB
-  for (unsigned i = 0; i < liveAnalysis.getNumSelectedGlobalVar(); i++) {
+  for (auto i : liveAnalysis.globalVars) {
     if (liveAnalysis.isLiveAtEntry(entryBB, i)) {
       const G4_Declare *dcl = lrs[i]->getDcl()->getRootDeclare();
 
@@ -3602,8 +3707,7 @@ void Augmentation::buildLiveIntervals() {
         updateStartInterval(scallDcl, inst);
         updateEndInterval(scallDcl, inst);
 
-        FuncInfo *callee = curBB->getCalleeInfo();
-        std::pair<G4_INST *, FuncInfo *> callInfo(inst, callee);
+        std::pair<G4_INST *, G4_BB*> callInfo(inst, curBB);
         callDclMap.emplace(scallDcl, callInfo);
 
         continue;
@@ -3719,15 +3823,14 @@ void Augmentation::buildLiveIntervals() {
   // ToDo: this seems very slow when # variable is large, should look for sparse
   // implementation
   auto extendVarLiveness = [this](G4_BB *bb, G4_INST *inst) {
-    for (unsigned i = 0; i < liveAnalysis.getNumSelectedGlobalVar(); i++) {
+    for (auto i : liveAnalysis.globalVars) {
       if (liveAnalysis.isLiveAtEntry(bb, i) == true &&
           !kernel.fg.isPseudoDcl(lrs[i]->getDcl())) {
         // Extend ith live-interval
         G4_Declare *dcl = lrs[i]->getDcl()->getRootDeclare();
-        unsigned oldStart = gra.getStartInterval(dcl)->getLexicalId();
-        (void)oldStart;
         updateStartInterval(dcl, inst);
         VISA_DEBUG_VERBOSE({
+          unsigned oldStart = gra.getStartInterval(dcl)->getLexicalId();
           if (oldStart > gra.getStartInterval(dcl)->getLexicalId()) {
             std::cout << "Extending " << dcl->getName() << " from old start "
                       << oldStart << " to "
@@ -3774,7 +3877,15 @@ void Augmentation::buildLiveIntervals() {
       for (auto block : loopBody) {
         // FIXME: this may process a BB multiple times
         for (auto succBB : block->Succs) {
-          if (loopBody.find(succBB) == loopBody.end()) {
+          // A subroutine call BB's successor is callee's INIT BB.
+          // Loop data structure doesn't include callee BB. So
+          // succBB not part of loop may still be INIT BB of callee.
+          // Such an INIT BB shouldn't be treated as a loop exit
+          // for live-range extension. If we don't check for INIT BB
+          // we end up extending RET__loc range to loop header
+          // which isn't correct.
+          if (loopBody.find(succBB) == loopBody.end() &&
+              (succBB->getBBType() & G4_BB_INIT_TYPE) == 0) {
             G4_BB *exitBB = succBB;
 
             unsigned latchBBId = (backEdge.first)->getId();
@@ -3794,7 +3905,8 @@ void Augmentation::buildLiveIntervals() {
 
       G4_BB *startBB = backEdge.second;
       G4_BB *EndBB = backEdge.first;
-      for (unsigned i = 0; i < liveAnalysis.getNumSelectedGlobalVar(); i++) {
+
+      for (auto i : liveAnalysis.globalVars) {
         if (liveAnalysis.isLiveAtEntry(startBB, i) == true &&
             liveAnalysis.isLiveAtExit(EndBB, i) == true) {
           const G4_Declare *dcl = lrs[i]->getDcl()->getRootDeclare();
@@ -4154,17 +4266,34 @@ bool Augmentation::weakEdgeNeeded(AugmentationMasks defaultDclMask,
   return false;
 }
 
-//
-// Mark interference between newDcl and other incompatible dcls in current
-// active lists.
-//
-void Augmentation::addSIMDIntfDclForCallSite(MaskDeclares *maskDeclares) {
+// This method is invoked when building SIMD intf and current variable
+// is the artificial variable created to model call. Live-intervals in
+// default set and non-default set are ones that overlap with call site
+// at end of callBB. The idea here is to mark every such active interval
+// with mask associated with func. Later, we'll mark interference with
+// each live-interval bit set here and maydef of func.
+void Augmentation::addSIMDIntfDclForCallSite(G4_BB* callBB) {
+  FuncInfo *func = callBB->getCalleeInfo();
+  auto isLiveThroughFunc = [&](unsigned int id) {
+    if (liveAnalysis.isLiveAtExit(callBB, id)) {
+      auto retBB = func->getExitBB();
+      if (liveAnalysis.isLiveAtExit(retBB, id))
+        return true;
+    }
+    return false;
+  };
+
+  auto& overlapDeclares = overlapDclsWithFunc[func];
   for (auto defaultDcl : defaultMaskQueue) {
-    maskDeclares->first.set(defaultDcl->getRegVar()->getId(), true);
+    auto id = defaultDcl->getRegVar()->getId();
+    if (!isLiveThroughFunc(id))
+      overlapDeclares.first.set(id);
   }
 
   for (auto nonDefaultDcl : nonDefaultMaskQueue) {
-    maskDeclares->second.set(nonDefaultDcl->getRegVar()->getId(), true);
+    auto id = nonDefaultDcl->getRegVar()->getId();
+    if (!isLiveThroughFunc(id))
+      overlapDeclares.second.set(id);
   }
 }
 
@@ -4173,14 +4302,19 @@ void Augmentation::addSIMDIntfForRetDclares(G4_Declare *newDcl) {
   MaskDeclares *mask = nullptr;
   if (dclIt == retDeclares.end()) {
     MaskDeclares newMask;
-    newMask.first.resize(liveAnalysis.getNumSelectedGlobalVar());
-    newMask.second.resize(liveAnalysis.getNumSelectedGlobalVar());
     retDeclares[newDcl] = std::move(newMask);
     mask = &retDeclares[newDcl];
   } else {
     mask = &dclIt->second;
   }
-  addSIMDIntfDclForCallSite(mask);
+
+  for (auto defaultDcl : defaultMaskQueue) {
+    mask->first.set(defaultDcl->getRegVar()->getId());
+  }
+
+  for (auto nonDefaultDcl : nonDefaultMaskQueue) {
+    mask->second.set(nonDefaultDcl->getRegVar()->getId());
+  }
 }
 
 //
@@ -4337,41 +4471,13 @@ void Augmentation::buildSIMDIntfAll(G4_Declare *newDcl) {
       addSIMDIntfForRetDclares(varDcl);
     }
 
-    auto &func = callDclMapIt->second.second;
-    addSIMDIntfDclForCallSite(&callsiteDeclares[func]);
-
+    auto *callBB = callDclMapIt->second.second;
+    addSIMDIntfDclForCallSite(callBB);
     return;
   }
 
   buildSIMDIntfDcl(newDcl, false);
   return;
-}
-
-void Augmentation::buildSIMDIntfAllOld(G4_Declare *newDcl) {
-  auto callDclMapIt = callDclMap.find(newDcl);
-  if (callDclMapIt != callDclMap.end()) {
-
-    G4_Declare *varDcl = NULL;
-
-    if (liveAnalysis.livenessClass(G4_GRF)) // For return value
-    {
-      G4_INST *callInst = callDclMapIt->second.first;
-      varDcl = callInst->getDst()->getBase()->asRegVar()->getDeclare();
-      buildSIMDIntfDcl(varDcl, false);
-    }
-
-    auto &func = callDclMapIt->second.second;
-    for (unsigned i = 0; i < liveAnalysis.getNumSelectedVar(); i++) {
-      auto maydef = liveAnalysis.subroutineMaydef.find(func);
-      if (maydef != liveAnalysis.subroutineMaydef.end() &&
-          maydef->second.isSet(i)) {
-        varDcl = lrs[i]->getDcl();
-        buildSIMDIntfDcl(varDcl, true);
-      }
-    }
-  } else {
-    buildSIMDIntfDcl(newDcl, false);
-  }
 }
 
 //
@@ -4386,11 +4492,7 @@ void Augmentation::buildInterferenceIncompatibleMask() {
     unsigned startIdx = gra.getStartInterval(newDcl)->getLexicalId();
     VISA_DEBUG_VERBOSE(std::cout << "New idx " << startIdx << "\n");
     expireIntervals(startIdx);
-    if (!kernel.fg.builder->getOption(vISA_UseOldSubRoutineAugIntf)) {
-      buildSIMDIntfAll(newDcl);
-    } else {
-      buildSIMDIntfAllOld(newDcl);
-    }
+    buildSIMDIntfAll(newDcl);
 
     // Add newDcl to correct list
     if (gra.getHasNonDefaultMaskDef(newDcl) || newDcl->getAddressed() == true) {
@@ -4404,12 +4506,10 @@ void Augmentation::buildInterferenceIncompatibleMask() {
     }
   }
 
-  if (!kernel.fg.builder->getOption(vISA_UseOldSubRoutineAugIntf)) {
-    for (auto func : kernel.fg.funcInfoTable) {
-      buildInteferenceForCallsite(func);
-    }
-    buildInteferenceForRetDeclares();
+  for (auto func : kernel.fg.funcInfoTable) {
+    buildInteferenceForCallsite(func);
   }
+  buildInteferenceForRetDeclares();
 }
 
 void Augmentation::buildInteferenceForCallSiteOrRetDeclare(G4_Declare *newDcl,
@@ -4418,9 +4518,9 @@ void Augmentation::buildInteferenceForCallSiteOrRetDeclare(G4_Declare *newDcl,
 
   for (auto LI = mask->first.begin(), LE = mask->first.end(); LI != LE; ++LI) {
     unsigned i = *LI;
-    // Bail out if non-global variable is iterated.
-    if (i >= liveAnalysis.getNumSelectedGlobalVar())
-      break;
+    // Process only global vars
+    if (!liveAnalysis.globalVars.test(i))
+      continue;
     {
       G4_Declare *defaultDcl = lrs[i]->getDcl();
       if (gra.getAugmentationMask(defaultDcl) != newDclAugMask) {
@@ -4466,9 +4566,9 @@ void Augmentation::buildInteferenceForCallSiteOrRetDeclare(G4_Declare *newDcl,
   for (auto LI = mask->second.begin(), LE = mask->second.end(); LI != LE;
        ++LI) {
     unsigned i = *LI;
-    // Bail out if non-global variable is iterated.
-    if (i >= liveAnalysis.getNumSelectedGlobalVar())
-      break;
+    // Process only global vars
+    if (!liveAnalysis.globalVars.test(i))
+      continue;
     // Mark interference among non-default mask variables
     {
       G4_Declare *nonDefaultDcl = lrs[i]->getDcl();
@@ -4479,12 +4579,13 @@ void Augmentation::buildInteferenceForCallSiteOrRetDeclare(G4_Declare *newDcl,
 }
 
 void Augmentation::buildInteferenceForCallsite(FuncInfo *func) {
-  for (unsigned i = 0; i < liveAnalysis.getNumSelectedVar(); i++) {
-    auto maydef = liveAnalysis.subroutineMaydef.find(func);
-    if (maydef != liveAnalysis.subroutineMaydef.end() &&
-        maydef->second.isSet(i)) {
-      G4_Declare *varDcl = lrs[i]->getDcl();
-      buildInteferenceForCallSiteOrRetDeclare(varDcl, &callsiteDeclares[func]);
+  auto maydefConst = liveAnalysis.subroutineMaydef.find(func);
+  if (maydefConst != liveAnalysis.subroutineMaydef.end()) {
+    auto *maydef = const_cast<llvm_SBitVector *>(&maydefConst->second);
+    for (auto bit : *maydef) {
+      G4_Declare *varDcl = lrs[bit]->getDcl();
+      buildInteferenceForCallSiteOrRetDeclare(varDcl,
+                                              &overlapDclsWithFunc[func]);
     }
   }
   if (kernel.getOption(vISA_LocalRA)) {
@@ -4492,7 +4593,7 @@ void Augmentation::buildInteferenceForCallsite(FuncInfo *func) {
       if (localSummaryOfCallee[func].isGRFBusy(j)) {
         G4_Declare *varDcl = gra.getGRFDclForHRA(j);
         buildInteferenceForCallSiteOrRetDeclare(varDcl,
-                                                &callsiteDeclares[func]);
+                                                &overlapDclsWithFunc[func]);
       }
     }
   }
@@ -4682,12 +4783,6 @@ void Augmentation::augmentIntfGraph() {
     }
   }
 
-  for (auto func : kernel.fg.funcInfoTable) {
-    auto &item = callsiteDeclares[func];
-    item.first.resize(liveAnalysis.getNumSelectedGlobalVar());
-    item.second.resize(liveAnalysis.getNumSelectedGlobalVar());
-  }
-
   if (kernel.getOption(vISA_LocalRA)) {
     buildSummaryForCallees();
   }
@@ -4767,7 +4862,7 @@ void Interference::buildInterferenceWithLocalRA(G4_BB *bb) {
   }
 
   BitSet cur(kernel.getNumRegTotal(), true);
-  SparseBitSet live(maxId);
+  llvm_SBitVector live;
   std::vector<int> curUpdate;
 
   buildInterferenceAtBBExit(bb, live);
@@ -4852,7 +4947,7 @@ void Interference::buildInterferenceWithLocalRA(G4_BB *bb) {
         // In bottom-up order if the live-range has not started then
         // a use was not seen for this def. But we need to ensure this
         // variable interferes with all other live vars.
-        bool isPointRange = !live.isSet(dst->getBase()->asRegVar()->getId());
+        bool isPointRange = !live.test(dst->getBase()->asRegVar()->getId());
 
         if (isPointRange) {
           // Mark interference with all busy physical registers
@@ -4922,7 +5017,7 @@ void Interference::buildInterferenceWithLocalRA(G4_BB *bb) {
             VISA_DEBUG_VERBOSE(std::cout << "Setting r" << j << ".0 busy\n");
           }
         } else if (src->asSrcRegRegion()->getBase()->isRegAllocPartaker()) {
-          if (live.isSet(
+          if (live.test(
                   src->asSrcRegRegion()->getBase()->asRegVar()->getId()) ==
               false)
             update = true;
@@ -4938,7 +5033,7 @@ void Interference::buildInterferenceWithLocalRA(G4_BB *bb) {
                   src->asSrcRegRegion(), bb);
           for (auto pt : pointsToSet) {
             if (pt.var->isRegAllocPartaker()) {
-              if (live.isSet(pt.var->getId()) == false)
+              if (live.test(pt.var->getId()) == false)
                 update = true;
 
               updateLiveness(live, pt.var->getId(), true);
@@ -4983,7 +5078,7 @@ void Interference::buildInterferenceWithLocalRA(G4_BB *bb) {
       if (!assigned) {
         bool isLiveIn = liveAnalysis->isLiveAtEntry(bb, i);
         bool isLiveOut = liveAnalysis->isLiveAtExit(bb, i);
-        bool isKilled = liveAnalysis->use_kill[bb->getId()].isSet(i);
+        bool isKilled = liveAnalysis->use_kill[bb->getId()].test(i);
         if (isLiveIn || isLiveOut || isKilled) {
           // Make it to interfere with all physical registers used in the BB
           for (uint32_t j = 0, numReg = kernel.getNumRegTotal(); j < numReg;
@@ -5036,10 +5131,9 @@ bool Interference::linearScanVerify() const {
     unsigned GRFStart_i =
         phyReg_i->asGreg()->getRegNum() * kernel.numEltPerGRF<Type_UB>() +
         regOff_i;
-    unsigned elemsSize_i = lrs[i]->getVar()->getDeclare()->getNumElems() *
+    unsigned elemsSize_i = lrs[i]->getVar()->getDeclare()->getTotalElems() *
                            lrs[i]->getVar()->getDeclare()->getElemSize();
     unsigned GRFEnd_i = GRFStart_i + elemsSize_i - 1;
-
     for (unsigned j = 0; j < maxId; j++) {
       if (interfereBetween(i, j)) {
         if (gra.isUndefinedDcl(lrs[j]->getDcl()) ||
@@ -5054,7 +5148,7 @@ bool Interference::linearScanVerify() const {
         unsigned GRFStart_j =
             phyReg_j->asGreg()->getRegNum() * kernel.numEltPerGRF<Type_UB>() +
             regOff_j;
-        unsigned elemsSize_j = lrs[j]->getVar()->getDeclare()->getNumElems() *
+        unsigned elemsSize_j = lrs[j]->getVar()->getDeclare()->getTotalElems() *
                                lrs[j]->getVar()->getDeclare()->getElemSize();
         unsigned GRFEnd_j = GRFStart_j + elemsSize_j - 1;
         if (!(GRFEnd_i < GRFStart_j || GRFEnd_j < GRFStart_i)) {
@@ -5079,7 +5173,7 @@ bool Interference::linearScanVerify() const {
           std::cout << "(" << i << "," << j << ")"
                     << lrs[i]->getDcl()->getName() << "(" << GRFStart_i << ":"
                     << GRFEnd_i << ")[" << i_start << "," << i_end << "] vs "
-                    << lrs[j]->getDcl()->getName() << "(" << GRFStart_i << ":"
+                    << lrs[j]->getDcl()->getName() << "(" << GRFStart_j << ":"
                     << GRFEnd_j << ")[" << j_start << "," << j_end << "]"
                     << "\n";
         }
@@ -5247,11 +5341,11 @@ GraphColor::GraphColor(LivenessAnalysis &live, unsigned totalGRF, bool hybrid,
       numVar(live.getNumSelectedVar()),
       numSplitStartID(live.getNumSplitStartID()),
       numSplitVar(live.getNumSplitVar()),
-      intf(&live, lrs, live.getNumSelectedVar(), live.getNumSplitStartID(),
-           live.getNumSplitVar(), gra),
+      intf(&live, live.gra.incRA.getLRs(), live.getNumSelectedVar(),
+           live.getNumSplitStartID(), live.getNumSplitVar(), gra),
       regPool(gra.regPool), builder(gra.builder), isHybrid(hybrid),
       forceSpill(forceSpill_), GCMem(GRAPH_COLOR_MEM_SIZE), kernel(gra.kernel),
-      liveAnalysis(live) {
+      liveAnalysis(live), lrs(live.gra.incRA.getLRs()) {
   spAddrRegSig.resize(getNumAddrRegisters(), 0);
   m_options = builder.getOptions();
 }
@@ -5259,45 +5353,15 @@ GraphColor::GraphColor(LivenessAnalysis &live, unsigned totalGRF, bool hybrid,
 //
 // lrs[i] gives the live range whose id is i
 //
-void GraphColor::createLiveRanges(unsigned reserveSpillSize) {
+void GraphColor::createLiveRanges() {
   lrs.resize(numVar);
-  bool hasStackCall = builder.kernel.fg.getHasStackCalls() ||
-                      builder.kernel.fg.getIsStackCallFunc();
-  // Modification For Alias Dcl
   for (auto dcl : gra.kernel.Declares) {
     G4_RegVar *var = dcl->getRegVar();
     // Do not include alias var in liverange creation
     if (!var->isRegAllocPartaker() || dcl->getAliasDeclare() != NULL) {
       continue;
     }
-    lrs[var->getId()] = new (GCMem) LiveRange(var, this->gra);
-    unsigned reservedGRFNum = m_options->getuInt32Option(vISA_ReservedGRFNum);
-
-    if (builder.kernel.fg.isPseudoDcl(dcl)) {
-      lrs[var->getId()]->setIsPseudoNode();
-    }
-    if (dcl->getIsPartialDcl()) {
-      if (G4_Declare *parentDcl = this->gra.getSplittedDeclare(dcl)) {
-        lrs[var->getId()]->setParentLRID(parentDcl->getRegVar()->getId());
-        lrs[var->getId()]->setIsPartialDcl();
-      }
-    }
-    if (dcl->getIsSplittedDcl()) {
-      lrs[var->getId()]->setIsSplittedDcl(true);
-    }
-    lrs[var->getId()]->setBC(gra.getBankConflict(dcl));
-
-    lrs[var->getId()]->allocForbidden(GCMem, hasStackCall, reserveSpillSize,
-                                      reservedGRFNum);
-    lrs[var->getId()]->setCallerSaveBias(hasStackCall);
-    G4_Declare *varDcl = lrs[var->getId()]->getDcl();
-    if (builder.kernel.fg.isPseudoVCADcl(varDcl)) {
-      lrs[var->getId()]->allocForbiddenCallerSave(GCMem, &builder.kernel);
-    } else if (builder.kernel.fg.isPseudoVCEDcl(varDcl)) {
-      lrs[var->getId()]->allocForbiddenCalleeSave(GCMem, &builder.kernel);
-    } else if (varDcl == gra.getOldFPDcl()) {
-      lrs[var->getId()]->allocForbiddenCallerSave(GCMem, &builder.kernel);
-    }
+    lrs[var->getId()] = LiveRange::createNewLiveRange(dcl, gra);
   }
 }
 
@@ -5772,6 +5836,11 @@ void GraphColor::determineColorOrdering() {
       j++;
     }
   }
+
+  if (gra.incRA.isEnabledWithVerification(kernel)) {
+    gra.incRA.computeLeftOverUnassigned(sorted, liveAnalysis);
+  }
+
   vISA_ASSERT(j == numUnassignedVar, ERROR_GRAPHCOLOR);
 
   //
@@ -5806,6 +5875,7 @@ void GraphColor::determineColorOrdering() {
       std::cout << "\t degree=" << sorted[i]->getDegree();
       std::cout << "\t refCnt=" << sorted[i]->getRefCount();
       std::cout << "\t size=" << sorted[i]->getDcl()->getByteSize();
+      std::cout << "\t active=" << sorted[i]->getActive();
       std::cout << "\n";
     }
     std::cout << "\n";
@@ -5884,7 +5954,7 @@ void PhyRegUsage::updateRegUsage(LiveRange *lr) {
 
 bool GraphColor::assignColors(ColorHeuristic colorHeuristicGRF,
                               bool doBankConflict, bool highInternalConflict,
-                              bool honorHints) {
+                              bool doBundleConflict, bool honorHints) {
   RA_TRACE(std::cout << "\t--"
                      << (colorHeuristicGRF == ROUND_ROBIN ? "round-robin"
                                                           : "first-fit")
@@ -5930,8 +6000,8 @@ bool GraphColor::assignColors(ColorHeuristic colorHeuristicGRF,
   // FIXME: the bank configs should be computed in PhyRegAllocationState instead
   // of pased in, but the strange early return from above prevents this..
   PhyRegAllocationState parms(gra, lrs, rFile, maxGRFCanBeUsed, bank1_start,
-                              bank1_end, bank2_start, bank2_end,
-                              doBankConflict);
+                              bank1_end, bank2_start, bank2_end, doBankConflict,
+                              doBundleConflict);
   bool noIndirForceSpills = builder.getOption(vISA_NoIndirectForceSpills);
 
   auto &varSplitPass = *gra.getVarSplitPass();
@@ -5984,7 +6054,7 @@ bool GraphColor::assignColors(ColorHeuristic colorHeuristicGRF,
                    i != (parentGRFNum + parentNumRows); i += numRows) {
                 if ((i - parentGRFNum) == siblingNum * numRows)
                   continue;
-                lr->markForbidden(i, numRows);
+                lr->markForbidden(GCMem, i, numRows);
               }
               skipParentIntf = true;
             }
@@ -6072,7 +6142,8 @@ bool GraphColor::assignColors(ColorHeuristic colorHeuristicGRF,
         failed_alloc = true;
       }
 
-      if (dcl->getNumRows() > totalGRFNum) {
+      if ((dcl->getNumRows() > totalGRFNum) ||
+          (dcl->isForceSpilled() && (lr->getSpillCost() != MAXSPILLCOST))) {
         // we sure as hell won't get an assignment
         failed_alloc = true;
       }
@@ -6176,7 +6247,7 @@ bool GraphColor::assignColors(ColorHeuristic colorHeuristicGRF,
       // correctness.
       resetTemporaryRegisterAssignments();
       return assignColors(colorHeuristicGRF, doBankConflict,
-                          highInternalConflict, false);
+                          highInternalConflict, false, false);
     }
 
     if (honorHints && gra.getIterNo() == 0) {
@@ -6673,8 +6744,8 @@ void GraphColor::gatherScatterForbiddenWA() {
         if (opndLen > 0 && dcl && dcl->getRegVar() &&
             dcl->getRegVar()->isRegAllocPartaker()) {
           if (lenInSend == (opndLen + 1)) {
-            lrs[dcl->getRegVar()->getId()]->markForbidden(
-                kernel.getNumRegTotal() - 1, 1);
+            lrs[dcl->getRegVar()->getId()]->setForbidden(
+                forbiddenKind::FBD_LASTGRF);
           } else if (lenInSend > opndLen) {
             vISA_ASSERT(false,
                         "mismatch between len in send and that of operand");
@@ -6690,30 +6761,12 @@ void GraphColor::gatherScatterForbiddenWA() {
 }
 
 bool GraphColor::regAlloc(bool doBankConflictReduction,
-                          bool highInternalConflict, bool reserveSpillReg,
-                          unsigned &spillRegSize, unsigned &indrSpillRegSize,
-                          const RPE *rpe) {
+                          bool highInternalConflict, const RPE *rpe) {
   bool useSplitLLRHeuristic = false;
+  unsigned doBundleConflictReduction = kernel.getuInt32Option(vISA_enableBundleCR);
 
   RA_TRACE(std::cout << "\t--# variables: " << liveAnalysis.getNumSelectedVar()
                      << "\n");
-
-  unsigned reserveSpillSize = 0;
-  if (reserveSpillReg) {
-    failSafeIter = reserveSpillReg;
-
-    if (kernel.getOption(vISA_NewFailSafeRA)) {
-      spillRegSize = gra.getNumReservedGRFs();
-      indrSpillRegSize = 0;
-    } else {
-      gra.determineSpillRegSize(spillRegSize, indrSpillRegSize);
-    }
-
-    reserveSpillSize = spillRegSize + indrSpillRegSize;
-    vISA_ASSERT(reserveSpillSize < kernel.getNumCalleeSaveRegs(),
-                "Invalid reserveSpillSize in fail-safe RA!");
-    totalGRFRegCount -= reserveSpillSize;
-  }
 
   // Copy over alignment for vars inserted by RA
   gra.copyMissingAlignment();
@@ -6721,7 +6774,14 @@ bool GraphColor::regAlloc(bool doBankConflictReduction,
   //
   // create an array of live ranges.
   //
-  createLiveRanges(reserveSpillSize);
+  if (!IncrementalRA::isEnabled(kernel) || lrs.size() == 0) {
+    // Create vector of live ranges if we're not using
+    // incremental RA or if this is 1st iteration.
+    // With incremental RA, live-ranges are created right when
+    // new temp var is created in RA.
+    createLiveRanges();
+  }
+
   //
   // set the pre-assigned registers
   //
@@ -6830,13 +6890,13 @@ bool GraphColor::regAlloc(bool doBankConflictReduction,
       return !requireSpillCode();
     }
 
-    if (kernel.getOption(vISA_RoundRobin) && !hasStackCall &&
-        !gra.isReRAPass()) {
+    if (kernel.getOption(vISA_RoundRobin) && !hasStackCall) {
       if (assignColors(ROUND_ROBIN, doBankConflictReduction,
-                       highInternalConflict) == false) {
+                       highInternalConflict,
+                       doBundleConflictReduction) == false) {
         resetTemporaryRegisterAssignments();
         bool success = assignColors(FIRST_FIT, doBankConflictReduction,
-                                    highInternalConflict);
+                         highInternalConflict, doBundleConflictReduction);
 
         if (!success && doBankConflictReduction && isHybrid) {
           return false;
@@ -6845,14 +6905,13 @@ bool GraphColor::regAlloc(bool doBankConflictReduction,
         if (!kernel.getOption(vISA_forceBCR)) {
           if (!success && doBankConflictReduction) {
             resetTemporaryRegisterAssignments();
-            kernel.getOptions()->setOption(vISA_enableBundleCR, false);
             assignColors(FIRST_FIT, false, false);
-            kernel.getOptions()->setOption(vISA_enableBundleCR, true);
           }
         }
       }
     } else {
-      bool success = assignColors(FIRST_FIT, true, highInternalConflict);
+      bool success = assignColors(FIRST_FIT, true, highInternalConflict,
+                                  doBundleConflictReduction);
       if (!success) {
         resetTemporaryRegisterAssignments();
         assignColors(FIRST_FIT, false, false);
@@ -8049,17 +8108,147 @@ void GraphColor::getSaveRestoreRegister() {
   }
   getCallerSaveRegisters();
 }
+
+//
+// Get the forbidden vector size
+//
+unsigned ForbiddenRegs::getForbiddenVectorSize(G4_RegFileKind regKind) const {
+  switch (regKind) {
+  case G4_GRF:
+  case G4_INPUT:
+    return builder.kernel.getNumRegTotal();
+  case G4_ADDRESS:
+    return getNumAddrRegisters();
+  case G4_FLAG:
+    return builder.getNumFlagRegisters();
+  default:
+    vISA_ASSERT_UNREACHABLE("illegal reg file");
+    return 0;
+  }
+}
+
+//
+// Get the forbidden vectors of reserved GRFs
+// May be reserved for user, stack call, and spill
+//
+void ForbiddenRegs::generateReservedGRFForbidden(
+    unsigned reserveSpillSize) {
+  bool hasStackCall = builder.kernel.fg.getHasStackCalls() ||
+                      builder.kernel.fg.getIsStackCallFunc();
+  uint32_t reservedGRFNum = builder.getuint32Option(vISA_ReservedGRFNum);
+  unsigned int stackCallRegSize =
+      hasStackCall ? builder.kernel.numReservedABIGRF() : 0;
+
+  // r0 - Forbidden when platform is not 3d
+  // rMax, rMax-1, rMax-2 - Forbidden in presence of stack call sites
+  forbiddenKind k = forbiddenKind::FBD_RESERVEDGRF;
+  unsigned totalGRFNum = builder.kernel.getNumRegTotal();
+  forbiddenVec[(size_t)k].resize(getForbiddenVectorSize(G4_GRF));
+  forbiddenVec[(size_t)k].clear();
+
+  if (builder.kernel.getKernelType() != VISA_3D ||
+      builder.kernel.getOption(vISA_enablePreemption) ||
+      reserveSpillSize > 0 || builder.kernel.getOption(vISA_ReserveR0) ||
+      builder.kernel.getOption(vISA_PreserveR0InR0)) {
+    forbiddenVec[(size_t)k].set(0, true);
+  }
+
+  if (builder.kernel.getOption(vISA_enablePreemption)) {
+    // r1 is reserved for SIP kernel
+    forbiddenVec[(size_t)k].set(1, true);
+  }
+
+  unsigned reservedRegSize = stackCallRegSize + reserveSpillSize;
+  for (unsigned int i = 0; i < reservedRegSize; i++) {
+    forbiddenVec[(size_t)k].set(totalGRFNum - 1 - i, true);
+  }
+
+  unsigned largestNoneReservedReg = totalGRFNum - reservedRegSize - 1;
+  if (totalGRFNum - reservedRegSize >= totalGRFNum - 16) {
+    largestNoneReservedReg = totalGRFNum - 16 - 1;
+  }
+
+  if (totalGRFNum - reservedRegSize < reservedGRFNum) {
+    vISA_ASSERT(false, "After reservation, there is not enough regiser!");
+  }
+
+  for (unsigned int i = 0; i < reservedGRFNum; i++) {
+    forbiddenVec[(size_t)k].set(largestNoneReservedReg - i, true);
+  }
+}
+
+// ETO use only last 16 registers
+void ForbiddenRegs::generateEOTGRFForbidden() {
+  forbiddenVec[(size_t)forbiddenKind::FBD_EOT].resize(
+      getForbiddenVectorSize(G4_GRF));
+  forbiddenVec[(size_t)forbiddenKind::FBD_EOT].clear();
+  for (unsigned i = 0; i < builder.kernel.getNumRegTotal() - 16; i++) {
+    forbiddenVec[(size_t)forbiddenKind::FBD_EOT].set(i, true);
+  }
+  forbiddenVec[(size_t)forbiddenKind::FBD_EOT] |=
+      forbiddenVec[(size_t)forbiddenKind::FBD_RESERVEDGRF];
+}
+
+void ForbiddenRegs::generateLastGRFForbidden() {
+  forbiddenVec[(size_t)forbiddenKind::FBD_LASTGRF].resize(
+      getForbiddenVectorSize(G4_GRF));
+  forbiddenVec[(size_t)forbiddenKind::FBD_LASTGRF].clear();
+  forbiddenVec[(size_t)forbiddenKind::FBD_LASTGRF].set(
+      builder.kernel.getNumRegTotal() - 1, true);
+  forbiddenVec[(size_t)forbiddenKind::FBD_LASTGRF] |=
+      forbiddenVec[(size_t)forbiddenKind::FBD_RESERVEDGRF];
+}
+
+void ForbiddenRegs::generateEOTLastGRFForbidden() {
+  forbiddenVec[(size_t)forbiddenKind::FBD_EOTLASTGRF].resize(
+      getForbiddenVectorSize(G4_GRF));
+  forbiddenVec[(size_t)forbiddenKind::FBD_EOTLASTGRF].clear();
+  forbiddenVec[(size_t)forbiddenKind::FBD_EOTLASTGRF] |=
+      forbiddenVec[(size_t)forbiddenKind::FBD_EOT];
+  forbiddenVec[(size_t)forbiddenKind::FBD_EOTLASTGRF] |=
+      forbiddenVec[(size_t)forbiddenKind::FBD_LASTGRF];
+}
+
+
+//
+// mark forbidden registers for caller-save pseudo var
+//
+void ForbiddenRegs::generateCallerSaveGRFForbidden() {
+  unsigned int startCalleeSave = builder.kernel.calleeSaveStart();
+  unsigned int endCalleeSave =
+      startCalleeSave + builder.kernel.getNumCalleeSaveRegs();
+  // r60-r124 are caller save regs for SKL
+  forbiddenVec[(size_t)forbiddenKind::FBD_CALLERSAVE].resize(
+      getForbiddenVectorSize(G4_GRF));
+  forbiddenVec[(size_t)forbiddenKind::FBD_CALLERSAVE].clear();
+  for (unsigned int i = startCalleeSave; i < endCalleeSave; i++) {
+    forbiddenVec[(size_t)forbiddenKind::FBD_CALLERSAVE].set(i, true);
+  }
+  forbiddenVec[(size_t)forbiddenKind::FBD_CALLERSAVE] |=
+      forbiddenVec[(size_t)forbiddenKind::FBD_RESERVEDGRF];
+}
+
+//
+// mark forbidden registers for callee-save pseudo var
+//
+void ForbiddenRegs::generateCalleeSaveGRFForbidden() {
+  unsigned int numCallerSaveGRFs = builder.kernel.getCallerSaveLastGRF() + 1;
+  forbiddenVec[(size_t)forbiddenKind::FBD_CALLEESAVE].resize(
+      getForbiddenVectorSize(G4_GRF));
+  forbiddenVec[(size_t)forbiddenKind::FBD_CALLEESAVE].clear();
+  for (unsigned int i = 1; i < numCallerSaveGRFs; i++) {
+    forbiddenVec[(size_t)forbiddenKind::FBD_CALLEESAVE].set(i, true);
+  }
+  forbiddenVec[(size_t)forbiddenKind::FBD_CALLEESAVE] |=
+      forbiddenVec[(size_t)forbiddenKind::FBD_RESERVEDGRF];
+}
+
 //
 // Add GRF caller/callee save/restore code for stack calls.
 // localSpillAreaOwordsize specifices the starting offset of the
 // caller/callee-save area in this frame. It is 64-byte aligned.
 //
 void GlobalRA::addSaveRestoreCode(unsigned localSpillAreaOwordSize) {
-  auto gtpin = builder.kernel.getGTPinData();
-  if (gtpin && gtpin->isFirstRAPass()) {
-    gtpin->markInsts();
-  }
-
   if (builder.getIsKernel()) {
     builder.kernel.fg.callerSaveAreaOffset = localSpillAreaOwordSize;
   } else {
@@ -8190,6 +8379,7 @@ void GlobalRA::addStoreRestoreToReturn() {
   auto SRDecl =
       builder.createHardwiredDeclare(4, Type_UD, builder.kernel.getFPSPGRF(),
                                      IR_Builder::SubRegs_Stackcall::Ret_IP);
+  addVarToRA(SRDecl);
   SRDecl->setName(builder.getNameString(24, "SR_BEStack"));
   G4_DstRegRegion *FPdst =
       builder.createDst(SRDecl->getRegVar(), 0, 0, 1, Type_UD);
@@ -8246,12 +8436,6 @@ void GlobalRA::addStoreRestoreToReturn() {
     if (!EUFusionCallWANeeded())
       builder.kernel.getKernelDebugInfo()->setCallerBEFPSaveInst(saveBE_FPInst);
   }
-
-  auto gtpin = builder.kernel.getGTPinData();
-  if (gtpin && gtpin->isFirstRAPass()) {
-    gtpin->markInst(saveBE_FPInst);
-    gtpin->markInst(restoreBE_FPInst);
-  }
 }
 
 void GlobalRA::reportUndefinedUses(LivenessAnalysis &liveAnalysis, G4_BB *bb,
@@ -8288,7 +8472,7 @@ void GlobalRA::reportUndefinedUses(LivenessAnalysis &liveAnalysis, G4_BB *bb,
     }
 
     unsigned id = referencedDcl->getRegVar()->getId();
-    if (liveAnalysis.def_in[bb->getId()].isSet(id) == false &&
+    if (liveAnalysis.def_in[bb->getId()].test(id) == false &&
         defs.find(referencedDcl) == defs.end()) {
       // Def not found for use so report it
       VISA_DEBUG_VERBOSE({
@@ -9200,10 +9384,7 @@ void GlobalRA::addrRegAlloc() {
     //
     if (liveAnalysis.getNumSelectedVar() > 0) {
       GraphColor coloring(liveAnalysis, kernel.getNumRegTotal(), false, false);
-      unsigned spillRegSize = 0;
-      unsigned indrSpillRegSize = 0;
-      if (!coloring.regAlloc(false, false, false, spillRegSize,
-                             indrSpillRegSize, nullptr)) {
+      if (!coloring.regAlloc(false, false, nullptr)) {
         SpillManager spillARF(*this, coloring.getSpilledLiveRanges(),
                               addrSpillId);
         spillARF.insertSpillCode();
@@ -9265,10 +9446,7 @@ void GlobalRA::flagRegAlloc() {
     //
     if (liveAnalysis.getNumSelectedVar() > 0) {
       GraphColor coloring(liveAnalysis, kernel.getNumRegTotal(), false, false);
-      unsigned spillRegSize = 0;
-      unsigned indrSpillRegSize = 0;
-      if (!coloring.regAlloc(false, false, false, spillRegSize,
-                             indrSpillRegSize, nullptr)) {
+      if (!coloring.regAlloc(false, false, nullptr)) {
         SpillManager spillFlag(*this, coloring.getSpilledLiveRanges(),
                                flagSpillId);
         spillFlag.insertSpillCode();
@@ -9380,8 +9558,7 @@ void GlobalRA::assignRegForAliasDcl() {
           CurrentRegVar->setPhyReg(
               AliasRegVar->getPhyReg(),
               tempoffset / CurrentRegVar->getDeclare()->getElemSize());
-        }
-        else {
+        } else {
           vISA_ASSERT(false, ERROR_REGALLOC);
         }
       } else {
@@ -9436,12 +9613,9 @@ bool GlobalRA::hybridRA(bool doBankConflictReduction, bool highInternalConflict,
     }
 
     GraphColor coloring(liveAnalysis, kernel.getNumRegTotal(), true, false);
-
-    unsigned spillRegSize = 0;
-    unsigned indrSpillRegSize = 0;
+    generateForbiddenTemplates(0);
     bool isColoringGood =
-        coloring.regAlloc(doBankConflictReduction, highInternalConflict, false,
-                          spillRegSize, indrSpillRegSize, &rpe);
+        coloring.regAlloc(doBankConflictReduction, highInternalConflict, &rpe);
     if (!isColoringGood) {
       if (!kernel.getOption(vISA_Debug)) {
         // Why?? Keep LRA results when -debug is passed
@@ -9480,6 +9654,41 @@ bool canDoHRA(G4_Kernel &kernel) {
 
   return ret;
 }
+
+
+std::pair<unsigned, unsigned> GlobalRA::reserveGRFSpillReg(GraphColor &coloring) {
+  coloring.markFailSafeIter(true);
+  unsigned spillRegSize = 0;
+  unsigned indrSpillRegSize = 0;
+
+  if (kernel.getOption(vISA_NewFailSafeRA)) {
+    spillRegSize = getNumReservedGRFs();
+  } else {
+    determineSpillRegSize(spillRegSize, indrSpillRegSize);
+  }
+
+  vISA_ASSERT(spillRegSize + indrSpillRegSize < kernel.getNumCalleeSaveRegs(),
+              "Invalid reserveSpillSize in fail-safe RA!");
+  coloring.setTotalGRFRegCount(coloring.getTotalGRFRegCount() -
+                               (spillRegSize + indrSpillRegSize));
+  return std::make_pair(spillRegSize, indrSpillRegSize);
+}
+
+// pre-allocate the bits for forbidden registers which will not be used in
+// register assignment.
+// Genernal GRF forbidden including:
+//   reserved for spill,
+//   user reserved,
+//   reserved for stack call.
+void GlobalRA::generateForbiddenTemplates(unsigned reserveSpillSize) {
+  fbdRegs.generateReservedGRFForbidden(reserveSpillSize);
+  fbdRegs.generateCallerSaveGRFForbidden();
+  fbdRegs.generateCalleeSaveGRFForbidden();
+  fbdRegs.generateEOTGRFForbidden();
+  fbdRegs.generateLastGRFForbidden();
+  fbdRegs.generateEOTLastGRFForbidden();
+}
+
 //
 // graph coloring entry point.  returns nonzero if RA fails
 //
@@ -9494,6 +9703,15 @@ int GlobalRA::coloringRegAlloc() {
 
     detectNeverDefinedUses();
   });
+
+#ifndef DLL_MODE
+  // Points-to analysis is done in RegAlloc.cpp just before constructing
+  // GlobalRA instance.
+  if (stopAfter("p2a")) {
+    pointsToAnalysis.dump(std::cout);
+    return VISA_EARLY_EXIT;
+  }
+#endif // DLL_MODE
 
   bool hasStackCall =
       kernel.fg.getHasStackCalls() || kernel.fg.getIsStackCallFunc();
@@ -9517,6 +9735,7 @@ int GlobalRA::coloringRegAlloc() {
     useLscForSpillFill = true;
     useLscForNonStackCallSpillFill =
         builder.getOption(vISA_lscNonStackSpill) != 0;
+    useLscForScatterSpill = builder.getOption(vISA_scatterSpill);
   }
   //
   // If the graph has stack calls, then add the caller-save/callee-save pseudo
@@ -9545,71 +9764,69 @@ int GlobalRA::coloringRegAlloc() {
     spillAnalysis = std::make_unique<SpillAnalysis>();
   }
 
-  if (!isReRAPass()) {
-    // Global linear scan RA
-    if (builder.getOption(vISA_LinearScan) &&
-        builder.kernel.getInt32KernelAttr(Attributes::ATTR_Target) == VISA_3D) {
-      copyMissingAlignment();
-      BankConflictPass bc(*this, false);
-      LivenessAnalysis liveAnalysis(*this, G4_GRF | G4_INPUT);
-      liveAnalysis.computeLiveness();
+  // Global linear scan RA
+  if (builder.getOption(vISA_LinearScan) &&
+      builder.kernel.getInt32KernelAttr(Attributes::ATTR_Target) == VISA_3D) {
+    copyMissingAlignment();
+    BankConflictPass bc(*this, false);
+    LivenessAnalysis liveAnalysis(*this, G4_GRF | G4_INPUT);
+    liveAnalysis.computeLiveness();
 
-      TIME_SCOPE(LINEARSCAN_RA);
-      LinearScanRA lra(bc, *this, liveAnalysis);
-      int success = lra.doLinearScanRA();
-      if (success == VISA_SUCCESS) {
-        // TODO: Get correct spillSize from LinearScanRA
-        unsigned spillSize = 0;
-        expandSpillFillIntrinsics(spillSize);
-        assignRegForAliasDcl();
-        computePhyReg();
-        if (builder.getOption(vISA_verifyLinearScan)) {
-          resetGlobalRAStates();
-          markGraphBlockLocalVars();
-          LivenessAnalysis live(*this, G4_GRF | G4_INPUT, false, true);
-          live.computeLiveness();
-          GraphColor coloring(live, kernel.getNumRegTotal(), false, false);
-          coloring.createLiveRanges(0);
-          const auto& lrs = coloring.getLiveRanges();
-          Interference intf(&live, lrs, live.getNumSelectedVar(),
-                            live.getNumSplitStartID(), live.getNumSplitVar(),
-                            *this);
-          intf.init();
-          intf.computeInterference();
+    TIME_SCOPE(LINEARSCAN_RA);
+    LinearScanRA lra(bc, *this, liveAnalysis);
+    int success = lra.doLinearScanRA();
+    if (success == VISA_SUCCESS) {
+      // TODO: Get correct spillSize from LinearScanRA
+      unsigned spillSize = 0;
+      expandSpillFillIntrinsics(spillSize);
+      assignRegForAliasDcl();
+      computePhyReg();
+      if (builder.getOption(vISA_verifyLinearScan)) {
+        resetGlobalRAStates();
+        markGraphBlockLocalVars();
+        LivenessAnalysis live(*this, G4_GRF | G4_INPUT, false, true);
+        live.computeLiveness();
+        GraphColor coloring(live, kernel.getNumRegTotal(), false, false);
+        coloring.createLiveRanges();
+        const auto &lrs = coloring.getLiveRanges();
+        Interference intf(&live, lrs, live.getNumSelectedVar(),
+                          live.getNumSplitStartID(), live.getNumSplitVar(),
+                          *this);
+        intf.init();
+        intf.computeInterference();
 
-          if (kernel.getOption(vISA_DumpRAIntfGraph))
-            intf.dumpInterference();
-          intf.linearScanVerify();
-        }
-        return VISA_SUCCESS;
+        if (kernel.getOption(vISA_DumpRAIntfGraph))
+          intf.dumpInterference();
+        intf.linearScanVerify();
       }
+      return VISA_SUCCESS;
+    }
 
-      if (success == VISA_SPILL) {
-        return VISA_SPILL;
+    if (success == VISA_SPILL) {
+      return VISA_SPILL;
+    }
+  } else if (builder.getOption(vISA_LocalRA) && (!hasStackCall)) {
+    copyMissingAlignment();
+    BankConflictPass bc(*this, false);
+    LocalRA lra(bc, *this);
+    bool success = lra.localRA();
+    if (!success && !builder.getOption(vISA_HybridRAWithSpill)) {
+      if (canDoHRA(kernel)) {
+        success = hybridRA(lra.doHybridBCR(), lra.hasHighInternalBC(), lra);
+      } else {
+        RA_TRACE(
+            std::cout << "\t--skip HRA due to var split. undo LRA results\n");
+        lra.undoLocalRAAssignments(false);
       }
-    } else if (builder.getOption(vISA_LocalRA) && (!hasStackCall)) {
-      copyMissingAlignment();
-      BankConflictPass bc(*this, false);
-      LocalRA lra(bc, *this);
-      bool success = lra.localRA();
-      if (!success && !builder.getOption(vISA_HybridRAWithSpill)) {
-        if (canDoHRA(kernel)) {
-          success = hybridRA(lra.doHybridBCR(), lra.hasHighInternalBC(), lra);
-        } else {
-          RA_TRACE(std::cout
-                   << "\t--skip HRA due to var split. undo LRA results\n");
-          lra.undoLocalRAAssignments(false);
-        }
-      }
-      if (success) {
-        // either local or hybrid RA succeeds
-        assignRegForAliasDcl();
-        computePhyReg();
-        return VISA_SUCCESS;
-      }
-      if (builder.getOption(vISA_HybridRAWithSpill)) {
-        insertPhyRegDecls();
-      }
+    }
+    if (success) {
+      // either local or hybrid RA succeeds
+      assignRegForAliasDcl();
+      computePhyReg();
+      return VISA_SUCCESS;
+    }
+    if (builder.getOption(vISA_HybridRAWithSpill)) {
+      insertPhyRegDecls();
     }
   }
 
@@ -9692,6 +9909,14 @@ int GlobalRA::coloringRegAlloc() {
   DynPerfModel perfModel(kernel);
   FINALIZER_INFO *jitInfo = builder.getJitInfo();
 
+  // Reset state of incremental RA here as we move from hybrid RA
+  // to global RA. Note that when moving from flag->address or from
+  // address->GRF RA, we don't need to explicitly reset state because
+  // incremental RA can deduce we're moving to RA for different
+  // variable class. But it cannot deduce so when moving from hybrid
+  // to global RA.
+  incRA.moveFromHybridToGlobalGRF();
+
   while (iterationNo < maxRAIterations) {
     jitInfo->statsVerbose.RAIterNum++;
     if (builder.getOption(vISA_DynPerfModel)) {
@@ -9771,6 +9996,11 @@ int GlobalRA::coloringRegAlloc() {
 
     LivenessAnalysis liveAnalysis(*this, G4_GRF | G4_INPUT);
     liveAnalysis.computeLiveness();
+#ifndef DLL_MODE
+    if (stopAfter("Global_RA_liveness")) {
+      return VISA_EARLY_EXIT;
+    }
+#endif // DLL_MODE
     if (builder.getOption(vISA_dumpLiveness)) {
       liveAnalysis.dump();
     }
@@ -9816,16 +10046,19 @@ int GlobalRA::coloringRegAlloc() {
         coloring.dumpRegisterPressure();
       }
 
+      // Get the size of register which are reserved for spill
       unsigned spillRegSize = 0;
       unsigned indrSpillRegSize = 0;
+
+      if (reserveSpillReg) {
+        std::pair <unsigned, unsigned> p = reserveGRFSpillReg(coloring);
+        spillRegSize = p.first;
+        indrSpillRegSize = p.second;
+      }
+      generateForbiddenTemplates(spillRegSize + indrSpillRegSize);
       bool isColoringGood = coloring.regAlloc(
-          doBankConflictReduction, highInternalConflict, reserveSpillReg,
-          spillRegSize, indrSpillRegSize, &rpe);
+          doBankConflictReduction, highInternalConflict, &rpe);
       if (!isColoringGood) {
-        if (isReRAPass()) {
-          // Don't modify program if reRA pass spills
-          return VISA_SPILL;
-        }
 
         bool runRemat =
             kernel.getInt32KernelAttr(Attributes::ATTR_Target) == VISA_CM
@@ -9882,6 +10115,9 @@ int GlobalRA::coloringRegAlloc() {
           splitPass.globalSplit(builder, kernel);
           splitPass.didGlobalSplit = true;
           globalSplitChange = true;
+          // TODO: Since global split is rarely enabled, for now we skip
+          // incremental RA whenever it is enabled.
+          incRA.skipIncrementalRANextIter();
         }
 
         if (iterationNo == 0 && (rerunGRA || globalSplitChange ||
@@ -10015,7 +10251,8 @@ int GlobalRA::coloringRegAlloc() {
                           // EOT spills even of infinite cost are specially
                           // handled in spill insertion when using old fail safe
                           // RA. So don't assert for such spills.
-                          if (isEOTSpill(builder, spilledLR, reserveSpillReg) &&
+                          if (isEOTSpillWithFailSafeRA(builder, spilledLR,
+                                                       reserveSpillReg) &&
                               !builder.getOption(vISA_NewFailSafeRA))
                             return true;
                           return spilledLR->getSpillCost() != MAXSPILLCOST;
@@ -10036,7 +10273,7 @@ int GlobalRA::coloringRegAlloc() {
           // and live-out. because the variable is emitted only post RA to
           // preserve old value of a0.2.
           kernel.fg.builder->getOldA0Dot2Temp();
-        } else if (useLscForNonStackCallSpillFill) {
+        } else if (useLscForNonStackCallSpillFill || useLscForScatterSpill) {
           kernel.fg.builder->getOldA0Dot2Temp();
         }
 

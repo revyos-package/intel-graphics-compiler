@@ -106,14 +106,27 @@ bool Options::parseOptions(int argc, const char *argv[]) {
       return true;
     };
 
-    // If the current argv has a value, ie, the next argv isn't a flag
-    //   (flag starts with '-') treat it as a unsigned 32bit integer
-    //   and return true if the value is of U32;
+    auto parseBool = [&](bool &val) -> bool {
+      std::string_view arg(argv[i]);
+      if (arg == "true" || arg == "TRUE") {
+        val = true;
+        return true;
+      }
+      if (arg == "false" || arg == "FALSE") {
+        val = false;
+        return true;
+      }
+      return false;
+    };
+
+    // If the current argv has a value, i.e., the next argv isn't a flag
+    //   (flag starts with '-') treat it as either bool ("true" or "false") or a
+    //   unsigned 32bit integer and return true if the value is non-zero;
     // otherwise, return false.
     //
     // Note that this is to make sure a boolean flag can be set true or
     // false explicitly. If no value, it will be inversed.
-    auto parseOptionalU32 = [&]() -> std::optional<uint32_t> {
+    auto parseOptionalBool = [&]() -> std::optional<bool> {
       const int next_i = i + 1;
       if (next_i >= argc)
         return std::nullopt;
@@ -124,29 +137,35 @@ bool Options::parseOptions(int argc, const char *argv[]) {
 
       // advance i to the next argv : the value for this flag
       ++i;
-      uint32_t val;
-      if (!parseU32(val)) {
+      bool boolVal;
+      if (parseBool(boolVal))
+        return boolVal;
+      uint32_t intVal;
+      if (!parseU32(intVal)) {
         // Assume this flag does not have a value
         --i;
         return std::nullopt;
       }
-      return val;
+      return intVal != 0;
     };
 
-    // Arg corrsponds to vISAOpt.
-    // If bool, set it with the inverse of the default value if no explicit
-    //          value is given; set it to the given value otherwise.
-    // Else if int32,int64, or cstr, set parse argv[i+1] and set the value.
+    // Arg corresponds to vISAOpt.
+    // If bool:
+    //  If argv[i+1] is either bool or int value, set the value to it.
+    //  Otherwise, either set it to true or flip the default value depending on
+    //  the option.
+    // If int32,int64, or cstr, parse argv[i+1] and set the value.
     vISAOptions vISAOpt = it->second;
     EntryType type = m_vISAOptions.getType(vISAOpt);
     switch (type) {
     case ET_BOOL: {
       bool val;
-      std::optional<uint32_t> o = parseOptionalU32();
+      std::optional<bool> o = parseOptionalBool();
       if (o.has_value())
-        val = (o.value() != 0 ? true : false);
+        val = o.value();
       else
-        val = !m_vISAOptions.getDefaultBool(vISAOpt);
+        val = m_vISAOptions.getFlipBoolDefaultVal(vISAOpt)
+            ? !m_vISAOptions.getDefaultBool(vISAOpt) : true;
       m_vISAOptions.setBool(vISAOpt, val);
       m_vISAOptions.setArgSetByUser(vISAOpt);
       break;
@@ -333,6 +352,10 @@ bool Options::parseOptions(int argc, const char *argv[]) {
     m_vISAOptions.setUint32(vISA_SWSBTokenBarrier, 0);
   }
 
+  if (m_vISAOptions.isArgSetByUser(vISA_ForceSpills)) {
+    m_vISAOptions.setBool(vISA_LinearScan, false);
+  }
+
   if (m_vISAOptions.getBool(vISA_dumpVISAOptionsAll)) {
     dump();
   }
@@ -402,6 +425,12 @@ void Options::initialize_m_vISAOptions(void) {
     /* The casts are here to avoid type conversion warnings */                 \
     Opts->setDefaultBool(ENUM, (bool)(DEFAULT_VAL));                           \
     Opts->setBool(ENUM, (bool)(DEFAULT_VAL));                                  \
+    break;                                                                     \
+  case ET_BOOL_TRUE:                                                           \
+    Opts->setType(ENUM, ET_BOOL);                                              \
+    Opts->setDefaultBool(ENUM, (bool)(DEFAULT_VAL));                           \
+    Opts->setBool(ENUM, (bool)(DEFAULT_VAL));                                  \
+    Opts->setFlipBoolDefaultVal(ENUM, false);                                  \
     break;                                                                     \
   case ET_INT32:                                                               \
     /* The casts are here to avoid type conversion warnings */                 \
@@ -694,9 +723,7 @@ void Options::getOptionsFromEV() {
 
 void Options::dump(void) const { m_vISAOptions.dump(); }
 
-Options::Options() {
-  m_vISAOptions = VISAOptionsDB(this);
-
+Options::Options() : m_vISAOptions(this) {
   target = VISA_CM;
 
   initialize_vISAOptionsToStr();

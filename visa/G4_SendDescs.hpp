@@ -9,6 +9,8 @@ SPDX-License-Identifier: MIT
 #ifndef G4_SEND_DESCS_HPP
 #define G4_SEND_DESCS_HPP
 
+#include "G4_MsgOpDefs.hpp"
+
 #include <optional>
 #include <ostream>
 #include <string>
@@ -21,107 +23,46 @@ enum class SendAccess {
   WRITE_ONLY, // e.g. store, render target write
   READ_WRITE  // e.g. an atomic with return
 };
-static const int MSGOP_BUFFER_LOAD_GROUP = 0x100;
-static const int MSGOP_BUFFER_STORE_GROUP = 0x200;
-static const int MSGOP_BUFFER_ATOMIC_GROUP = 0x400;
-static const int MSGOP_SAMPLE_GROUP = 0x600;
-static const int MSGOP_GATHER_GROUP = 0x800;
-static const int MSGOP_OTHER_GROUP = 0x800;
+
+std::string ToSymbol(vISA::SFID sfid);
+
 //
-// various message operations
+// Various message operations
+// This enumeration includes all SFIDs's messages that vISA should comprehend.
+// Some of these work only in one SFID (e.g. sampler ops) and some work on
+// several (e.g. load).
+// Helper functions below this allow one to efficiently categorize an op.
+// E.g. IsLoadOp(...)
 enum class MsgOp {
   INVALID = 0,
-  // load
-  LOAD = MSGOP_BUFFER_LOAD_GROUP + 1,
-  LOAD_STRIDED, // same as load, but 1 address (obeys exec mask)
-  LOAD_QUAD,    // e.g. untyped load (loading XYZW)
-  LOAD_BLOCK2D,
-  LOAD_STATUS,
-  LOAD_QUAD_STATUS,
-  // store
-  STORE_GROUP = MSGOP_BUFFER_STORE_GROUP + 1,
-  STORE,
-  STORE_STRIDED,
-  STORE_QUAD,
-  STORE_BLOCK2D,
-  //
-  // atomics
-  //
-  ATOMIC_GROUP = MSGOP_BUFFER_ATOMIC_GROUP + 1,
-  ATOMIC_IINC,
-  ATOMIC_IDEC,
-  ATOMIC_LOAD,
-  ATOMIC_STORE,
-  ATOMIC_IADD,
-  ATOMIC_ISUB,
-  ATOMIC_ICAS,
-  ATOMIC_SMIN,
-  ATOMIC_SMAX,
-  ATOMIC_UMIN,
-  ATOMIC_UMAX,
-  //
-  ATOMIC_FADD,
-  ATOMIC_FSUB,
-  ATOMIC_FMIN,
-  ATOMIC_FMAX,
-  ATOMIC_FCAS,
-  //
-  //
-  ATOMIC_AND,
-  ATOMIC_XOR,
-  ATOMIC_OR,
-  // others ...
-  READ_STATE_INFO,
-  //
-  FENCE,
-  //
-  // gateway operations
-  BARRIER,
-  NBARRIER,
-  EOT,
-  SAMPLE_GROUP = MSGOP_SAMPLE_GROUP + 1,
-  SAMPLE,
-  SAMPLE_B,
-  SAMPLE_L,
-  SAMPLE_C,
-  SAMPLE_D,
-  SAMPLE_B_C,
-  SAMPLE_L_C,
-  SAMPLE_KILLPIX,
-  SAMPLE_D_C,
-  SAMPLE_LZ,
-  SAMPLE_C_LZ,
-  GATHER_GROUP = MSGOP_GATHER_GROUP + 1,
-  GATHER4,
-  GATHER4_C,
-  LD_LZ,
-  LD2DMS_W,
-  LD_MCS,
-  RTREAD,
-  RTWRITE,
-  RTDSWRITE
+#define DEFINE_G4_MSGOP(SYMBOL, SYNTAX, ENCODING, GROUP, ATTRS) \
+  SYMBOL = ((ATTRS) << 16) | ((GROUP) << 8) | (ENCODING),
+#include "G4_MsgOpDefs.hpp"
 };
 std::string ToSymbol(MsgOp);
-uint32_t GetMsgOpEncoding(MsgOp);
-uint32_t GetSamplerMsgOpEncoding(MsgOp);
-uint32_t GetRenderTargetMsgOpEncoding(MsgOp);
-MsgOp ConvertLSCOpToMsgOp(LSC_OP op);
-MsgOp ConvertSamplerOpToMsgOp(VISASampler3DSubOpCode op);
+static inline bool MsgOpIsLoad(MsgOp o) {
+  return int(o) & (MSGOP_GROUP_LSC_LOAD << 8);
+}
+static inline bool MsgOpIsStore(MsgOp o) {
+  return int(o) & (MSGOP_GROUP_LSC_STORE << 8);
+}
+static inline bool MsgOpIsAtomic(MsgOp o) {
+  return int(o) & (MSGOP_GROUP_LSC_ATOMIC << 8);
+}
+static inline bool MsgOpIsLoadStoreAtomic(MsgOp o) {
+  return MsgOpIsLoad(o) || MsgOpIsStore(o) || MsgOpIsAtomic(o);
+}
+static inline bool MsgOpIs2D(MsgOp op) {
+  return op == MsgOp::LOAD_BLOCK2D || op == MsgOp::STORE_BLOCK2D;
+}
 
-enum class LdStOrder {
-  INVALID = 0,
-  //
-  SCALAR, // aka "transposed", typically SIMD1, should be (W)
-  VECTOR, // normal vector message or atomic (honors the execution mask)
-};
-enum class AddrType {
-  INVALID = 0,
-  //
-  FLAT,
-  SS,
-  BSS,
-  BTI
-};
+// does it have a data channel mask (e.g. load_quad)
+bool MsgOpHasChMask(MsgOp);
+
+uint32_t MsgOpEncode(MsgOp msgOp);
+MsgOp MsgOpDecode(SFID sfid, uint32_t enc);
+
+int MsgOpAtomicExtraArgs(MsgOp msgOp);
 
 // Data size
 enum class DataSize {
@@ -135,28 +76,68 @@ enum class DataSize {
 };
 
 std::string ToSymbol(DataSize d);
-DataSize ConvertLSCDataSize(LSC_DATA_SIZE ds);
 uint32_t GetDataSizeEncoding(DataSize ds);
 
 // Data order
-enum class DataOrder { INVALID = 0, NONTRANSPOSE, TRANSPOSE };
+enum class DataOrder {
+  INVALID         = 0x0,
+  NONTRANSPOSE    = 0x1,
+  TRANSPOSE       = 0x2,
+  VNNI            = 0x3,
+  TRANSPOSE_VNNI  = 0x4,
+};
 
-std::string ToSymbol(DataOrder dord);
-DataOrder ConvertLSCDataOrder(LSC_DATA_ORDER dord);
-uint32_t GetDataOrderEncoding(DataOrder dord);
+uint32_t GetDataOrderEncoding(DataOrder dord); // for non-block2d
+uint32_t GetDataOrderEncoding2D(DataOrder dord); // for block2d
 
 // Data elems
 enum class VecElems { INVALID = 0, V1, V2, V3, V4, V8, V16, V32, V64 };
 
+// data channel mask is a bitset of X, Y, Z, and W channels
+// The ordinal values are direct mapping to encoding slots used
+// in various fields
+enum class DataChMask {
+  // this is illegal in LSC but allowable possibly legal in other APIs
+  EMPTY = 0,
+  //
+  // single channels
+  X = 1 << 0,
+  Y = 1 << 1,
+  Z = 1 << 2,
+  W = 1 << 3,
+  //
+  // dual channels
+  XY = X | Y,
+  XZ = X | Z,
+  XW = X | W,
+  YZ = Y | Z,
+  YW = Y | W,
+  ZW = Z | W,
+  //
+  // triple channels
+  XYZ = X | Y | Z,
+  XYW = X | Y | W,
+  XZW = X | Z | W,
+  YZW = Y | Z | W,
+  //
+  // quad channels
+  XYZW = X | Y | Z | W,
+};
+static_assert(int(DataChMask::XYZW) == 0xF);
+static_assert(int(DataChMask::YZW) == 0xE);
+
+// composing channel masks
+static inline DataChMask operator|(DataChMask c0, DataChMask c1) {
+  return DataChMask(int(c0) | int(c1));
+}
+
+std::string ToSymbol(DataSize dsz, VecElems ve, DataOrder dord);
+std::string ToSymbol(DataSize dsz, DataChMask chMask);
+
 std::string ToSymbol(VecElems ve);
-VecElems ConvertLSCDataElems(LSC_DATA_ELEMS de);
+VecElems ToVecElems(int ves);
 uint32_t GetVecElemsEncoding(VecElems ve);
-size_t GetNumVecElems(VecElems ve);
-
-// data chmask
-enum DataChMask { INVALID = 0, X = 1 << 0, Y = 1 << 1, Z = 1 << 2, W = 1 << 3 };
-
-size_t GetNumVecElemsQuad(int chMask);
+int GetNumVecElems(VecElems ve);
 
 
 // Cache controls
@@ -176,9 +157,7 @@ enum class Caching {
 std::string ToSymbol(Caching);
 // default, default returns ""
 std::string ToSymbol(Caching, Caching);
-Caching ConvertLSCCacheOpt(LSC_CACHE_OPT co);
-std::pair<Caching, Caching> ConvertLSCCacheOpts(LSC_CACHE_OPT col1,
-                                                LSC_CACHE_OPT col3);
+
 
 struct ImmOff {
   bool is2d;
@@ -303,14 +282,13 @@ public:
   bool isHDC() const;
   bool isLSC() const;
   bool isSampler() const { return getSFID() == SFID::SAMPLER; }
+  bool isGTWY() const {return getSFID() == SFID::GATEWAY;}
   //
-  virtual bool isEOT() const = 0;
   virtual bool isSLM() const = 0;
   virtual bool isTyped() const = 0;
   virtual bool isAtomic() const = 0;
   virtual bool isBarrier() const = 0;
   virtual bool isFence() const = 0;
-  virtual bool isHeaderPresent() const = 0;
 
   //
   // This gives a general access type
@@ -367,15 +345,7 @@ public:
   //   e.g. scratch offset
   virtual std::optional<ImmOff> getOffset() const = 0;
 
-  // Returns the associated surface (if any)
-  // This can be a BTI (e.g. a0 register or G4_Imm if immediate)
-  virtual G4_Operand *getSurface() const = 0;
-
   virtual std::string getDescription() const = 0;
-
-  // Sets the EOT bit of the descriptor,
-  // returns false if the descriptor forbids EOT
-  virtual bool setEOT() = 0;
 };
 
 ////////////////////////////////////////////////////////////////////////////
@@ -438,7 +408,6 @@ private:
   // sfid now stored separately from the ExDesc[4:0] since the new LSC format
   // no longer uses ExDesc for that information
   int src1Len;
-  bool eotAfterMessage = false;
 
   // Mimic SendDescLdSt. Valid only for LSC msg. It's set via setLdStAttr(), not
   // ctor (should be removed if lsc switchs to use SendDescLdSt
@@ -512,6 +481,10 @@ public:
 
   uint32_t getFuncCtrl() const { return desc.layout.funcCtrl; }
 
+  // tests ExDesc[5] on legacy platforms
+  // NOTE: use G4_InstSend::isEOT(); EOT is an instruction option now
+  bool hasLegacyEoT() const {return extDesc.layout.eot;}
+
   ////////////////////////////////////////////////////////////////////////
   // LSC-related operations
   bool isLscOp() const { return isLscDescriptor; }
@@ -526,10 +499,6 @@ public:
   int getLscAddrSizeBytes() const; // e.g. a64 => 8
   LSC_DATA_ORDER getLscDataOrder() const;
 
-  bool isEOTInst() const { return eotAfterMessage; }
-
-  virtual bool setEOT() override;
-
   // query methods common for all raw sends
   uint16_t ResponseLength() const;
   uint16_t MessageLength() const { return desc.layout.msgLength; }
@@ -539,6 +508,7 @@ public:
   bool isDataPortWrite() const { return accessType != SendAccess::READ_ONLY; }
   SendAccess getAccess() const { return accessType; }
   bool isValidFuncCtrl() const { return funcCtrlValid; }
+  bool isHeaderPresent() const;
   void setHeaderPresent(bool val);
 
   ///////////////////////////////////////////////////////////////////////
@@ -629,6 +599,8 @@ public:
   // atomic write or explicit barrier
   bool isBarrierOrAtomic() const { return isAtomicMessage() || isBarrier(); }
 
+  // Returns the associated surface (if any)
+  // This can be a BTI (e.g. a0 register or G4_Imm if immediate)
   const G4_Operand *getBti() const { return m_bti; }
   G4_Operand *getBti() { return m_bti; }
   const G4_Operand *getSti() const { return m_sti; }
@@ -667,14 +639,10 @@ public:
   // this returns that offset.  The offset is in bytes.
   virtual std::optional<ImmOff> getOffset() const override;
 
-  virtual G4_Operand *getSurface() const override { return m_bti; }
-  //
-  virtual bool isEOT() const override { return isEOTInst(); }
   virtual bool isSLM() const override { return isSLMMessage(); }
   virtual bool isAtomic() const override { return isAtomicMessage(); }
   virtual bool isBarrier() const override;
   virtual bool isFence() const override;
-  virtual bool isHeaderPresent() const override;
   virtual bool isScratch() const override { return isScratchRW(); }
   virtual bool isTyped() const override;
   //

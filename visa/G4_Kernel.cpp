@@ -25,39 +25,6 @@ SPDX-License-Identifier: MIT
 
 using namespace vISA;
 
-void gtPinData::markInsts() {
-  // Take a snapshot of instructions in kernel.
-  for (auto bb : kernel.fg) {
-    for (auto inst : *bb) {
-      markedInsts.insert(inst);
-    }
-  }
-}
-
-void gtPinData::removeUnmarkedInsts() {
-  if (!kernel.fg.getIsStackCallFunc() && !kernel.fg.getHasStackCalls()) {
-    // Marked instructions correspond to caller/callee save
-    // and FP/SP manipulation instructions.
-    return;
-  }
-
-  vISA_ASSERT(whichRAPass == ReRAPass,
-               "Unexpectedly removing unmarked instructions in first RA pass");
-  // Instructions not seen in "marked" snapshot will be removed by this
-  // function.
-  for (auto bb : kernel.fg) {
-    for (auto it = bb->begin(), itEnd = bb->end(); it != itEnd;) {
-      auto inst = (*it);
-
-      if (markedInsts.find(inst) == markedInsts.end()) {
-        it = bb->erase(it);
-        continue;
-      }
-      it++;
-    }
-  }
-}
-
 void *gtPinData::getFreeGRFInfo(unsigned &size) {
   // Here is agreed upon format for reporting free GRFs:
   // struct freeBytes
@@ -136,8 +103,9 @@ void gtPinData::setGTPinInit(void *buffer) {
                "Check size of igc_init_t");
   gtpin_init = (gtpin::igc::igc_init_t *)buffer;
 
-  if (gtpin_init->re_ra)
-    kernel.getOptions()->setOption(vISA_ReRAPostSchedule, true);
+  // reRA pass is no longer supported.
+  // FIXME: should we assert here?
+  //if (gtpin_init->re_ra)
   if (gtpin_init->grf_info)
     kernel.getOptions()->setOption(vISA_GetFreeGRFInfo, true);
 }
@@ -501,8 +469,7 @@ G4_Kernel::G4_Kernel(const PlatformInfo &pInfo, INST_LIST_NODE_ALLOCATOR &alloc,
   name = NULL;
   hasAddrTaken = false;
   kernelDbgInfo = nullptr;
-  if (options->getOption(vISAOptions::vISA_ReRAPostSchedule) ||
-      options->getOption(vISAOptions::vISA_GetFreeGRFInfo) ||
+  if (options->getOption(vISAOptions::vISA_GetFreeGRFInfo) ||
       options->getuInt32Option(vISAOptions::vISA_GTPinScratchAreaSize)) {
     allocGTPinData();
   } else {
@@ -627,13 +594,15 @@ void G4_Kernel::calculateSimdSize() {
   if (simdSize != g4::SIMD8 && simdSize != g4::SIMD16 &&
       simdSize != g4::SIMD32) {
     vISA_ASSERT(simdSize.value == 0, "vISA: wrong value for SimdSize attribute");
-    simdSize = g4::SIMD8;
+    // pvc+: simd16; simd8 otherwise
+    simdSize = fg.builder->getNativeExecSize();
 
     for (auto bb : fg) {
       for (auto inst : *bb) {
         // do not consider send since for certain messages we have to set its
         // execution size to 16 even in simd8 shaders
-        if (!inst->isLabel() && !inst->isSend()) {
+        // Also skip noMask inst
+        if (!inst->isLabel() && !inst->isSend() && !inst->isWriteEnableInst()) {
           uint32_t size = inst->getMaskOffset() + inst->getExecSize();
           if (size > 16) {
             simdSize = g4::SIMD32;
@@ -1024,7 +993,7 @@ void G4_Kernel::emitDeviceAsm(std::ostream &os, const void *binary,
     os << "\n\n";
     auto jitInfo = fg.builder->getJitInfo();
     os << "//.BankConflicts: " << jitInfo->statsVerbose.BCNum << "\n";
-    os << "//.RMWs: " << jitInfo->statsVerbose.numRMWs << "\n//\n";
+    os << "//.ByteRMWs: " << jitInfo->statsVerbose.numByteRMWs << "\n//\n";
   } else {
     os << "// Bank Conflict Statistics: \n";
     os << "// -- GOOD: " << fg.BCStats.NumOfGoodInsts << "\n";
@@ -1249,7 +1218,12 @@ void G4_Kernel::dumpG4InternalTo(std::ostream &os) {
       d->emit(os);
     }
   }
+  os << "\n";
 
+  // Additional dumps for lit testing
+  os << "// simdSize = " << (int)simdSize.value << "\n";
+
+  os << "\n";
   for (std::list<G4_BB *>::iterator it = fg.begin(); it != fg.end(); ++it) {
     // Emit BB number
     G4_BB *bb = (*it);
@@ -1303,6 +1277,8 @@ void G4_Kernel::emitDeviceAsmHeaderComment(std::ostream &os) {
      << "//.instCount " << asmInstCount;
   static const char *const RATypeString[]{RA_TYPE(STRINGIFY)};
   os << "\n//.RA type\t" << RATypeString[RAType];
+  if (!m_options->getOption(vISA_skipGitHash))
+    os << "\n//.git-hash " << GIT_COMMIT_HASH;
 
   if (auto jitInfo = fg.builder->getJitInfo()) {
     if (jitInfo->stats.numGRFUsed != 0) {
@@ -1882,6 +1858,7 @@ unsigned G4_Kernel::getComputeFFIDGP1NextOff() const {
   G4_BB *next = getNextBB(computeFFIDGP1);
   return getBinOffsetOfBB(next);
 }
+
 
 // GRF modes supported by HW
 GRFMode::GRFMode(const TARGET_PLATFORM platform, Options *op) : options(op) {

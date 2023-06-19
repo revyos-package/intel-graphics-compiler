@@ -1,6 +1,6 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (C) 2020-2022 Intel Corporation
+Copyright (C) 2020-2023 Intel Corporation
 
 SPDX-License-Identifier: MIT
 
@@ -44,6 +44,7 @@ public:
       LocalSize,
       GroupCount,
       Buffer,
+      SLM,
       SVM,
       Sampler,
       Image1D,
@@ -52,6 +53,7 @@ public:
       Image2DArray,
       Image2DMediaBlock,
       Image3D,
+      AssertBuffer,
       PrintBuffer,
       PrivateBase,
       ByValSVM,
@@ -71,6 +73,7 @@ public:
                           // explicit arg.
     unsigned SizeInBytes;
     unsigned BTI;
+    unsigned Alignment;
 
   private:
     KernelArgInfo() = default;
@@ -83,6 +86,7 @@ public:
     unsigned getSizeInBytes() const { return SizeInBytes; }
     unsigned getBTI() const { return BTI; }
     unsigned getOffsetInArg() const { return OffsetInArg; }
+    unsigned getAlignment() const { return Alignment; }
 
     bool isImage() const {
       switch (Kind) {
@@ -192,6 +196,7 @@ public:
 
   private:
     void setInstructionUsageProperties(const FunctionGroup &FG,
+                                       GenXOCLRuntimeInfo &RI,
                                        const GenXBackendConfig &BC);
     void setMetadataProperties(vc::KernelMetadata &KM, const GenXSubtarget &ST);
     void setArgumentProperties(const Function &Kernel,
@@ -209,8 +214,8 @@ public:
     // Creates kernel info for empty kernel.
     KernelInfo(const GenXSubtarget &ST);
     // Creates kernel info for given function group.
-    KernelInfo(const FunctionGroup &FG, const GenXSubtarget &ST,
-               const GenXBackendConfig &BC);
+    KernelInfo(const FunctionGroup &FG, GenXOCLRuntimeInfo &RI,
+               const GenXSubtarget &ST, const GenXBackendConfig &BC);
 
     const std::string &getName() const { return Name; }
 

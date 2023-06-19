@@ -14,7 +14,7 @@ SPDX-License-Identifier: MIT
 
 using namespace iga;
 
-class JSONFormatter : public BasicFormatter {
+class JSONFormatterV1 : public BasicFormatter {
 protected:
   const Model &model;
   const FormatOpts &opts;
@@ -29,7 +29,7 @@ protected:
   const RegSet EMPTY_SET;
 
 public:
-  JSONFormatter(std::ostream &o, const FormatOpts &os, const void *bs)
+  JSONFormatterV1(std::ostream &o, const FormatOpts &os, const void *bs)
       : BasicFormatter(false, o), opts(os), model(os.model),
         bits((const uint8_t *)bs), EMPTY_SET(os.model) {
     o << std::boolalpha;
@@ -1109,14 +1109,22 @@ public:
     }
     emit("]");
   }
-};
+}; // JSONFormatterV1
+
+namespace iga {
+void FormatJSON2(std::ostream &o, const FormatOpts &opts, const Kernel &k,
+                     const void *bits);
+}
 
 void iga::FormatJSON(std::ostream &o, const FormatOpts &opts, const Kernel &k,
                      const void *bits) {
-  JSONFormatter(o, opts, bits).emitKernel(k);
+  if (opts.printJsonVersion > 1)
+    iga::FormatJSON2(o, opts, k, bits);
+  else
+    JSONFormatterV1(o, opts, bits).emitKernel(k);
 }
 
-void iga::FormatInstructionJSON(std::ostream &o, const FormatOpts &opts,
+void iga::FormatInstructionJSON1(std::ostream &o, const FormatOpts &opts,
                                 const Instruction &i, const void *bits) {
-  JSONFormatter(o, opts, bits).emitInst(i);
+  JSONFormatterV1(o, opts, bits).emitInst(i);
 }

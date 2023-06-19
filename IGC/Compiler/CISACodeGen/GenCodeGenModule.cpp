@@ -152,32 +152,62 @@ void GenXCodeGenModule::processFunction(Function& F)
 
     IGC_ASSERT(CallerFGs.size() >= 1);
 
-    // Don't add referenced-indirectly attr for function with threadgroupbarrier intrinsic
-    // when m_FunctionCloningThreshold is set
-    auto hasUnsupportedCallsInFuncWithStackCalls = [](llvm::Function* F)->bool {
+    auto pCtx = getAnalysis<CodeGenContextWrapper>().getCodeGenContext();
+    auto pMdUtils = getAnalysis<MetaDataUtilsWrapper>().getMetaDataUtils();
+
+    auto CanMakeIndirectFunc = [&CallerFGs, &pMdUtils, &pCtx](llvm::Function* F)->bool
+    {
+        // Don't convert subroutines, builtins, or invoke_simd_target
+        if (F->hasFnAttribute("visaStackCall") == false ||
+            F->hasFnAttribute(llvm::Attribute::Builtin) ||
+            F->hasFnAttribute("invoke_simd_target"))
+            return false;
+
+        // If SIMD Variant Compilation is not enabled, we have to make sure all callers
+        // have the same SIMD sizes, otherwise we cannot make it an indirect call
+        int simd_size = 0;
+        for (auto iter : CallerFGs)
+        {
+            Function* callerKernel = iter.first->getHead();
+            auto funcInfoMD = pMdUtils->getFunctionsInfoItem(callerKernel);
+            int sz = funcInfoMD->getSubGroupSize()->getSIMD_size();
+            if (sz != 0 && simd_size == 0)
+                simd_size = sz;
+
+            // Callers have varying SIMD size requirements, do not promote
+            if (simd_size != sz)
+                return false;
+        }
+
+        // If CallWA is needed, we should not convert to indirect call when requiring SIMD32,
+        // as we can potentially avoid CallWA if there are no indirect calls.
+        if (pCtx->platform.requireCallWA() && simd_size == 32)
+        {
+            return false;
+        }
+
+        // Can't make indirect if threadgroupbarrier intrinsic is set
         for (inst_iterator I = inst_begin(F), E = inst_end(F); I != E; ++I)
         {
             if (auto* GII = dyn_cast<GenIntrinsicInst>(&*I))
             {
                 if (GII->getIntrinsicID() == GenISAIntrinsic::GenISA_threadgroupbarrier)
                 {
-                    return true;
+                    return false;
                 }
             }
         }
-        return false;
+        return true;
     };
 
     // Make the function indirect if cloning exceeds the threshold
     // We shouldn't add "referenced-indirectly" attr for builtins
-    if (F.hasFnAttribute("visaStackCall") &&
-        !F.hasFnAttribute(llvm::Attribute::Builtin) &&
-        m_FunctionCloningThreshold > 0 &&
+    if (m_FunctionCloningThreshold > 0 &&
         CallerFGs.size() > m_FunctionCloningThreshold &&
-        !hasUnsupportedCallsInFuncWithStackCalls(&F) &&
+        CanMakeIndirectFunc(&F) &&
         // Don't override the FunctionControl flags used for debugging
         IGC_GET_FLAG_VALUE(FunctionControl) == FLAG_FCALL_DEFAULT &&
-        IGC_GET_FLAG_VALUE(SelectiveFunctionControl) == FLAG_FCALL_DEFAULT)
+        IGC_GET_FLAG_VALUE(SelectiveFunctionControl) == 0)
     {
         auto pCtx = getAnalysis<CodeGenContextWrapper>().getCodeGenContext();
         auto IFG = FGA->getOrCreateIndirectCallGroup(F.getParent());
@@ -185,7 +215,7 @@ void GenXCodeGenModule::processFunction(Function& F)
         {
             if (IGC_IS_FLAG_ENABLED(PrintStackCallDebugInfo))
             {
-                std::cout << "Don't Clone: " << F.getName().str() << std::endl;
+                dbgs() << "Make Indirect: " << F.getName().str() << "\n";
             }
             F.addFnAttr("referenced-indirectly");
             pCtx->m_enableFunctionPointer = true;
@@ -254,27 +284,6 @@ void GenXCodeGenModule::processSCC(std::vector<llvm::CallGraphNode*>* SCCNodes)
         }
     }
     IGC_ASSERT(CallerFGs.size() >= 1);
-
-    // To prevent cloning if it exceeds the threshold, make every function in the SCC an indirect call
-    // TODO: No test cases for SCC, disable FunctionCloningThreshold for now
-    if (false &&
-        m_FunctionCloningThreshold > 0 && CallerFGs.size() > m_FunctionCloningThreshold)
-    {
-        auto pCtx = getAnalysis<CodeGenContextWrapper>().getCodeGenContext();
-        auto Mod = (*SCCNodes).front()->getFunction()->getParent();
-        auto IFG = FGA->getOrCreateIndirectCallGroup(Mod);
-        if (IFG)
-        {
-            for (CallGraphNode* Node : (*SCCNodes))
-            {
-                Function* F = Node->getFunction();
-                F->addFnAttr("referenced-indirectly");
-                pCtx->m_enableFunctionPointer = true;
-                FGA->addToFunctionGroup(F, IFG, F);
-            }
-            return;
-        }
-    }
 
     bool FirstPair = true;
     for (auto FG : CallerFGs)
@@ -413,17 +422,19 @@ bool GenXCodeGenModule::runOnModule(Module& M)
     // function groups can be cloned. If the number exceeds the threshold, instead of cloning the
     // function N times, make it an indirect call and use relocation instead. The function will only be
     // compiled once and runtime must relocate its address for each caller.
-    // TODO: For zebin path m_FunctionCloningThreshold should be enabled.
-    //       Temporary disabled, because it causing functional regressions
-    //if (getAnalysis<CodeGenContextWrapper>().getCodeGenContext()->enableZEBinary())
-    //{
-    //    // Enable by default for zebin
-    //    m_FunctionCloningThreshold = 1;
-    //}
-    if (IGC_GET_FLAG_VALUE(FunctionCloningThreshold) != 0)
+    m_FunctionCloningThreshold = 0;
+    if (IGC_IS_FLAG_ENABLED(EnableFunctionCloningControl))
     {
-        // Overwrite with debug flag
-        m_FunctionCloningThreshold = IGC_GET_FLAG_VALUE(FunctionCloningThreshold);
+        if (getAnalysis<CodeGenContextWrapper>().getCodeGenContext()->enableZEBinary())
+        {
+            // Avoid cloning by default on zebin
+            m_FunctionCloningThreshold = 1;
+        }
+        if (IGC_GET_FLAG_VALUE(FunctionCloningThreshold) != 0)
+        {
+            // Overwrite with debug flag
+            m_FunctionCloningThreshold = IGC_GET_FLAG_VALUE(FunctionCloningThreshold);
+        }
     }
 
     pMdUtils = getAnalysis<MetaDataUtilsWrapper>().getMetaDataUtils();
@@ -509,24 +520,6 @@ bool GenXCodeGenModule::runOnModule(Module& M)
         }
     }
 
-    auto pCtx = getAnalysis<CodeGenContextWrapper>().getCodeGenContext();
-    if (pCtx->platform.getMinDispatchMode() == SIMDMode::SIMD8)
-    {
-        // Changing simd size from 32 to 16 for function groups with function calls due to slicing
-        for (auto GI = FGA->begin(), GE = FGA->end(); GI != GE; ++GI)
-        {
-            FunctionGroup* FG = *GI;
-            if (!FG->isSingle() || FG->hasStackCall() || IGC::isIntelSymbolTableVoidProgram(FG->getHead()))
-            {
-                Function* Kernel = FG->getHead();
-                IGC::IGCMD::FunctionInfoMetaDataHandle funcInfoMD = pMdUtils->getFunctionsInfoItem(Kernel);
-                int simd_size = funcInfoMD->getSubGroupSize()->getSIMD_size();
-                if (simd_size == 32)
-                    funcInfoMD->getSubGroupSize()->setSIMD_size(16);
-            }
-        }
-    }
-
     IGC_ASSERT(FGA->verify());
 
     FGA->setModule(&M);
@@ -572,7 +565,8 @@ bool GenXFunctionGroupAnalysis::verify()
             for (auto FI = (*SubGI)->begin(), FE = (*SubGI)->end(); FI != FE; ++FI)
             {
                 Function* F = *FI;
-                if (F->hasFnAttribute("referenced-indirectly"))
+                if (F->hasFnAttribute("referenced-indirectly")
+                    )
                 {
                     continue;
                 }
@@ -605,15 +599,8 @@ FunctionGroup* GenXFunctionGroupAnalysis::getOrCreateIndirectCallGroup(Module* p
 {
     if (IndirectCallGroup) return IndirectCallGroup;
 
-    auto pCtx = getAnalysis<CodeGenContextWrapper>().getCodeGenContext();
-
-    // Use the dummy kernel if it exists. Otherwise use the unique entry function.
-    // OCL shaders should always use the dummy kernel.
     llvm::Function* defaultKernel = IGC::getIntelSymbolTableVoidProgram(pModule);
-    if (!defaultKernel && pCtx->type != ShaderType::OPENCL_SHADER)
-    {
-        defaultKernel = IGC::getUniqueEntryFunc(pCtx->getMetaDataUtils(), pCtx->getModuleMetaData());
-    }
+
     // No default kernel found
     if (!defaultKernel) return nullptr;
 
@@ -633,18 +620,41 @@ bool GenXFunctionGroupAnalysis::useStackCall(llvm::Function* F)
 
 void GenXFunctionGroupAnalysis::setGroupAttributes()
 {
+    auto pMdUtils = getAnalysis<MetaDataUtilsWrapper>().getMetaDataUtils();
+
     for (auto FG : Groups)
     {
+        if (isIndirectCallGroup(FG))
+        {
+            // The dummy kernel group is not a true function group, in that the functions in this group does not have
+            // a valid callgraph that connects them. It's a dummy group where all indirectly called functions are contained.
+            // Therefore, the group attributes are not valid here, since they are not connected to the real groupHead, which
+            // is the caller kernel. We don't set any of the FG attribute flags for this group.
+            //
+            // Note, indirect functions in this group can still directly call stackcalls or subroutines, which may also belong
+            // to this group due to cloning. However we still can't associate all functions in this group with a single callgraph.
+            continue;
+        }
+
         for (const Function* F : *FG)
         {
-            // Ignore indirect functions
             if (F->hasFnAttribute("referenced-indirectly"))
             {
+                IGC_ASSERT_MESSAGE(0, "Indirectly referenced function not moved to IndirectCallGroup!");
                 continue;
             }
-            else if (F->hasFnAttribute("visaStackCall"))
+
+            if (F->hasFnAttribute("visaStackCall"))
             {
                 FG->m_hasStackCall = true;
+                if (!isLeafFunc(F))
+                {
+                    FG->m_hasNestedCall = true;
+                }
+            }
+            else if (!isEntryFunc(pMdUtils, F))
+            {
+                FG->m_hasSubroutine = true;
             }
 
             // check all functions in the group to see if there's an vla alloca
@@ -667,6 +677,7 @@ void GenXFunctionGroupAnalysis::setGroupAttributes()
                 if (const CallInst* call = dyn_cast<CallInst>(&*ii))
                 {
                     Function* calledF = call->getCalledFunction();
+                    bool hasStackCall = calledF && calledF->hasFnAttribute("visaStackCall");
                     if (call->isInlineAsm())
                     {
                         // Uses inline asm call
@@ -675,22 +686,29 @@ void GenXFunctionGroupAnalysis::setGroupAttributes()
                     else if (!calledF || (calledF->isDeclaration() && calledF->hasFnAttribute("referenced-indirectly")))
                     {
                         // This is the true indirect call case, where either the callee's address is taken, or it belongs
-                        // to an external module. We do not know the callgraph in this case, so set the indirectcall flag.
-                        FG->m_hasStackCall = true;
+                        // to an external module. We do not know the callgraph in this case.
+                        hasStackCall = true;
                         FG->m_hasIndirectCall = true;
+                        FG->m_hasPartialCallGraph = true;
                     }
                     else if (calledF && calledF->hasFnAttribute("referenced-indirectly"))
                     {
                         // This is the case where the callee has the "referenced-indirectly" attribute, but we still
-                        // see the callgraph. The callee may not belong to the same FG as the caller, but it still
-                        // counts as a stackcall.
-                        FG->m_hasStackCall = true;
+                        // see the callgraph. The callee may not belong to the same FG as the caller, but it's CG is still available.
+                        hasStackCall = true;
+                        FG->m_hasIndirectCall = true;
                     }
                     else if (calledF && calledF->isDeclaration() && calledF->hasFnAttribute("invoke_simd_target"))
                     {
                         // Invoke_simd targets use stack call by convention.
-                        FG->m_hasStackCall = true;
+                        // Calling a func decl indicates unknown CG
+                        hasStackCall = true;
+                        FG->m_hasIndirectCall = true;
+                        FG->m_hasPartialCallGraph = true;
                     }
+
+                    FG->m_hasStackCall |= hasStackCall;
+                    FG->m_hasNestedCall |= (!isEntryFunc(pMdUtils, F) && hasStackCall);
                 }
             }
         }
