@@ -2,6 +2,7 @@ intel-graphics-compiler (1.0.17384.9-1) UNRELEASED; urgency=medium
 
   * New upstream release.
   * patches: Fix build with gcc-14.
+  * rules: Override dh_dwz, FTBFS.
 
  -- Timo Aaltonen <tjaalton@debian.org>  Tue, 06 Aug 2024 09:05:05 +0300
 

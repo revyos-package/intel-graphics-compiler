@@ -28,6 +28,7 @@ override_dh_gencontrol:
 	dh_gencontrol -- \
 		-V'llvm:Version=$(LLVM_VERSION)'
 
+override_dh_dwz:
 
 gentarball:
 	tar --transform 's,^,$(DEB_SOURCE)-$(DEB_VERSION_UPSTREAM)/,' \
