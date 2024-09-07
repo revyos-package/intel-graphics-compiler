@@ -1,3 +1,2 @@
 #typos.patch
 unset-fortify-source.diff
-Fixes-compilation-problem-on-GCC-14.patch
