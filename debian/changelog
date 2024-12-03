@@ -1,8 +1,8 @@
-intel-graphics-compiler (1.0.17791.18-1) UNRELEASED; urgency=medium
+intel-graphics-compiler (1.0.17791.18-1) unstable; urgency=medium
 
   * New upstream release.
 
- -- Timo Aaltonen <tjaalton@debian.org>  Tue, 03 Dec 2024 09:22:48 +0200
+ -- Timo Aaltonen <tjaalton@debian.org>  Tue, 03 Dec 2024 09:30:11 +0200
 
 intel-graphics-compiler (1.0.17791.16-1) unstable; urgency=medium
 
