@@ -1,3 +1,9 @@
+intel-graphics-compiler (2.1.13-1) UNRELEASED; urgency=medium
+
+  * New upstream release.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Tue, 03 Dec 2024 09:34:15 +0200
+
 intel-graphics-compiler (1.0.17791.18-1) unstable; urgency=medium
 
   * New upstream release.
