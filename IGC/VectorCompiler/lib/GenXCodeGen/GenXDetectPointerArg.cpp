@@ -111,7 +111,7 @@ bool GenXDetectPointerArg::handleKernel(Function &F) {
     NewDescs.resize(F.arg_size(), "");
 
   for (auto *Arg : PointerArgs) {
-    if (!Arg->getType()->isIntegerTy(64))
+    if (!Arg->getType()->isIntegerTy(64) && !Arg->getType()->isPointerTy())
       continue;
 
     auto ArgNo = Arg->getArgNo();
@@ -408,8 +408,27 @@ void GenXDetectPointerArg::analyzeValue(Value *V) {
       WorkList.push(Inst->getOperand(1));
       continue;
     }
-    if (isa<GetElementPtrInst>(Inst)) {
-      WorkList.push(Inst->getOperand(0));
+    if (auto *GEP = dyn_cast<GetElementPtrInst>(Inst)) {
+      WorkList.push(GEP->getPointerOperand());
+      continue;
+    }
+
+    // Skip function calls and intrinsics.
+    if (isa<CallInst>(Inst))
+      continue;
+
+    switch (Inst->getOpcode()) {
+    default:
+      break;
+    case Instruction::Mul:
+    case Instruction::UDiv:
+    case Instruction::SDiv:
+    case Instruction::URem:
+    case Instruction::SRem:
+    case Instruction::Shl:
+    case Instruction::LShr:
+    case Instruction::AShr:
+      // Mul-like and div-like instructions cannot produce a pointer.
       continue;
     }
 
