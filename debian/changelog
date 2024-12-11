@@ -1,3 +1,9 @@
+intel-graphics-compiler (1.0.17791.18-2) UNRELEASED; urgency=medium
+
+  * rules: Drop the spirv translator flag, on by default.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Wed, 11 Dec 2024 09:32:39 +0200
+
 intel-graphics-compiler (1.0.17791.18-1) unstable; urgency=medium
 
   * New upstream release.
