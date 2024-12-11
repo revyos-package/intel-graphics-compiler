@@ -67,7 +67,7 @@ Description: Intel graphics compiler for OpenCL -- OpenCL library
  .
  This package includes the library for OpenCL.
 
-Package: libigdfcl-dev
+Package: libigdfcl2-dev
 Architecture: any-amd64
 Multi-Arch: same
 Section: libdevel
