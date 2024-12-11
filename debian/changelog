@@ -1,4 +1,4 @@
-intel-graphics-compiler (2.3.1-1) UNRELEASED; urgency=medium
+intel-graphics-compiler (2.3.1-1) experimental; urgency=medium
 
   * New upstream release.
   * watch: Updated.
@@ -11,7 +11,7 @@ intel-graphics-compiler (2.3.1-1) UNRELEASED; urgency=medium
     limited to Gen12 and up.
   * control: Add C/R/B on libigc-tools.
 
- -- Timo Aaltonen <tjaalton@debian.org>  Tue, 03 Dec 2024 09:34:15 +0200
+ -- Timo Aaltonen <tjaalton@debian.org>  Wed, 11 Dec 2024 10:07:06 +0200
 
 intel-graphics-compiler (1.0.17791.18-1) unstable; urgency=medium
 
