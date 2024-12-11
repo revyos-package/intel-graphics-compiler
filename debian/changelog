@@ -7,6 +7,8 @@ intel-graphics-compiler (2.1.14-1) UNRELEASED; urgency=medium
   * rules: Drop the spirv translator flag, on by default.
   * control: Bump Provides.
   * control: Drop obsolete Breaks.
+  * control: Drop i386 from the archs, the supported platforms are now
+    limited to Gen12 and up.
 
  -- Timo Aaltonen <tjaalton@debian.org>  Tue, 03 Dec 2024 09:34:15 +0200
 
