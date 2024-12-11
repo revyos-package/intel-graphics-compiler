@@ -44,6 +44,9 @@ Description: Intel graphics compiler for OpenCL -- core libs
 Package: libigc2-tools
 Architecture: any-amd64
 Section: video
+Breaks: libigc-tools
+Conflicts: libigc-tools
+Replaces: libigc-tools
 Depends:
  ${shlibs:Depends},
  ${misc:Depends},
