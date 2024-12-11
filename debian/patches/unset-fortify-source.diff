@@ -1,0 +1,11 @@
+--- a/IGC/CMakeLists.txt
++++ b/IGC/CMakeLists.txt
+@@ -1008,7 +1008,7 @@ foreach(_compilerFlagName IN ITEMS "CMAK
+     string(FIND ${CMAKE_CXX_FLAGS} "-D_FORTIFY_SOURCE=3" __FORTIFY_SOURCE_3_SET)
+     set(flags -fstack-protector)
+     if(${__FORTIFY_SOURCE_3_SET} EQUAL -1)
+-      list(APPEND flags -D_FORTIFY_SOURCE=2)
++      list(APPEND flags -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=2)
+     endif()
+     igc_config_flag_apply_settings(
+         CompilerOptions
