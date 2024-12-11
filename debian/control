@@ -27,7 +27,7 @@ Homepage: https://github.com/intel/intel-graphics-compiler
 Vcs-Browser: https://salsa.debian.org/opencl-team/intel-graphics-compiler
 Vcs-Git: https://salsa.debian.org/opencl-team/intel-graphics-compiler.git
 
-Package: libigc1
+Package: libigc2
 Architecture: any-amd64 any-i386
 Multi-Arch: same
 Depends:
@@ -43,20 +43,7 @@ Description: Intel graphics compiler for OpenCL -- core libs
  .
  This package includes the core libraries.
 
-Package: libigc-dev
-Architecture: any-amd64 any-i386
-Multi-Arch: same
-Section: libdevel
-Depends:
- libigc1 (= ${binary:Version}),
- ${misc:Depends},
-Description: Intel graphics compiler for OpenCL -- core development files
- The Intel(R) Graphics Compiler for OpenCL(TM) is an llvm based compiler
- for OpenCL(TM) targeting Intel Gen graphics hardware architecture.
- .
- This package includes files for IGC core development.
-
-Package: libigc-tools
+Package: libigc2-tools
 Architecture: any-amd64 any-i386
 Section: video
 Depends:
@@ -68,7 +55,7 @@ Description: Intel graphics compiler for OpenCL -- media tools
  .
  This package includes tools for the media driver.
 
-Package: libigdfcl1
+Package: libigdfcl2
 Architecture: any-amd64 any-i386
 Multi-Arch: same
 Depends:
@@ -89,7 +76,7 @@ Architecture: any-amd64 any-i386
 Multi-Arch: same
 Section: libdevel
 Depends:
- libigdfcl1 (= ${binary:Version}),
+ libigdfcl2 (= ${binary:Version}),
  ${misc:Depends},
 Description: Intel graphics compiler for OpenCL -- OpenCL development files
  The Intel(R) Graphics Compiler for OpenCL(TM) is an llvm based compiler
