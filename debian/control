@@ -33,8 +33,6 @@ Multi-Arch: same
 Depends:
  ${shlibs:Depends},
  ${misc:Depends},
-Breaks:
- intel-opencl-icd (<< 21.32.20609-2~),
 Provides:
  libigc2+llvm${llvm:Version},
 Description: Intel graphics compiler for OpenCL -- core libs
@@ -61,8 +59,6 @@ Multi-Arch: same
 Depends:
  ${shlibs:Depends},
  ${misc:Depends},
-Breaks:
- intel-opencl-icd (<< 21.32.20609-2~),
 Provides:
  libigdfcl2+llvm${llvm:Version},
 Description: Intel graphics compiler for OpenCL -- OpenCL library
