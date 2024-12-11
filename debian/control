@@ -36,7 +36,7 @@ Depends:
 Breaks:
  intel-opencl-icd (<< 21.32.20609-2~),
 Provides:
- libigc1+llvm${llvm:Version},
+ libigc2+llvm${llvm:Version},
 Description: Intel graphics compiler for OpenCL -- core libs
  The Intel(R) Graphics Compiler for OpenCL(TM) is an llvm based compiler
  for OpenCL(TM) targeting Intel Gen graphics hardware architecture.
@@ -64,7 +64,7 @@ Depends:
 Breaks:
  intel-opencl-icd (<< 21.32.20609-2~),
 Provides:
- libigdfcl1+llvm${llvm:Version},
+ libigdfcl2+llvm${llvm:Version},
 Description: Intel graphics compiler for OpenCL -- OpenCL library
  The Intel(R) Graphics Compiler for OpenCL(TM) is an llvm based compiler
  for OpenCL(TM) targeting Intel Gen graphics hardware architecture.
