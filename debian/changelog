@@ -1,4 +1,4 @@
-intel-graphics-compiler (2.1.14-1) UNRELEASED; urgency=medium
+intel-graphics-compiler (2.3.1-1) UNRELEASED; urgency=medium
 
   * New upstream release.
   * watch: Updated.
