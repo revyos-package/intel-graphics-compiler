@@ -1,4 +1,4 @@
-Source: intel-graphics-compiler
+Source: intel-graphics-compiler2
 Section: libs
 Priority: optional
 Maintainer: Debian OpenCL team <pkg-opencl-devel@lists.alioth.debian.org>

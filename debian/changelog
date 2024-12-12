@@ -1,3 +1,10 @@
+intel-graphics-compiler2 (2.3.1-2) UNRELEASED; urgency=medium
+
+  * Fork the source package to allow backports to old releases without
+    breaking legacy support.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Thu, 12 Dec 2024 08:22:00 +0200
+
 intel-graphics-compiler (2.3.1-1) experimental; urgency=medium
 
   * New upstream release.
