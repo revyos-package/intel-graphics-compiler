@@ -1,5 +1,6 @@
-intel-graphics-compiler2 (2.5.10-2) UNRELEASED; urgency=medium
+intel-graphics-compiler2 (2.5.12-1) UNRELEASED; urgency=medium
 
+  * New upstream release.
   * unset-fortify-source.diff: Dropped, not needed anymore.
   * rules: Enable USE_KHRONOS_SPIRV_TRANSLATOR_IN_SC.
   * patches: Drop typos.patch, which was partly applied upstream and
