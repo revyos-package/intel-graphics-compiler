@@ -1,4 +1,4 @@
-intel-graphics-compiler2 (2.5.12-1) UNRELEASED; urgency=medium
+intel-graphics-compiler2 (2.5.12-1) unstable; urgency=medium
 
   * New upstream release.
   * unset-fortify-source.diff: Dropped, not needed anymore.
@@ -6,7 +6,7 @@ intel-graphics-compiler2 (2.5.12-1) UNRELEASED; urgency=medium
   * patches: Drop typos.patch, which was partly applied upstream and
     rest of it considered obsolete.
 
- -- Timo Aaltonen <tjaalton@debian.org>  Wed, 05 Feb 2025 09:42:45 +0200
+ -- Timo Aaltonen <tjaalton@debian.org>  Tue, 11 Feb 2025 09:11:50 +0200
 
 intel-graphics-compiler2 (2.5.10-1) unstable; urgency=medium
 
