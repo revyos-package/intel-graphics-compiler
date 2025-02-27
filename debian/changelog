@@ -1,3 +1,9 @@
+intel-graphics-compiler2 (2.8.1-1) UNRELEASED; urgency=medium
+
+  * New upstream release.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Thu, 27 Feb 2025 09:51:06 +0200
+
 intel-graphics-compiler2 (2.5.12-1) unstable; urgency=medium
 
   * New upstream release.
