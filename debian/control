@@ -16,7 +16,7 @@ Build-Depends: debhelper-compat (= 13),
  zlib1g-dev,
 # keep the clang/llvm version in sync
  clang-14,
- intel-vc-intrinsics-14-dev (>= 0.16.0),
+ intel-vc-intrinsics-14-dev (>= 0.22.0),
  liblld-14-dev,
  libllvmspirvlib-14-dev,
  libopencl-clang-14-dev,

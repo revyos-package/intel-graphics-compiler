@@ -1,6 +1,7 @@
 intel-graphics-compiler2 (2.9.2-1) UNRELEASED; urgency=medium
 
   * New upstream release.
+  * control: Bump build-depends on intel-vc-intrinsics-14-dev.
 
  -- Timo Aaltonen <tjaalton@debian.org>  Thu, 27 Feb 2025 09:51:06 +0200
 
