@@ -155,6 +155,7 @@ namespace IGC
         case IGFX_ARROWLAKE:
         case IGFX_LUNARLAKE:
         case IGFX_BMG:
+        case IGFX_PTL:
         /* This is just a place holder the WA application has moved below and changed
         its no longer based on platform */
             break;
@@ -193,8 +194,11 @@ namespace IGC
             {
                 switch (GFX_GET_GMD_RELEASE_VERSION_RENDER(platform->getPlatformInfo()))
                 {
-                case GFX_GMD_ARCH_20_RELEASE_XE2_HPG_X2:
+                case GFX_GMD_ARCH_20_RELEASE_XE2_HPG_2001:
                     InitGt_20_01HwWaTable(&waTable, pSkuFeatureTable, &stWaInitParam);
+                    break;
+                case GFX_GMD_ARCH_20_RELEASE_XE2_HPG_2002:
+                    InitGt_20_02HwWaTable(&waTable, pSkuFeatureTable, &stWaInitParam);
                     break;
                 case GFX_GMD_ARCH_20_RELEASE_XE2_LPG:
                     InitGt_20_04HwWaTable(&waTable, pSkuFeatureTable, &stWaInitParam);
@@ -216,10 +220,15 @@ namespace IGC
                 case GFX_GMD_ARCH_30_RELEASE_XE3_LPG_3001:
                     InitGt_30_01HwWaTable(&waTable, pSkuFeatureTable, &stWaInitParam);
                     break;
+                case GFX_GMD_ARCH_30_RELEASE_XE3_LPG_3003:
+                    InitGt_30_03HwWaTable(&waTable, pSkuFeatureTable, &stWaInitParam);
+                    break;
                 default:
                     IGC_ASSERT_MESSAGE(0, "unknown IP");
                     break;
                 }
+                stWaInitParam.usWaIpShift = WA_BIT_GT;
+                InitGt_30_00_SwWaTable(&waTable, pSkuFeatureTable, &stWaInitParam);
                 break;
             }
             default:

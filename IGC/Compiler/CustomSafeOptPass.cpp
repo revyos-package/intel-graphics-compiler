@@ -66,12 +66,12 @@ cmp+sel to avoid expensive VxH mov.
 #include <llvmWrapper/IR/DIBuilder.h>
 #include <llvmWrapper/IR/DerivedTypes.h>
 #include <llvmWrapper/IR/IRBuilder.h>
-#include <llvmWrapper/IR/PatternMatch.h>
 #include <llvmWrapper/Analysis/TargetLibraryInfo.h>
 #include <llvm/ADT/Statistic.h>
 #include <llvm/ADT/SetVector.h>
 #include <llvm/Analysis/ConstantFolding.h>
 #include <llvm/Analysis/InstructionSimplify.h>
+#include <llvm/BinaryFormat/Dwarf.h>
 #include <llvm/IR/Constants.h>
 #include "llvm/IR/DebugInfo.h"
 #include <llvm/IR/Function.h>
@@ -84,7 +84,6 @@ cmp+sel to avoid expensive VxH mov.
 #include <llvm/Analysis/ValueTracking.h>
 #include <llvm/Support/CommandLine.h>
 #include "common/LLVMWarningsPop.hpp"
-#include <set>
 #include "common/secure_mem.h"
 #include "Probe/Assertion.h"
 
@@ -852,6 +851,12 @@ void CustomSafeOptPass::visitCallInst(CallInst& C)
             break;
         }
 
+        case GenISAIntrinsic::GenISA_bfn:
+        {
+            visitBfn(inst);
+            break;
+        }
+
         case GenISAIntrinsic::GenISA_f32tof16_rtz:
         {
             visitf32tof16(inst);
@@ -1066,18 +1071,31 @@ void CustomSafeOptPass::visitBfi(llvm::CallInst* inst)
     ConstantInt* offsetV = dyn_cast<ConstantInt>(inst->getOperand(1));
     if (widthV && offsetV)
     {
+        ConstantInt* baseV = dyn_cast<ConstantInt>(inst->getOperand(3));
         // transformation is beneficial if src3 is constant or if the offset is zero
-        if (isa<ConstantInt>(inst->getOperand(3)) || offsetV->isZero())
+        if (baseV || offsetV->isZero())
         {
             unsigned int width = static_cast<unsigned int>(widthV->getZExtValue());
             unsigned int offset = static_cast<unsigned int>(offsetV->getZExtValue());
             unsigned int bitMask = ((1 << width) - 1) << offset;
             IRBuilder<> builder(inst);
             // dst = ((src2 << offset) & bitmask) | (src3 & ~bitmask)
-            Value* firstTerm = builder.CreateShl(inst->getOperand(2), offsetV);
+            Value* firstTerm = nullptr;
+            Value* dst = nullptr;
+            if( offset != 0 ) {
+              firstTerm = builder.CreateShl(inst->getOperand(2), offsetV);
+            } else {
+              firstTerm = inst->getOperand(2);
+            }
             firstTerm = builder.CreateAnd(firstTerm, builder.getInt32(bitMask));
-            Value* secondTerm = builder.CreateAnd(inst->getOperand(3), builder.getInt32(~bitMask));
-            Value* dst = builder.CreateOr(firstTerm, secondTerm);
+
+            if (baseV && baseV->isZero()) {
+              dst = firstTerm;
+            } else {
+              auto* secondTerm = builder.CreateAnd(inst->getOperand(3), builder.getInt32(~bitMask));
+              dst = builder.CreateOr(firstTerm, secondTerm);
+            }
+
             inst->replaceAllUsesWith(dst);
             inst->eraseFromParent();
         }
@@ -1087,6 +1105,35 @@ void CustomSafeOptPass::visitBfi(llvm::CallInst* inst)
         inst->replaceAllUsesWith(inst->getOperand(3));
         inst->eraseFromParent();
     }
+}
+
+void CustomSafeOptPass::visitBfn(llvm::CallInst* inst)
+{
+    ConstantInt* op0 = dyn_cast<ConstantInt>(inst->getOperand(0));
+    ConstantInt* op1 = dyn_cast<ConstantInt>(inst->getOperand(1));
+    ConstantInt* op2 = dyn_cast<ConstantInt>(inst->getOperand(2));
+    ConstantInt* booleanFuncCtrl = dyn_cast<ConstantInt>(inst->getOperand(3));
+
+    if (!op0 || !op1 || !op2 || !booleanFuncCtrl)
+        return;
+
+    // Precalculate value.
+    uint64_t src0 = op0->getZExtValue();
+    uint64_t src1 = op1->getZExtValue();
+    uint64_t src2 = op2->getZExtValue();
+    uint64_t result = 0;
+
+    switch (booleanFuncCtrl->getZExtValue())
+    {
+    case 0xD8:
+        result = (src0 & src1) | (~src0 & src2);
+        break;
+    default:
+        return;
+    }
+
+    inst->replaceAllUsesWith(ConstantInt::get(inst->getType(), result, false));
+    inst->eraseFromParent();
 }
 
 void CustomSafeOptPass::visitMulH(CallInst* inst, bool isSigned)
@@ -1939,6 +1986,12 @@ void CustomSafeOptPass::visitTruncInst(TruncInst& I)
     To:
     %335 = call i16 @llvm.genx.GenISA.WaveShuffleIndex.i16(i16 %orig, i32 %333, i32 0)
     */
+
+    if (IGC_IS_FLAG_ENABLED(EnableEmitMoreMoviCases))
+    {
+        return;
+    }
+
     if( I.getSrcTy()->isIntegerTy( 32 ) && I.getDestTy()->isIntegerTy( 16 ) )
     {
         // We know all variants of shuffle from zext are safe to demote. (unlike WaveAll which might not be)
@@ -3828,17 +3881,21 @@ void GenSpecificPattern::visitIntToPtr(llvm::IntToPtrInst& I)
 
 void GenSpecificPattern::visitTruncInst(llvm::TruncInst& I)
 {
+    auto& DL = I.getModule()->getDataLayout();
+    Value* Src = nullptr;
+    Value* LHS = nullptr;
+    Value* RHS = nullptr;
+
     /*
     from
     %22 = lshr i64 %a, 52
     %23 = trunc i64  %22 to i32
-    to
+    ==>
     %22 = extractelement <2 x i32> %a, 1
     %23 = lshr i32 %22, 20 //52-32
     */
 
     using namespace llvm::PatternMatch;
-    Value* LHS = nullptr;
     ConstantInt* CI = nullptr;
     if (match(&I, m_Trunc(m_LShr(m_Value(LHS), m_ConstantInt(CI)))) &&
         I.getType()->isIntegerTy(32) &&
@@ -3856,6 +3913,95 @@ void GenSpecificPattern::visitTruncInst(llvm::TruncInst& I)
         }
         I.replaceAllUsesWith(new_Val);
         I.eraseFromParent();
+        return;
+    }
+
+    /*
+    %i2p = inttoptr i32 %src to ptr addrspace(1)
+    %p2i = ptrtoint ptr addrspace(1) %i2p to i64
+    %res = trunc i64 %p2i to i32
+    ==>
+    %res = %src
+    */
+    if (match(&I, m_Trunc(m_PtrToInt(m_IntToPtr(m_Value(Src))))))
+    {
+        if (I.getType()->isVectorTy())
+            return;
+        // Ensure types match
+        if (Src->getType() != I.getType())
+            return;
+        auto* P2I = dyn_cast<PtrToIntInst>(I.getOperand(0));
+        if (!P2I)
+            return;
+        auto* I2P = dyn_cast<IntToPtrInst>(P2I->getOperand(0));
+        if (!I2P)
+            return;
+        if (DL.getPointerSizeInBits(I2P->getType()->getPointerAddressSpace()) <
+            I2P->getSrcTy()->getIntegerBitWidth())
+            return;
+        if (DL.getPointerSizeInBits(P2I->getSrcTy()->getPointerAddressSpace()) !=
+            P2I->getType()->getIntegerBitWidth())
+            return;
+        I.replaceAllUsesWith(Src);
+        I.eraseFromParent();
+        return;
+    }
+
+    /*
+    %i2p = inttoptr i32 %src to ptr addrspace(1)
+    %p2i = ptrtoint ptr addrspace(1) %i2p to i64
+    %add = add i64 %p2i, C
+    %res = trunc i64 %add to i32
+    ==>
+    %res = add i32 %src, C
+    */
+    if (match(&I, m_Trunc(m_Add(m_PtrToInt(m_IntToPtr(m_Value(Src))), m_Value(RHS)))))
+    {
+        if (I.getType()->isVectorTy())
+            return;
+        // Ensure types match
+        if (Src->getType() != I.getType())
+            return;
+        auto* Add = dyn_cast<Instruction>(I.getOperand(0));
+        if (!Add || Add->getOpcode() != Instruction::Add)
+            return;
+        auto* P2I = dyn_cast<PtrToIntInst>(Add->getOperand(0));
+        if (!P2I)
+            return;
+        auto* I2P = dyn_cast<IntToPtrInst>(P2I->getOperand(0));
+        if (!I2P)
+            return;
+        if (DL.getPointerSizeInBits(I2P->getType()->getPointerAddressSpace()) <
+            I2P->getSrcTy()->getIntegerBitWidth())
+            return;
+        if (DL.getPointerSizeInBits(P2I->getSrcTy()->getPointerAddressSpace()) !=
+            P2I->getType()->getIntegerBitWidth())
+            return;
+        IRBuilder<> IRB(&I);
+        RHS = IRB.CreateTrunc(RHS, I.getType());
+        auto* Res = IRB.CreateAdd(Src, RHS);
+        I.replaceAllUsesWith(Res);
+        I.eraseFromParent();
+        return;
+    }
+
+    /*
+    %s1 = sext i32 %a to i64
+    %s2 = sext i32 %b to i64
+    %add = add i64 %s1, %s2
+    %res = trunc i64 %add to i32
+    ==>
+    %res = add i32 %a, %b
+    */
+    if (match(&I, m_Trunc(m_Add(m_SExt(m_Value(LHS)), m_SExt(m_Value(RHS))))))
+    {
+        if (I.getType() != LHS->getType())
+            return;
+        IRBuilder<> IRB(&I);
+        auto* Res = IRB.CreateAdd(LHS, RHS);
+        I.replaceAllUsesWith(Res);
+        I.eraseFromParent();
+        return;
     }
 }
 
@@ -4154,10 +4300,10 @@ Constant* IGCConstProp::ConstantFoldCallInstruction(CallInst* inst)
             // Please, be aware of the fact that clients can understand the term canonical FP value in other way.
             if (C0)
             {
-                CodeGenContext* pCodeGenContext = getAnalysis<CodeGenContextWrapper>().getCodeGenContext();
-                bool flushVal = pCodeGenContext->m_floatDenormMode16 == ::IGC::FLOAT_DENORM_FLUSH_TO_ZERO && inst->getType()->isHalfTy();
-                flushVal = flushVal || (pCodeGenContext->m_floatDenormMode32 == ::IGC::FLOAT_DENORM_FLUSH_TO_ZERO && inst->getType()->isFloatTy());
-                flushVal = flushVal || (pCodeGenContext->m_floatDenormMode64 == ::IGC::FLOAT_DENORM_FLUSH_TO_ZERO && inst->getType()->isDoubleTy());
+                CompOptions& compOpt = getAnalysis<CodeGenContextWrapper>().getCodeGenContext()->getModuleMetaData()->compOpt;
+                bool flushVal = compOpt.FloatDenormMode16 == ::IGC::FLOAT_DENORM_FLUSH_TO_ZERO && inst->getType()->isHalfTy();
+                flushVal = flushVal || (compOpt.FloatDenormMode32 == ::IGC::FLOAT_DENORM_FLUSH_TO_ZERO && inst->getType()->isFloatTy());
+                flushVal = flushVal || (compOpt.FloatDenormMode64 == ::IGC::FLOAT_DENORM_FLUSH_TO_ZERO && inst->getType()->isDoubleTy());
                 C = constantFolder.CreateCanonicalize(C0, flushVal);
             }
         }
@@ -7088,21 +7234,24 @@ void InsertBranchOpt::atomicSplitOpt(Function& F, int mode)
 {
     enum Mode
     {
-        Disable = 0x0,    // Disabled IGC\EnableAtomicBranch = 0x0
-        ZeroAdd = BIT(0), // Enabled IGC\EnableAtomicBranch = 0x1
-        UMax = BIT(1),    // Enabled IGC\EnableAtomicBranch = 0x2
-        UMin = BIT(2)     // Enabled IGC\EnableAtomicBranch = 0x4
+        Disable = 0x0,          // Disabled IGC\EnableAtomicBranch = 0x0
+        ZeroAdd = BIT(0),       // Enabled IGC\EnableAtomicBranch = 0x1
+        UMax = BIT(1),          // Enabled IGC\EnableAtomicBranch = 0x2
+        UMin = BIT(2),          // Enabled IGC\EnableAtomicBranch = 0x4
+        UntypedUgmLoad = BIT(3) // Enabled IGC\EnableAtomicBranch = 0x8
     };
 
-    // Allow both modes to be applied
-    bool zeroAddMode = ( ( mode & ZeroAdd ) == ZeroAdd );
-    bool umaxMode = ( ( mode & UMax ) == UMax );
-    bool uminMode = ( ( mode & UMin ) == UMin );
+    // Allow several modes to be applied
+    const bool zeroAddMode = ( ( mode & ZeroAdd ) == ZeroAdd );
+    const bool umaxMode = ( ( mode & UMax ) == UMax );
+    const bool uminMode = ( ( mode & UMin ) == UMin );
+    const bool untypedUgmLoadMode = ( ( mode & UntypedUgmLoad ) == UntypedUgmLoad );
 
-    auto createReadFromAtomic = []( IRBuilder<>& builder, Instruction* inst, bool isTyped )
+    auto createReadFromAtomic = [=]( IRBuilder<>& builder, Instruction* inst, bool isTyped )
         {
             Constant* zero = ConstantInt::get( inst->getType(), 0 );
             Instruction* NewInst = nullptr;
+
             if( isTyped )
             {
                 Function* pLdIntrinsic = llvm::GenISAIntrinsic::getDeclaration(
@@ -7114,7 +7263,7 @@ void InsertBranchOpt::atomicSplitOpt(Function& F, int mode)
                 ld_FunctionArgList[ 0 ] = inst->getOperand( 0 );
                 ld_FunctionArgList[ 1 ] = inst->getOperand( 1 );
                 ld_FunctionArgList[ 2 ] = inst->getOperand( 2 );
-                ld_FunctionArgList[ 3 ] = zero;
+                ld_FunctionArgList[ 3 ] = inst->getOperand( 3 );
                 ld_FunctionArgList[ 4 ] = zero;
                 NewInst = builder.CreateCall( pLdIntrinsic, ld_FunctionArgList );
             }
@@ -7122,27 +7271,49 @@ void InsertBranchOpt::atomicSplitOpt(Function& F, int mode)
             {
                 std::vector<Type*> types;
                 std::vector<Value*> ld_FunctionArgList;
-
+                Function* pLdIntrinsic;
                 Value* resourcePtr = inst->getOperand( 0 );
-                types.push_back( IGCLLVM::FixedVectorType::get( builder.getFloatTy(), 4 ) );
-                types.push_back( resourcePtr->getType() );//Paired resource
-                types.push_back( resourcePtr->getType() );//Resource
 
+                // Generate load.ugm instruction
+                if ( untypedUgmLoadMode )
+                {
+                    alignment_t alignment = (alignment_t) (inst->getType()->getScalarSizeInBits() / 8);
 
-                Function* pLdIntrinsic = GenISAIntrinsic::getDeclaration(
-                    inst->getModule(),
-                    GenISAIntrinsic::GenISA_ldptr,
-                    types );
+                    types.push_back( IGCLLVM::FixedVectorType::get( builder.getFloatTy(), 4 ) );
+                    types.push_back( resourcePtr->getType() );
+                    pLdIntrinsic = GenISAIntrinsic::getDeclaration(
+                        inst->getModule(),
+                        GenISAIntrinsic::GenISA_ldrawvector_indexed,
+                        types );
 
-                ld_FunctionArgList.push_back( inst->getOperand( 1 ) );    //coordinates x
-                ld_FunctionArgList.push_back( zero );                   //coordinates y
-                ld_FunctionArgList.push_back( zero );                   //coordinates z
-                ld_FunctionArgList.push_back( zero );                   //lod
-                ld_FunctionArgList.push_back( llvm::UndefValue::get( inst->getOperand( 0 )->getType() ) );
-                ld_FunctionArgList.push_back( inst->getOperand( 0 ) );    //src buffer
-                ld_FunctionArgList.push_back( zero );                   //immediate offset u
-                ld_FunctionArgList.push_back( zero );                   //immediate offset v
-                ld_FunctionArgList.push_back( zero );                   //immediate offset w
+                    ld_FunctionArgList.push_back( resourcePtr );
+                    ld_FunctionArgList.push_back( inst->getOperand( 1 ) );
+                    ld_FunctionArgList.push_back( builder.getInt32( (uint32_t) alignment ) ); // alignment
+                    ld_FunctionArgList.push_back( builder.getInt1( true ) ); // volatile
+                }
+                // Generate send.smpl ld_lz instruction
+                else
+                {
+                    types.push_back( IGCLLVM::FixedVectorType::get( builder.getFloatTy(), 4 ) );
+                    types.push_back( resourcePtr->getType() );//Paired resource
+                    types.push_back( resourcePtr->getType() );//Resource
+
+                    pLdIntrinsic = GenISAIntrinsic::getDeclaration(
+                        inst->getModule(),
+                        GenISAIntrinsic::GenISA_ldptr,
+                        types );
+
+                    ld_FunctionArgList.push_back( inst->getOperand( 1 ) );    //coordinates x
+                    ld_FunctionArgList.push_back( zero );                   //coordinates y
+                    ld_FunctionArgList.push_back( zero );                   //coordinates z
+                    ld_FunctionArgList.push_back( zero );                   //lod
+                    ld_FunctionArgList.push_back( llvm::UndefValue::get( resourcePtr->getType() ) );
+                    ld_FunctionArgList.push_back( resourcePtr );    //src buffer
+                    ld_FunctionArgList.push_back( zero );                   //immediate offset u
+                    ld_FunctionArgList.push_back( zero );                   //immediate offset v
+                    ld_FunctionArgList.push_back( zero );                   //immediate offset w
+                }
+
                 NewInst = builder.CreateCall( pLdIntrinsic, ld_FunctionArgList );
             }
 

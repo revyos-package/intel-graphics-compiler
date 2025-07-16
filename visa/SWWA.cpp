@@ -67,10 +67,13 @@ void Optimizer::swapSrc1Src2OfMadForCompaction() {
       if (inst->opcode() == G4_mad) {
         G4_Operand *src1 = inst->getSrc(1);
         G4_Operand *src2 = inst->getSrc(2);
-        if (src1 && src2 && src1->getType() == src2->getType()) {
-          if (src1->isSrcRegRegion() &&
-              src1->asSrcRegRegion()->getRegion()->isScalar() &&
-              src2->isSrcRegRegion() &&
+        if (src1 && src2 && src1->getType() == src2->getType() &&
+            src1->isSrcRegRegion() &&
+            src2->isSrcRegRegion() &&
+            src1->getBase()->isRegVar() && src2->getBase()->isRegVar() &&
+            src1->getTopDcl()->getRegFile() == G4_GRF &&
+            src2->getTopDcl()->getRegFile() == G4_GRF) {
+          if (src1->asSrcRegRegion()->getRegion()->isScalar() &&
               src2->asSrcRegRegion()->getRegion()->isFlatRegion()) {
             inst->setSrc(src2, 1);
             inst->setSrc(src1, 2);
@@ -1848,8 +1851,8 @@ void Optimizer::applyNoMaskWA() {
   auto doPredicateAndFlagModifierInstWA = [&](G4_BB *aBB, INST_LIST_ITER &aII,
                                               G4_RegVar *aFlagVar) {
     G4_INST *I = *aII;
-    G4_Predicate *P = I->getPredicate();
-    G4_CondMod *M = I->getCondMod();
+    [[maybe_unused]] G4_Predicate *P = I->getPredicate();
+    [[maybe_unused]] G4_CondMod *M = I->getCondMod();
     vISA_ASSERT((P && M), "ICE: expect both predicate and flagModifier!");
     vISA_ASSERT(P->getTopDcl() == M->getTopDcl(),
                 "ICE: both predicate and flagMod must be the same flag!");
@@ -1911,8 +1914,8 @@ void Optimizer::applyNoMaskWA() {
   auto doSimpleInstWA = [&](G4_BB *aBB, INST_LIST_ITER &aII,
                             G4_RegVar *aFlagVar) {
     G4_INST *I = *aII;
-    G4_Predicate *P = I->getPredicate();
-    G4_CondMod *M = I->getCondMod();
+    [[maybe_unused]] G4_Predicate *P = I->getPredicate();
+    [[maybe_unused]] G4_CondMod *M = I->getCondMod();
     vISA_ASSERT((P == nullptr && M == nullptr),
                 "ICE: expect neither pred nor condmod!");
 
@@ -2041,7 +2044,7 @@ void Optimizer::applyNoMaskWA() {
                                                        : nullptr);
         G4_DstRegRegion *dreg = I->getDst();
         if (O_f != nullptr) {
-          bool isValid =
+          [[maybe_unused]] bool isValid =
               FlagDefUse::getFlagRegAndSubreg(O_f, WAFreg, WAFsreg, ty);
           vISA_ASSERT(isValid,
                       "Flag should've been assigned physical reg already!");
@@ -2058,7 +2061,7 @@ void Optimizer::applyNoMaskWA() {
               O != nullptr,
               "ICE: inst must have flag operands if it uses all flags!");
 
-          bool isValid =
+          [[maybe_unused]] bool isValid =
               FlagDefUse::getFlagRegAndSubreg(O, WAFreg, WAFsreg, ty);
           vISA_ASSERT(isValid,
                       "Flag should've been assigned physical reg already!");
@@ -2097,7 +2100,7 @@ void Optimizer::applyNoMaskWA() {
         for (int i = 0; i < 2; ++i) {
           G4_Operand *O = (i == 0 ? (G4_Operand *)dreg : (G4_Operand *)sreg);
           if (!isNull(O) && O->isFlag()) {
-            bool isValid = FlagDefUse::getFlagRegAndSubreg(O, fr, fsr, ty);
+            [[maybe_unused]] bool isValid = FlagDefUse::getFlagRegAndSubreg(O, fr, fsr, ty);
             vISA_ASSERT(isValid,
                         "Flag should've been assigned physical reg already!");
 
@@ -3547,7 +3550,7 @@ void Optimizer::clearARFDependencies() {
   }
 }
 void Optimizer::mulMacRSWA() {
-  auto hasGRFOverlap = [=](G4_Operand *A, G4_Operand *B) {
+  auto hasGRFOverlap = [this](G4_Operand *A, G4_Operand *B) {
     if (A->isNullReg() || !A->isGreg())
       return false;
     if (B->isNullReg() || !B->isGreg())
@@ -3998,9 +4001,6 @@ void Optimizer::HWWorkaround() {
   if (builder.hasFPU0ReadSuppressionIssue()) {
     fixReadSuppressioninFPU0();
   }
-
-  if (builder.supportNativeSIMD32())
-    fixDirectAddrBoundOnDst();
 }
 
 // When destination is an address register the following apply:
@@ -4013,9 +4013,27 @@ void Optimizer::fixDirectAddrBoundOnDst() {
   for (auto bb : kernel.fg) {
     for (auto it = bb->begin(), ie = bb->end(); it != ie; ++it) {
       G4_INST *inst = *it;
-      if (inst->getExecSize() == g4::SIMD32 && inst->getDst() &&
-          inst->getDst()->isDirectA0())
-        hwConf.evenlySplitInst(it, bb, /*checkOverlap*/ false);
+      G4_DstRegRegion *dst = inst->getDst();
+      if (dst && !dst->isNullReg() &&
+          dst->getRegAccess() == Direct && dst->getTopDcl() &&
+          dst->getTopDcl()->getRegVar()->isAddress()) {
+        G4_Declare *dcl = dst->getTopDcl();
+        if (dcl->getTotalElems() > Eight_Word) {
+          if (dcl->getSubRegAlign() < Sixteen_Word)
+            dcl->setSubRegAlign(Sixteen_Word);
+        } else if (dcl->getTotalElems() > Four_Word) {
+          if (dcl->getSubRegAlign() < Eight_Word)
+            dcl->setSubRegAlign(Eight_Word);
+        } else if (dcl->getTotalElems() > Any) {
+          if (dcl->getSubRegAlign() < Four_Word)
+            dcl->setSubRegAlign(Four_Word);
+        }
+        if (((dst->getSubRegOff() + inst->getExecSize() - 1) / 16 !=
+                (dst->getSubRegOff() / 16)) ||
+            inst->getExecSize() == g4::SIMD32) {
+          hwConf.evenlySplitInst(it, bb, /*checkOverlap*/ false);
+        }
+      }
     }
   }
 }

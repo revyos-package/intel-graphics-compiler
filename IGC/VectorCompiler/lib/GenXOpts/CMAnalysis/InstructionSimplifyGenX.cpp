@@ -1,6 +1,6 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (C) 2017-2024 Intel Corporation
+Copyright (C) 2017-2025 Intel Corporation
 
 SPDX-License-Identifier: MIT
 
@@ -183,13 +183,295 @@ static Value *simplifyMulDDQ(BinaryOperator &Mul) {
   return Result;
 }
 
+static bool usesBothOperands(const ArrayRef<int> &Mask, int InputLen) {
+  int OperandIdx = -1;
+  for (int Index : Mask) {
+    if (Index < 0)
+      continue; // skip undef
+
+    int CurrentIdx = (Index >= InputLen) ? 1 : 0;
+    if (OperandIdx == -1) {
+      OperandIdx = CurrentIdx;
+    } else if (OperandIdx != CurrentIdx) {
+      return true; // Both operands are used
+    }
+  }
+  return false;
+}
+
+static void checkInputsForMask(ArrayRef<int> &Mask1, ArrayRef<int> &Mask2,
+                               ArrayRef<int> &CurrentMask, bool &UsesInput1,
+                               bool &UsesInput2) {
+  for (auto Index : CurrentMask) {
+    if (Index < 0) {
+      continue; // Undef index.
+    } else if (static_cast<unsigned>(Index) < Mask1.size()) {
+      UsesInput1 = true;
+    } else if (static_cast<unsigned>(Index) < Mask1.size() + Mask2.size()) {
+      UsesInput2 = true;
+    } else {
+      IGC_ASSERT_EXIT(false && "Unexpected index in mask");
+    }
+  }
+}
+
+static int getInputLen(ShuffleVectorInst *CheckShuffle) {
+  auto *Type =
+      cast<IGCLLVM::FixedVectorType>(CheckShuffle->getOperand(0)->getType());
+  return static_cast<int>(Type->getNumElements());
+}
+
+// Simplify ShuffleVector one-instruction chain
+// Transform from:
+//  %shuffle1 = shufflevector <16 x i1> %input1, <16 x i1> poison,
+//     <256 x i32> <i32 undef (224 times), i32 0-15 (16), i32 undef (16 times)>
+//  %combinedShuffle = shufflevector <256 x i1>  %shuffle1, <256 x i1> poison,
+//     <256 x i32> <i32 undef (224 times), i32 224-239 & 256-271 (32)>
+// To:
+//  %finalShuffle = shufflevector <16 x i1> %input1, <16 x i1> poison,
+//      <32 x i32> <i32 undef, ..., i32 0-15>
+static Value *propagateShuffleVector(ShuffleVectorInst *Shuffle) {
+  LLVM_DEBUG(dbgs() << "Simplifying shufflevector: " << *Shuffle << "\n");
+
+  auto *Input1 = dyn_cast<ShuffleVectorInst>(Shuffle->getOperand(0));
+  auto *Input2 = dyn_cast<ShuffleVectorInst>(Shuffle->getOperand(1));
+
+  if (!Input1 && !Input2) {
+    LLVM_DEBUG(
+        dbgs()
+        << "propagateShuffleVector: No chain detected, nothing to optimize.\n");
+    return Shuffle;
+  }
+
+  bool UseInput1 = !Input2;
+  auto *CheckShuffle = Input1 ? Input1 : Input2;
+  ArrayRef<int> Mask = CheckShuffle->getShuffleMask();
+  ArrayRef<int> CurrentMask = Shuffle->getShuffleMask();
+
+  bool UsesInput1 = false;
+  bool UsesInput2 = false;
+  checkInputsForMask(Mask, Mask, CurrentMask, UsesInput1, UsesInput2);
+
+  if (UsesInput1 && UsesInput2 || (UsesInput1 && !UseInput1) ||
+      (UsesInput2 && UseInput1)) {
+    LLVM_DEBUG(dbgs() << "Expected only one use in shuffle.\n");
+    return Shuffle;
+  }
+
+  auto InputLen = getInputLen(CheckShuffle);
+
+  SmallVector<int, 32> CombinedMask;
+  // Combine the masks into a single mask.
+  for (auto Index : CurrentMask) {
+    if (Index < 0) {
+      CombinedMask.push_back(-1); // Undef index.
+    } else if (static_cast<unsigned>(Index) < Mask.size()) {
+      CombinedMask.push_back(Mask[Index]);
+    } else {
+      CombinedMask.push_back(Mask[Index - Mask.size()] + InputLen);
+    }
+  }
+
+  LLVM_DEBUG(dbgs() << "Combined mask: "; for (int Val
+                                               : CombinedMask) dbgs()
+                                          << Val << " ";
+             dbgs() << "\n");
+
+  // Create the final shuffle vector with the combined mask.
+  IRBuilder<> Builder(Shuffle);
+  auto *NewShuffle = Builder.CreateShuffleVector(
+      CheckShuffle->getOperand(0), CheckShuffle->getOperand(1), CombinedMask);
+
+  LLVM_DEBUG(dbgs() << "Created new shufflevector: " << *NewShuffle << "\n");
+
+  return NewShuffle;
+}
+
+static bool checkInputsForMaskIndex(int InputLen, ArrayRef<int> Mask,
+                                    int &InputOperandIdx) {
+  for (auto Index : Mask) {
+    if (Index < 0)
+      continue; // skip undef
+    int OperandIdx = 0;
+    if (Index >= InputLen) {
+      OperandIdx = 1;
+    }
+    if (InputOperandIdx == -1) {
+      InputOperandIdx = OperandIdx;
+    } else if (InputOperandIdx != OperandIdx) {
+      // Both operands are used in the first shuffle.
+      return false;
+    }
+  }
+  return true;
+}
+
+// Simplify ShuffleVector multi-instructions chain
+// Transform from:
+//  %shuffle1 = shufflevector <16 x i1> %input1, <16 x i1> poison,
+//     <256 x i32> <i32 undef (224 times), i32 0-15 (16), i32 undef (16 times)>
+//  %shuffle2 = shufflevector <16 x i1> %input2, <16 x i1> poison,
+//     <256 x i32> <i32 0-15 (16), i32 undef (240 times)>
+//  %combinedShuffle = shufflevector <256 x i1>  %shuffle1, <256 x i1>
+//  %shuffle2,
+//     <256 x i32> <i32 undef (224 times), i32 224-239 & 256-271 (32)>
+// To:
+//  %finalShuffle = shufflevector <16 x i1> %input1, <16 x i1> %input2,
+//      <32 x i32> <i32 undef, ..., i32 0-15, i32 16-31>
+static Value *simplifyShuffleVectorChain(ShuffleVectorInst *Shuffle) {
+  LLVM_DEBUG(dbgs() << "Simplifying shufflevector: " << *Shuffle << "\n");
+
+  auto *Input1 = dyn_cast<ShuffleVectorInst>(Shuffle->getOperand(0));
+  auto *Input2 = dyn_cast<ShuffleVectorInst>(Shuffle->getOperand(1));
+
+  if (!Input1 || !Input2) {
+    LLVM_DEBUG(dbgs() << "simplifyShuffleVectorChain: No chain detected, "
+                         "nothing to optimize.\n");
+    return Shuffle;
+  }
+
+  ArrayRef<int> Mask1 = Input1->getShuffleMask();
+  ArrayRef<int> Mask2 = Input2->getShuffleMask();
+  ArrayRef<int> CurrentMask = Shuffle->getShuffleMask();
+
+  bool UsesInput1 = false;
+  bool UsesInput2 = false;
+
+  checkInputsForMask(Mask1, Mask2, CurrentMask, UsesInput1, UsesInput2);
+
+  if (!UsesInput1 || !UsesInput2) {
+    LLVM_DEBUG(dbgs() << "Only one input used in shuffle.\n");
+    return Shuffle;
+  }
+
+  int Input1OperandIdx = -1;
+  auto Input1Len = getInputLen(Input1);
+  if (!checkInputsForMaskIndex(Input1Len, Mask1, Input1OperandIdx))
+    return Shuffle;
+
+  int Input2OperandIdx = -1;
+  auto Input2Len = getInputLen(Input2);
+  if (!checkInputsForMaskIndex(Input2Len, Mask2, Input2OperandIdx))
+    return Shuffle;
+
+  // If we have only one operand used in the first shuffle, we need to
+  // set the other operand to 0.
+  if (Input1OperandIdx == -1)
+    Input1OperandIdx = 0;
+  if (Input2OperandIdx == -1)
+    Input2OperandIdx = 0;
+
+  if (Input1->getOperand(Input1OperandIdx)->getType() !=
+      Input2->getOperand(Input2OperandIdx)->getType()) {
+    // The types of the operands are different.
+    return Shuffle;
+  }
+
+  SmallVector<int, 32> CombinedMask;
+  // Combine the masks into a single mask.
+  for (auto Index : CurrentMask) {
+    if (Index < 0) {
+      CombinedMask.push_back(-1); // Undef index.
+    } else if (static_cast<unsigned>(Index) < Mask1.size()) {
+      CombinedMask.push_back(Mask1[Index] - Input1Len * Input1OperandIdx);
+    } else {
+      CombinedMask.push_back(Mask2[Index - Mask1.size()] +
+                             Input1Len * (1 - Input2OperandIdx));
+    }
+  }
+
+  LLVM_DEBUG(dbgs() << "Combined mask: "; for (int Val
+                                               : CombinedMask) dbgs()
+                                          << Val << " ";
+             dbgs() << "\n");
+
+  // Create the final shuffle vector with the combined mask.
+  IRBuilder<> Builder(Shuffle);
+  auto *NewShuffle = Builder.CreateShuffleVector(
+      Input1->getOperand(Input1OperandIdx),
+      Input2->getOperand(Input2OperandIdx), CombinedMask);
+
+  LLVM_DEBUG(dbgs() << "Created new shufflevector: " << *NewShuffle << "\n");
+
+  return NewShuffle;
+}
+
+static inline bool isBitcastFits(BitCastInst *BC) {
+  return BC->getSrcTy()->isVectorTy() && BC->getDestTy()->isIntegerTy();
+}
+
+static inline bool isTrunkFits(TruncInst *TC) {
+  return TC->getSrcTy()->isVectorTy() && TC->getDestTy()->isVectorTy() &&
+         TC->getDestTy()->getScalarType()->isIntegerTy(1);
+}
+
+static inline bool simplifyBinOp(BinaryOperator *BinOp) {
+  auto Op = BinOp->getOpcode();
+  // Only logical operations without overflow are expected
+  if ((Op != Instruction::And) && (Op != Instruction::Or) &&
+      (Op != Instruction::Xor))
+    return false;
+  bool Changed = false;
+
+  auto *Bitcast1 = dyn_cast<BitCastInst>(BinOp->getOperand(0));
+  auto *Bitcast2 = dyn_cast<BitCastInst>(BinOp->getOperand(1));
+  if (Bitcast1 && Bitcast2 && (Bitcast1->getSrcTy() == Bitcast2->getSrcTy())) {
+    if (isBitcastFits(Bitcast1) && isBitcastFits(Bitcast2)) {
+      for (auto *User : BinOp->users()) {
+        if (auto *BitcastBack = dyn_cast<BitCastInst>(User)) {
+          if (BitcastBack->getDestTy()->isVectorTy()) {
+            IRBuilder<> Builder(BinOp);
+            auto *NewOp =
+                Builder.CreateBinOp(BinOp->getOpcode(), Bitcast1->getOperand(0),
+                                    Bitcast2->getOperand(0));
+            BitcastBack->replaceAllUsesWith(NewOp);
+            Changed = true;
+            BinOp = cast<BinaryOperator>(NewOp);
+            break;
+          }
+        }
+      }
+    }
+  }
+  auto *Trunc1 = dyn_cast<TruncInst>(BinOp->getOperand(0));
+  auto *Trunc2 = dyn_cast<TruncInst>(BinOp->getOperand(1));
+  if (Trunc1 && Trunc2 && (Trunc1->getSrcTy() == Trunc2->getSrcTy())) {
+    if (isTrunkFits(Trunc1) && isTrunkFits(Trunc2)) {
+      for (auto *User : BinOp->users()) {
+        if (auto *ZextInst = dyn_cast<ZExtInst>(User)) {
+          if (auto *DestVecType = dyn_cast<VectorType>(ZextInst->getDestTy())) {
+            if (DestVecType->getElementType()->isIntegerTy()) {
+              IRBuilder<> Builder(BinOp);
+              auto *NewOp =
+                  Builder.CreateBinOp(BinOp->getOpcode(), Trunc1->getOperand(0),
+                                      Trunc2->getOperand(0));
+              ZextInst->replaceAllUsesWith(NewOp);
+              Changed = true;
+              break;
+            }
+          }
+        }
+      }
+    }
+  }
+  return Changed;
+}
+
 static Value *GenXSimplifyInstruction(llvm::Instruction *Inst) {
   IGC_ASSERT(Inst);
   if (!GenXEnablePeepholes)
     return nullptr;
-  if (Inst->getOpcode() == Instruction::Mul) {
+  if (Inst->getOpcode() == Instruction::Mul)
     return simplifyMulDDQ(*cast<BinaryOperator>(Inst));
+
+  if (auto *Shuffle = dyn_cast<ShuffleVectorInst>(Inst)) {
+    auto *Chain = simplifyShuffleVectorChain(Shuffle);
+    if (Chain != Shuffle) {
+      return Chain;
+    }
+    return propagateShuffleVector(Shuffle);
   }
+
   return nullptr;
 }
 
@@ -506,6 +788,8 @@ bool GenXSimplify::runOnFunction(Function &F) {
         Changed |= replaceWithNewValue(*Inst, *V);
         continue;
       }
+      if (auto *BO = dyn_cast<BinaryOperator>(Inst))
+        Changed |= simplifyBinOp(BO);
     }
   }
 

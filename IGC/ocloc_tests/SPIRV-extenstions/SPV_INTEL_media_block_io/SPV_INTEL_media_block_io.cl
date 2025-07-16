@@ -1,5 +1,5 @@
 // Tests targets spirv-extension: SPV_INTEL_media_block_io
-// REQUIRES: dg2-supported, regkeys
+// REQUIRES: dg2-supported, regkeys, llvm-16-plus
 // RUN: ocloc compile -file %s -options "-cl-std=CL2.0 -igc_opts 'PrintToConsole=1 PrintBefore=EmitPass'" -internal_options "-cl-intel-use-bindless-mode -cl-intel-use-bindless-advanced-mode" -device dg2 2>&1 | FileCheck %s --check-prefix=CHECK-LLVM
 
 uchar __attribute__((overloadable)) intel_sub_group_media_block_read_uc(int2 src_offset, int width, int height, read_only image2d_t image);
@@ -128,35 +128,31 @@ __kernel void intel_media_block_test(int2 edgeCoord, __read_only image2d_t src_l
   intel_sub_group_media_block_write_ui8(edgeCoord, 4, 16, ui8, dst_luma_image);
 }
 
-// CHECK-LLVM: [[EL0:%[A-Za-z0-9_.]+]] = extractelement <2 x i32> %edgeCoord, i32 0
-// CHECK-LLVM: [[EL1:%[A-Za-z0-9_.]+]] = extractelement <2 x i32> %edgeCoord, i32 1
-// CHECK-LLVM: [[SRC:%[0-9]+]] = {{(extractvalue { i32, i32 } .*, 0|ptrtoint %spirv.Image._void_1_0_0_0_0_0_0 addrspace\(1\)\* %src_luma_image to i32)}}
-// CHECK-LLVM: [[CALL2:%[A-Za-z0-9_.]+]] = call i8 @llvm.genx.GenISA.MediaBlockRead.i8.i32(i32 [[SRC]], i32 [[EL0]], i32 [[EL1]], i32 0, i32 4, i32 16)
-// CHECK-LLVM: [[CALL3:%[A-Za-z0-9_.]+]] = call <2 x i8> @llvm.genx.GenISA.MediaBlockRead.v2i8.i32(i32 [[SRC]], i32 [[EL0]], i32 [[EL1]], i32 0, i32 4, i32 16)
-// CHECK-LLVM: [[CALL4:%[A-Za-z0-9_.]+]] = call <4 x i8> @llvm.genx.GenISA.MediaBlockRead.v4i8.i32(i32 [[SRC]], i32 [[EL0]], i32 [[EL1]], i32 0, i32 4, i32 16)
-// CHECK-LLVM: [[CALL5:%[A-Za-z0-9_.]+]] = call <8 x i8> @llvm.genx.GenISA.MediaBlockRead.v8i8.i32(i32 [[SRC]], i32 [[EL0]], i32 [[EL1]], i32 0, i32 4, i32 16)
-// CHECK-LLVM: [[CALL6:%[A-Za-z0-9_.]+]] = call <16 x i8> @llvm.genx.GenISA.MediaBlockRead.v16i8.i32(i32 [[SRC]], i32 [[EL0]], i32 [[EL1]], i32 0, i32 4, i32 16)
-// CHECK-LLVM: [[CALL7:%[A-Za-z0-9_.]+]] = call i16 @llvm.genx.GenISA.MediaBlockRead.i16.i32(i32 [[SRC]], i32 [[EL0]], i32 [[EL1]], i32 0, i32 4, i32 16)
-// CHECK-LLVM: [[CALL8:%[A-Za-z0-9_.]+]] = call <2 x i16> @llvm.genx.GenISA.MediaBlockRead.v2i16.i32(i32 [[SRC]], i32 [[EL0]], i32 [[EL1]], i32 0, i32 4, i32 16)
-// CHECK-LLVM: [[CALL9:%[A-Za-z0-9_.]+]] = call <4 x i16> @llvm.genx.GenISA.MediaBlockRead.v4i16.i32(i32 [[SRC]], i32 [[EL0]], i32 [[EL1]], i32 0, i32 4, i32 16)
-// CHECK-LLVM: [[CALL10:%[A-Za-z0-9_.]+]] = call <8 x i16> @llvm.genx.GenISA.MediaBlockRead.v8i16.i32(i32 [[SRC]], i32 [[EL0]], i32 [[EL1]], i32 0, i32 4, i32 16)
-// CHECK-LLVM: [[CALL11:%[A-Za-z0-9_.]+]] = call <16 x i16> @llvm.genx.GenISA.MediaBlockRead.v16i16.i32(i32 [[SRC]], i32 [[EL0]], i32 [[EL1]], i32 0, i32 4, i32 16)
-// CHECK-LLVM: [[CALL12:%[A-Za-z0-9_.]+]] = call i32 @llvm.genx.GenISA.MediaBlockRead.i32.i32(i32 [[SRC]], i32 [[EL0]], i32 [[EL1]], i32 0, i32 4, i32 16)
-// CHECK-LLVM: [[CALL13:%[A-Za-z0-9_.]+]] = call <2 x i32> @llvm.genx.GenISA.MediaBlockRead.v2i32.i32(i32 [[SRC]], i32 [[EL0]], i32 [[EL1]], i32 0, i32 4, i32 16)
-// CHECK-LLVM: [[CALL14:%[A-Za-z0-9_.]+]] = call <4 x i32> @llvm.genx.GenISA.MediaBlockRead.v4i32.i32(i32 [[SRC]], i32 [[EL0]], i32 [[EL1]], i32 0, i32 4, i32 16)
-// CHECK-LLVM: [[CALL15:%[A-Za-z0-9_.]+]] = call <8 x i32> @llvm.genx.GenISA.MediaBlockRead.v8i32.i32(i32 [[SRC]], i32 [[EL0]], i32 [[EL1]], i32 0, i32 4, i32 16)
-// CHECK-LLVM: [[DST:%[0-9]+]] = {{(extractvalue { i32, i32 } .*, 0|ptrtoint %spirv.Image._void_1_0_0_0_0_0_1 addrspace\(1\)\* %dst_luma_image to i32)}}
-// CHECK-LLVM: call void @llvm.genx.GenISA.MediaBlockWrite.i32.i8(i32 [[DST]], i32 [[EL0]], i32 [[EL1]], i32 0, i32 4, i32 16, i8 [[CALL2]])
-// CHECK-LLVM: call void @llvm.genx.GenISA.MediaBlockWrite.i32.v2i8(i32 [[DST]], i32 [[EL0]], i32 [[EL1]], i32 0, i32 4, i32 16, <2 x i8> [[CALL3]])
-// CHECK-LLVM: call void @llvm.genx.GenISA.MediaBlockWrite.i32.v4i8(i32 [[DST]], i32 [[EL0]], i32 [[EL1]], i32 0, i32 4, i32 16, <4 x i8> [[CALL4]])
-// CHECK-LLVM: call void @llvm.genx.GenISA.MediaBlockWrite.i32.v8i8(i32 [[DST]], i32 [[EL0]], i32 [[EL1]], i32 0, i32 4, i32 16, <8 x i8> [[CALL5]])
-// CHECK-LLVM: call void @llvm.genx.GenISA.MediaBlockWrite.i32.v16i8(i32 [[DST]], i32 [[EL0]], i32 [[EL1]], i32 0, i32 4, i32 16, <16 x i8> [[CALL6]])
-// CHECK-LLVM: call void @llvm.genx.GenISA.MediaBlockWrite.i32.i16(i32 [[DST]], i32 [[EL0]], i32 [[EL1]], i32 0, i32 4, i32 16, i16 [[CALL7]])
-// CHECK-LLVM: call void @llvm.genx.GenISA.MediaBlockWrite.i32.v2i16(i32 [[DST]], i32 [[EL0]], i32 [[EL1]], i32 0, i32 4, i32 16, <2 x i16> [[CALL8]])
-// CHECK-LLVM: call void @llvm.genx.GenISA.MediaBlockWrite.i32.v4i16(i32 [[DST]], i32 [[EL0]], i32 [[EL1]], i32 0, i32 4, i32 16, <4 x i16> [[CALL9]])
-// CHECK-LLVM: call void @llvm.genx.GenISA.MediaBlockWrite.i32.v8i16(i32 [[DST]], i32 [[EL0]], i32 [[EL1]], i32 0, i32 4, i32 16, <8 x i16> [[CALL10]])
-// CHECK-LLVM: call void @llvm.genx.GenISA.MediaBlockWrite.i32.v16i16(i32 [[DST]], i32 [[EL0]], i32 [[EL1]], i32 0, i32 4, i32 16, <16 x i16> [[CALL11]])
-// CHECK-LLVM: call void @llvm.genx.GenISA.MediaBlockWrite.i32.i32(i32 [[DST]], i32 [[EL0]], i32 [[EL1]], i32 0, i32 4, i32 16, i32 [[CALL12]])
-// CHECK-LLVM: call void @llvm.genx.GenISA.MediaBlockWrite.i32.v2i32(i32 [[DST]], i32 [[EL0]], i32 [[EL1]], i32 0, i32 4, i32 16, <2 x i32> [[CALL13]])
-// CHECK-LLVM: call void @llvm.genx.GenISA.MediaBlockWrite.i32.v4i32(i32 [[DST]], i32 [[EL0]], i32 [[EL1]], i32 0, i32 4, i32 16, <4 x i32> [[CALL14]])
-// CHECK-LLVM: call void @llvm.genx.GenISA.MediaBlockWrite.i32.v8i32(i32 [[DST]], i32 [[EL0]], i32 [[EL1]], i32 0, i32 4, i32 16, <8 x i32> [[CALL15]])
+// CHECK-LLVM-DAG: __builtin_IB_media_block_read_uchar
+// CHECK-LLVM-DAG: __builtin_IB_media_block_read_uchar2
+// CHECK-LLVM-DAG: __builtin_IB_media_block_read_uchar4
+// CHECK-LLVM-DAG: __builtin_IB_media_block_read_uchar8
+// CHECK-LLVM-DAG: __builtin_IB_media_block_read_uchar16
+// CHECK-LLVM-DAG: __builtin_IB_media_block_read_ushort
+// CHECK-LLVM-DAG: __builtin_IB_media_block_read_ushort2
+// CHECK-LLVM-DAG: __builtin_IB_media_block_read_ushort4
+// CHECK-LLVM-DAG: __builtin_IB_media_block_read_ushort8
+// CHECK-LLVM-DAG: __builtin_IB_media_block_read_ushort16
+// CHECK-LLVM-DAG: __builtin_IB_media_block_read_uint
+// CHECK-LLVM-DAG: __builtin_IB_media_block_read_uint2
+// CHECK-LLVM-DAG: __builtin_IB_media_block_read_uint4
+// CHECK-LLVM-DAG: __builtin_IB_media_block_read_uint8
+// CHECK-LLVM-DAG: __builtin_IB_media_block_write_uchar
+// CHECK-LLVM-DAG: __builtin_IB_media_block_write_uchar2
+// CHECK-LLVM-DAG: __builtin_IB_media_block_write_uchar4
+// CHECK-LLVM-DAG: __builtin_IB_media_block_write_uchar8
+// CHECK-LLVM-DAG: __builtin_IB_media_block_write_uchar16
+// CHECK-LLVM-DAG: __builtin_IB_media_block_write_ushort
+// CHECK-LLVM-DAG: __builtin_IB_media_block_write_ushort2
+// CHECK-LLVM-DAG: __builtin_IB_media_block_write_ushort4
+// CHECK-LLVM-DAG: __builtin_IB_media_block_write_ushort8
+// CHECK-LLVM-DAG: __builtin_IB_media_block_write_ushort16
+// CHECK-LLVM-DAG: __builtin_IB_media_block_write_uint
+// CHECK-LLVM-DAG: __builtin_IB_media_block_write_uint2
+// CHECK-LLVM-DAG: __builtin_IB_media_block_write_uint4
+// CHECK-LLVM-DAG: __builtin_IB_media_block_write_uint8

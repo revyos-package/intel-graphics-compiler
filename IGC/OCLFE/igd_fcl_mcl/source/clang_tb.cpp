@@ -111,7 +111,7 @@ namespace FCL
                     char* pStopped = nullptr;
                     unsigned int *puVal = (unsigned int *)pValue;
                     *puVal = strtoul(envVal, &pStopped, 0);
-                    if (pStopped == envVal + strlen(envVal))
+                    if (pStopped == envVal + std::string(envVal).length())
                     {
                         return true;
                     }
@@ -287,7 +287,7 @@ namespace FCL
             std::string DumpToCustomDirFlagNameWithEqual = "DumpToCustomDir=";
             std::size_t found = RegKeysFlagsFromOptions.find(DumpToCustomDirFlagNameWithEqual);
             FCLReadIGCRegistry("DumpToCustomDir", custom_dir, sizeof(custom_dir));
-            if (strlen(custom_dir) > 0 && (found == std::string::npos))
+            if (std::string(custom_dir).length() > 0 && (found == std::string::npos))
             {
                 dumpPath = custom_dir;
             }
@@ -322,9 +322,9 @@ namespace FCL
             std::string DumpToCustomDirFlagNameWithEqual = "DumpToCustomDir=";
             std::size_t found = RegKeysFlagsFromOptions.find(DumpToCustomDirFlagNameWithEqual);
             FCLReadIGCRegistry("DumpToCustomDir", custom_dir, maxLen);
-            if (strlen(custom_dir) > 0 && (found == std::string::npos))
+            if (std::string(custom_dir).length() > 0 && (found == std::string::npos))
             {
-                IGC_ASSERT_MESSAGE(strlen(custom_dir) < maxLen, "custom_dir path too long");
+                IGC_ASSERT_MESSAGE(std::string(custom_dir).length() < maxLen, "custom_dir path too long");
                 dumpPath = custom_dir;
                 dumpPath += "/";
             }
@@ -501,7 +501,7 @@ namespace TC
         void FillOutputArgs(IOCLFEBinaryResult* pFEBinaryResult, STB_TranslateOutputArgs* pOutputArgs, std::string& exceptString)
         {
             // fill the result structure
-            pOutputArgs->ErrorStringSize = (uint32_t)strlen(pFEBinaryResult->GetErrorLog());
+            pOutputArgs->ErrorStringSize = (uint32_t)std::string(pFEBinaryResult->GetErrorLog()).length();
             if (pOutputArgs->ErrorStringSize > 0)
             {
                 TC::CClangTranslationBlock::SetErrorString(pFEBinaryResult->GetErrorLog(), pOutputArgs);
@@ -689,8 +689,8 @@ namespace TC
     {
         IGC_ASSERT(pErrorString != NULL);
         IGC_ASSERT(pOutputArgs != NULL);
-        size_t strSize = strlen(pErrorString) + 1;
-        pOutputArgs->ErrorStringSize = strSize;
+        size_t strSize = std::string(pErrorString).length() + 1;
+        pOutputArgs->ErrorStringSize = (uint32_t)strSize;
         pOutputArgs->pErrorString = (char*)malloc(strSize);
         memcpy_s(pOutputArgs->pErrorString, strSize - 1, pErrorString, strSize - 1);
         pOutputArgs->pErrorString[strSize - 1] = '\0';
@@ -714,7 +714,7 @@ namespace TC
     std::string CClangTranslationBlock::GetOclApiVersion(const char* pInternalOptions) const
     {
         static const char* OCL_VERSION_OPT = "-ocl-version=";
-        static size_t OCL_VERSION_OPT_SIZE = strlen(OCL_VERSION_OPT);
+        static size_t OCL_VERSION_OPT_SIZE = std::string(OCL_VERSION_OPT).length();
 
         if (pInternalOptions)
         {
@@ -722,7 +722,7 @@ namespace TC
             if (NULL != pszOpt)
             {
                 // we are in control of internal option - assertion test the validity
-                IGC_ASSERT(strlen(pszOpt + OCL_VERSION_OPT_SIZE) >= 3);
+                IGC_ASSERT(std::string(pszOpt + OCL_VERSION_OPT_SIZE).length() >= 3);
                 return std::string(pszOpt + OCL_VERSION_OPT_SIZE, 3);
             }
         }
@@ -756,7 +756,7 @@ namespace TC
         }
 
         std::string optName = "-cl-std="; // opt that we are looking for
-        unsigned int device_version = atoi(oclVersion.c_str());
+        unsigned int device_version = std::stoi(oclVersion);
 
         const char* optSubstring = strstr(pOptions, optName.c_str());
         if (optSubstring == nullptr) {
@@ -770,7 +770,7 @@ namespace TC
         }
 
         const char * optValue = optSubstring + optName.size();
-        const char * end = optValue + strlen(optValue);
+        const char * end = optValue + std::string(optValue).length();
 
         // parse
         const std::string invalidFormatMessage = "Invalid format of -cl-std option, expected -cl-std=CLMAJOR.MINOR";
@@ -931,11 +931,11 @@ namespace TC
     {
         IGC_ASSERT_MESSAGE(pElfReader, "pElfReader is invalid");
 
-        const SElf64Header* pHeader = pElfReader->GetElfHeader();
+        const SElfHeader* pHeader = pElfReader->GetElfHeader();
         IGC_ASSERT_MESSAGE(pHeader->Type == EH_TYPE_OPENCL_SOURCE, "OPENCL_SOURCE elf type is expected");
 
         // First section should be an OpenCL source code
-        const SElf64SectionHeader* pSectionHeader = pElfReader->GetSectionHeader(1);
+        const SElfSectionHeader* pSectionHeader = pElfReader->GetSectionHeader(1);
         IGC_ASSERT_MESSAGE(NULL != pSectionHeader, "pSectionHeader cannot be NULL");
 
         if (pSectionHeader->Type == SH_TYPE_OPENCL_SOURCE)
@@ -954,7 +954,7 @@ namespace TC
         // Other sections could be runtime supplied header files
         for (unsigned i = 2; i < pHeader->NumSectionHeaderEntries; ++i)
         {
-            const SElf64SectionHeader* pSectionHeader = pElfReader->GetSectionHeader(i);
+            const SElfSectionHeader* pSectionHeader = pElfReader->GetSectionHeader(i);
 
             if ((pSectionHeader != NULL) && (pSectionHeader->Type == SH_TYPE_OPENCL_HEADER))
             {
@@ -1147,7 +1147,7 @@ namespace TC
         QuoteDouble = Delim;
         QuoteSingle = Delim;
         Pos = Head;
-        Length = (int)strlen(Head);
+        Length = (int)std::string(Head).length();
 
         while (*Pos == Delim)
         {
@@ -1270,7 +1270,7 @@ namespace TC
             pBuffer = new char[optionsSize];
             nextTok = new char[optionsSize];
 
-            strncpy(pBuffer, options.c_str(), optionsSize);
+            strncpy_s(pBuffer, optionsSize, options.c_str(), optionsSize);
             pParam = GetParam(pBuffer, nextTok);
 
             if (pParam)
@@ -1331,6 +1331,7 @@ namespace TC
                             (strcmp(pParam, "-cl-intel-gtpin-rera") == 0) || //temporary options
                             (strcmp(pParam, "-cl-intel-256-GRF-per-thread") == 0) || //temporary options
                             (strcmp(pParam, "-ze-opt-256-GRF-per-thread") == 0) || //temporary options
+                            (strcmp(pParam, "-ze-exp-register-file-size") == 0) || //temporary options
                             (strcmp(pParam, "-ze-opt-large-register-file") == 0) || //temporary options
                             (strcmp(pParam, "-cl-intel-large-grf-kernel") == 0) ||
                             (strcmp(pParam, "-ze-opt-large-grf-kernel") == 0) ||
@@ -1375,6 +1376,8 @@ namespace TC
                             (strcmp(pParam, "-cl-fp64-gen-conv-emu") == 0) || //used by fp64 conversion emulation
                             (strcmp(pParam, "-ze-fp64-gen-conv-emu") == 0) || //used by fp64 conversion emulation
                             (strcmp(pParam, "-Xfinalizer") == 0) || // used to pass options to visa finalizer
+                            (strcmp(pParam, "-cl-intel-enable-ieee-float-exception-trap") == 0) || // used to enable IEEE float exception trap
+                            (strcmp(pParam, "-ze-intel-enable-ieee-float-exception-trap") == 0) || // used to enable IEEE float exception trap
                             (strcmp(pParam, "-cl-intel-static-profile-guided-trimming") == 0) || //used to enable profile-guided trimming
                             (strcmp(pParam, "-ze-opt-static-profile-guided-trimming") == 0); //used to enable profile-guided trimming
 
@@ -1398,17 +1401,10 @@ namespace TC
                             {
                                 checkBinaryType = true;
                             }
-                            else if (strcmp(pParam, "-cl-intel-num-thread-per-eu") == 0)
-                            {
-                                // Next token is N, so ignore it
-                                ignoreNextToken = true;
-                            }
-                            else if (strcmp(pParam, "-cl-intel-reqd-eu-thread-count") == 0)
-                            {
-                                // Next token is N, so ignore it
-                                ignoreNextToken = true;
-                            }
-                            else if (strcmp(pParam, "-ze-gtpin-scratch-area-size") == 0)
+                            else if (strcmp(pParam, "-cl-intel-num-thread-per-eu") == 0 ||
+                                     strcmp(pParam, "-cl-intel-reqd-eu-thread-count") == 0 ||
+                                     strcmp(pParam, "-ze-gtpin-scratch-area-size") == 0 ||
+                                     strcmp(pParam, "-ze-exp-register-file-size") == 0)
                             {
                                 // Next token is N, so ignore it
                                 ignoreNextToken = true;
@@ -1456,7 +1452,7 @@ namespace TC
                     {
                         ignoreNextToken = false;
                     }
-                    strncpy(pBuffer, nextTok, optionsSize);
+                    strncpy_s(pBuffer, optionsSize, nextTok, optionsSize);
                 } while ((pParam = GetParam(pBuffer, nextTok)) != NULL);
             }
 
@@ -1564,7 +1560,7 @@ namespace TC
             optionsEx += " -U__IMAGE_SUPPORT__";
         }
 
-        // TODO: Workaround - remove after some time to be consistent with LLVM15+ behavior 
+        // TODO: Workaround - remove after some time to be consistent with LLVM15+ behavior
         optionsEx += " -Wno-error=implicit-int";
 
         IOCLFEBinaryResult *pResultPtr = NULL;
@@ -1652,18 +1648,18 @@ namespace TC
         CElfReader* pElfReader = CElfReader::Create(pInputArgs->pInput, pInputArgs->InputSize);
         RAIIElf ElfObj(pElfReader);
 
-        if (!pElfReader || !pElfReader->IsValidElf64(pInputArgs->pInput, pInputArgs->InputSize))
+        if (!pElfReader || !pElfReader->IsValidElf(pInputArgs->pInput, pInputArgs->InputSize))
         {
             SetErrorString("Invalid input/output passed to library", pOutputArgs);
             return false;
         }
 
-        const SElf64Header* pHeader = pElfReader->GetElfHeader();
+        const SElfHeader* pHeader = pElfReader->GetElfHeader();
         IGC_ASSERT(pHeader != NULL);
 
         for (unsigned i = 1; i < pHeader->NumSectionHeaderEntries; i++)
         {
-            const SElf64SectionHeader* pSectionHeader = pElfReader->GetSectionHeader(i);
+            const SElfSectionHeader* pSectionHeader = pElfReader->GetSectionHeader(i);
             IGC_ASSERT(pSectionHeader != NULL);
             if (pSectionHeader == NULL)
             {
@@ -1729,7 +1725,7 @@ namespace TC
             return false;
         }
 
-        if (!pElfReader->IsValidElf64(pInputArgs->pInput, pInputArgs->InputSize))
+        if (!pElfReader->IsValidElf(pInputArgs->pInput, pInputArgs->InputSize))
         {
             //throw invalid_input_param ("Wrong ELF format");
             exceptString = "Wrong ELF format";

@@ -44,7 +44,7 @@ namespace IGC
             R1,
 
             IMPLICIT_PAYLOAD_HEADER, // known as INPUT_HEADER in USC
-            IMPLICIT_PAYLOAD_HEADER_SHORT, // payload header reduced to 3xi32
+            IMPLICIT_GLOBAL_OFFSET, // previously packed in payload header
 
             PTR_LOCAL,
             PTR_GLOBAL,
@@ -228,7 +228,6 @@ namespace IGC
         unsigned int                    getStructArgOffset()    const;
         unsigned int                    getLocationIndex()      const;
         unsigned int                    getLocationCount()      const;
-        iOpenCL::DATA_PARAMETER_TOKEN   getDataParamToken()     const;
         bool                            typeAlwaysNeedsAllocation() const;
         bool                            getImgAccessedFloatCoords() const { return m_imageInfo.accessedByFloatCoord; }
         bool                            getImgAccessedIntCoords()   const { return m_imageInfo.accessedByIntCoord; }
@@ -371,9 +370,6 @@ namespace IGC
         /// @brief  If this argument has multiple data fields (aka, structs) then m_next points to
         ///         the subsequent field in the struct.
         std::vector<KernelArg>          m_subArguments;
-
-        /// @brief Maps kernel argument types to their associated data param tokens
-        static const std::map<KernelArg::ArgType, iOpenCL::DATA_PARAMETER_TOKEN> argTypeTokenMap;
     };
 
     /// @brief  KernelArgsOrder class is used to define an order in which CISA variables are mapped to
@@ -463,13 +459,13 @@ namespace IGC
             ///         by checking if they point to the same element
             /// @param  iterator    An iterator to compare this iterator
             /// @return true if the iterators pare different, false otherwise
-            bool operator!=(const const_iterator& iterator);
+            bool operator!=(const const_iterator& iterator) const;
 
             /// @brief  Checks whether this iterator and the given iterator are same
             ///         by checking if they point to the same element
             /// @param  iterator    An iterator to compare this iterator
             /// @return true if the iterators are same, false otherwise
-            bool operator==(const const_iterator& iterator);
+            bool operator==(const const_iterator& iterator) const;
 
         private:
             AllocationArgs::const_iterator          m_major;

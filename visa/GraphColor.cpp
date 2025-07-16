@@ -62,10 +62,10 @@ static const unsigned IN_LOOP_REFERENCE_COUNT_FACTOR = 4;
 Interference::Interference(const LivenessAnalysis *l, GlobalRA &g)
     : gra(g), kernel(g.kernel), lrs(gra.incRA.getLRs()),
       builder(*g.kernel.fg.builder), maxId(l->getNumSelectedVar()),
+      rowSize(maxId / BITS_DWORD + 1),
       splitStartId(l->getNumSplitStartID()), splitNum(l->getNumSplitVar()),
-      liveAnalysis(l), rowSize(maxId / BITS_DWORD + 1), aug(*this, *l, g),
-      incRA(g.incRA), sparseMatrix(g.intfStorage.sparseMatrix),
-      sparseIntf(g.intfStorage.sparseIntf) {
+      liveAnalysis(l),  aug(*this, *l, g), incRA(g.incRA),
+      sparseIntf(g.intfStorage.sparseIntf), sparseMatrix(g.intfStorage.sparseMatrix) {
   denseMatrixLimit = builder.getuint32Option(vISA_DenseMatrixLimit);
   incRA.registerNextIter((G4_RegFileKind)l->getSelectedRF(), l, this);
 }
@@ -846,10 +846,12 @@ void BankConflictPass::setupBankConflictsforMad(G4_INST *inst) {
   G4_Declare *dcls[3];
   G4_Declare *opndDcls[3];
   BankConflict assignedBank = BANK_CONFLICT_NONE; // Flip for next
+  bool  fixedBank[3];
 
   for (int i = 0; i < 3; i += 1) {
     dcls[i] = nullptr;
     opndDcls[i] = nullptr;
+    fixedBank[i] = false;
 
     G4_Operand *src = inst->getSrc(i);
     if (!src || !src->isSrcRegRegion() || src->isAreg()) {
@@ -862,6 +864,15 @@ void BankConflictPass::setupBankConflictsforMad(G4_INST *inst) {
     offset[i] = (opndDcls[i]->getOffsetFromBase() + src->getLeftBound()) /
                 gra.kernel.numEltPerGRF<Type_UB>();
     srcBC[i] = gra.getBankConflict(dcls[i]);
+
+    if (dcls[i]->getRegVar() &&
+        dcls[i]->getRegVar()->isPhyRegAssigned()) {
+      int regNum = dcls[i]->getRegVar()->getPhyReg()->asGreg()->getRegNum();
+      srcBC[i] = regNum % 2 ? BANK_CONFLICT_SECOND_HALF_ODD
+                            : BANK_CONFLICT_FIRST_HALF_EVEN;
+      gra.setBankConflict(dcls[i], srcBC[i]);
+      fixedBank[i] = true;
+    }
 
     if (srcBC[i] != BANK_CONFLICT_NONE) {
       if (isOddOffset(offset[i])) {
@@ -916,7 +927,7 @@ void BankConflictPass::setupBankConflictsforMad(G4_INST *inst) {
       }
 
       srcBC[i] = gra.getBankConflict(dcls[i]);
-      if (srcBC[i] != BANK_CONFLICT_NONE) {
+      if (!fixedBank[i] && srcBC[i] != BANK_CONFLICT_NONE) {
         if (isOddOffset(offset[i])) {
           if (srcBC[i] == BANK_CONFLICT_FIRST_HALF_EVEN) {
             srcBC[i] = BANK_CONFLICT_SECOND_HALF_ODD;
@@ -943,7 +954,7 @@ void BankConflictPass::setupBankConflictsforMad(G4_INST *inst) {
                          : BANK_CONFLICT_FIRST_HALF_EVEN;
         }
         gra.setBankConflict(dcls[i], srcBC[i]);
-      } else {
+      } else if (!fixedBank[i]) {
         srcBC[i] = (assignedBank == BANK_CONFLICT_FIRST_HALF_EVEN)
                        ? BANK_CONFLICT_SECOND_HALF_ODD
                        : BANK_CONFLICT_FIRST_HALF_EVEN;
@@ -1028,13 +1039,7 @@ void BankConflictPass::setupBankConflictsForBBTGL(G4_BB *bb,
                                                   unsigned &sendInstNum,
                                                   unsigned numRegLRA,
                                                   unsigned &internalConflict) {
-  float GRFRatio = 0;
   G4_INST *prevInst = nullptr;
-
-  if (numRegLRA) {
-    GRFRatio = ((float)(numRegLRA - SECOND_HALF_BANK_START_GRF)) /
-               SECOND_HALF_BANK_START_GRF;
-  }
 
   for (auto i = bb->rbegin(), rend = bb->rend(); i != rend; i++) {
     G4_INST *inst = (*i);
@@ -1051,6 +1056,7 @@ void BankConflictPass::setupBankConflictsForBBTGL(G4_BB *bb,
     if (inst->getNumSrc() >= 3) {
       threeSourceInstNum++;
       if (inst->isDpas()) {
+        threeSourceInstNum += 8;
         hasDpasInst = true;
         setupBankConflictsforDPAS(inst);
       } else {
@@ -1301,7 +1307,7 @@ void GlobalRA::reportSpillInfo(const LivenessAnalysis &liveness,
 
       if (getLocalLR(spillVar->getDeclare())) {
         if (getLocalLR(spillVar->getDeclare())->isLiveRangeLocal()) {
-          int start, end;
+          [[maybe_unused]] int start, end;
           unsigned dummy;
           start = getLocalLR(spillVar->getDeclare())
                       ->getFirstRef(dummy)
@@ -2152,7 +2158,7 @@ bool GlobalRA::canIncreaseGRF(unsigned spillSize, bool infCostSpilled) {
   //  - #GRFs selected and next larger one has same number of threads, or
   //  - Spill size is above threshold
   if ((infCostSpilled || kernel.grfMode.hasLargerGRFSameThreads() ||
-       spillSize >= kernel.getuInt32Option(vISA_SpillAllowed)) &&
+       spillSize >= kernel.grfMode.getSpillThreshold()) &&
       !didGRFIncrease) {
     if (kernel.updateKernelToLargerGRF()) {
       // GRF successfully increased
@@ -2705,7 +2711,7 @@ void Interference::countNeighbors() {
 
   uint32_t numNeighbor = 0;
   uint32_t maxNeighbor = 0;
-  uint32_t maxIndex = 0;
+  [[maybe_unused]] uint32_t maxIndex = 0;
   uint32_t numEdges = 0;
   for (int i = 0, numVar = (int)sparseIntf.size(); i < numVar; ++i) {
     if (lrs[i]->getPhyReg() == nullptr) {
@@ -3064,7 +3070,9 @@ bool Augmentation::updateDstMaskForGatherRaw(G4_INST *inst,
             vISA_ASSERT(curEMBit <= 32, "Illegal mask channel");
           }
         }
-        curEMBit = (unsigned char)inst->getMaskOffset();
+        if (curEMBit != NOMASK_BYTE) {
+          curEMBit = (unsigned char)inst->getMaskOffset();
+        }
       }
       return true;
     } break;
@@ -3096,7 +3104,9 @@ bool Augmentation::updateDstMaskForGatherRaw(G4_INST *inst,
             vISA_ASSERT(curEMBit <= 32, "Illegal mask channel");
           }
         }
-        curEMBit = (unsigned char)inst->getMaskOffset();
+        if (curEMBit != NOMASK_BYTE) {
+          curEMBit = (unsigned char)inst->getMaskOffset();
+        }
       }
       return true;
     }
@@ -3130,7 +3140,6 @@ bool Augmentation::updateDstMaskForGatherRaw(G4_INST *inst,
         mask[i] = NOMASK_BYTE;
       return true;
     }
-    unsigned char curEMBit = (unsigned char)inst->getMaskOffset();
     elemSize = msgDesc->is16BitReturn() ? 2 : 4;
     unsigned warpNum =
         respLength * kernel.numEltPerGRF<Type_UB>() / (execSize * elemSize);
@@ -3147,7 +3156,9 @@ bool Augmentation::updateDstMaskForGatherRaw(G4_INST *inst,
           vISA_ASSERT(curEMBit <= 32, "Illegal mask channel");
         }
       }
-      curEMBit = (unsigned char)inst->getMaskOffset();
+      if (curEMBit != NOMASK_BYTE) {
+        curEMBit = (unsigned char)inst->getMaskOffset();
+      }
     }
     return true;
   }
@@ -3968,7 +3979,7 @@ void Augmentation::buildUnknownArgRetval() {
 
   // Verify that no interval straddles function boundaries
   if (gra.verifyAugmentation) {
-    auto getFunc = [&](G4_INST *inst) {
+      [[maybe_unused]] auto getFunc = [&](G4_INST *inst) {
       unsigned int lexId = inst->getLexicalId();
 
       int funcId = 0;
@@ -3983,8 +3994,8 @@ void Augmentation::buildUnknownArgRetval() {
     for (G4_Declare *dcl : kernel.Declares) {
       auto &allIntervals = gra.getAllIntervals(dcl);
       for (auto &interval : allIntervals) {
-        auto start = interval.start;
-        auto end = interval.end;
+        [[maybe_unused]] auto start = interval.start;
+        [[maybe_unused]] auto end = interval.end;
         vISA_ASSERT(getFunc(start) == getFunc(end),
                     "interval straddles functions");
       }
@@ -6275,9 +6286,10 @@ void Interference::buildInterferenceWithLocalRA(G4_BB *bb) {
 GraphColor::GraphColor(LivenessAnalysis &live, bool hybrid, bool forceSpill_)
     : gra(live.gra), totalGRFRegCount(gra.kernel.getNumRegTotal()),
       numVar(live.getNumSelectedVar()), intf(&live, gra), regPool(gra.regPool),
-      builder(gra.builder), isHybrid(hybrid), forceSpill(forceSpill_),
-      GCMem(GRAPH_COLOR_MEM_SIZE), kernel(gra.kernel), liveAnalysis(live),
-      lrs(live.gra.incRA.getLRs()) {
+      builder(gra.builder), lrs(live.gra.incRA.getLRs()), isHybrid(hybrid),
+      forceSpill(forceSpill_), GCMem(GRAPH_COLOR_MEM_SIZE), kernel(gra.kernel),
+      liveAnalysis(live)
+{
   spAddrRegSig.resize(builder.getNumAddrRegisters(), 0);
   m_options = builder.getOptions();
 }
@@ -9076,6 +9088,13 @@ void ForbiddenRegs::generateReservedGRFForbidden(
   for (unsigned int i = 0; i < reservedGRFNum; i++) {
     forbiddenVec[index].set(largestNoneReservedReg - i, true);
   }
+
+  auto &fg = builder.kernel.fg;
+  if (fg.reserveSR) {
+    forbiddenVec[index].set(
+        fg.scratchRegDcl->getRegVar()->getPhyReg()->asGreg()->getRegNum(),
+        true);
+  }
 }
 
 // ETO use only last 16 registers
@@ -10948,6 +10967,27 @@ void GlobalRA::createVariablesForHybridRAWithSpill() {
                                                  0);
 }
 
+void GlobalRA::initSRAsScratch() const {
+  // Verify old scratch dcl assignment before changing it
+  vISA_ASSERT(kernel.fg.scratchRegDcl->getRegVar()
+                      ->getPhyReg()
+                      ->asGreg()
+                      ->getRegNum() == kernel.stackCall.getSpillHeaderGRF(),
+              "unexpected assignment");
+  vISA_ASSERT(kernel.stackCall.getSpillHeaderGRF() ==
+                  kernel.stackCall.getFPSPGRF(),
+              "expecting same GRF");
+  // Use last caller save GRF for spill/fill addr computation. Since this
+  // address is used as LSC header, we must use 0th sub-reg of reserved
+  // GRF.
+  kernel.fg.scratchRegDcl->getRegVar()->setPhyReg(
+      regPool.getGreg(kernel.stackCall.getCallerSaveLastGRF()), 0);
+
+  // Mark SR assignment as reserved so other variables don't try to
+  // use it.
+  kernel.fg.reserveSR = true;
+}
+
 void GlobalRA::stackCallSaveRestore(bool hasStackCall) {
   //
   // If the graph has stack calls, then add the caller-save/callee-save pseudo
@@ -10971,6 +11011,7 @@ void GlobalRA::stackCallSaveRestore(bool hasStackCall) {
       builder.getBuiltinR0()->getRegVar()->setPhyReg(
           builder.phyregpool.getGreg(kernel.stackCall.getThreadHeaderGRF()), 0);
     }
+
   }
 }
 
@@ -11277,15 +11318,20 @@ GlobalRA::abortOnSpill(unsigned int GRFSpillFillCount,
 
   // vISA_AbortOnSpillThreshold is defined as [0..200]
   // where 0 means abort on any spill and 200 means never abort
-  auto underSpillThreshold = [this](int numSpill, int asmCount) {
+  auto underSpillThreshold = [this](int numSpill, int asmCount,
+                                    GraphColor &coloring) {
     int threshold = std::min(
         builder.getOptions()->getuInt32Option(vISA_AbortOnSpillThreshold),
         200u);
-    return (numSpill * 200) < (threshold * asmCount);
+    unsigned spillSize = computeSpillSize(coloring.getSpilledLiveRanges());
+
+    return (numSpill * 200) < (threshold * asmCount) ||
+           spillSize < kernel.grfMode.getSpillThreshold();
   };
 
   unsigned int instNum = instCount();
-  bool isUnderThreshold = underSpillThreshold(GRFSpillFillCount, instNum);
+  bool isUnderThreshold =
+      underSpillThreshold(GRFSpillFillCount, instNum, coloring);
   isUnderThreshold = builder.getFreqInfoManager().underFreqSpillThreshold(
       coloring.getSpilledLiveRanges(), instNum, GRFSpillFillCount,
       isUnderThreshold);
@@ -11370,7 +11416,7 @@ void GlobalRA::setupA0Dot2OnSpill(bool hasStackCall,
                                   unsigned int nextSpillOffset,
                                   int globalScratchOffset) {
   if (builder.hasScratchSurface() && !hasStackCall &&
-      (nextSpillOffset + globalScratchOffset) > SCRATCH_MSG_LIMIT) {
+      (nextSpillOffset + globalScratchOffset) >= SCRATCH_MSG_LIMIT) {
     // create temp variable to store old a0.2 - this is marked as live-in
     // and live-out. because the variable is emitted only post RA to
     // preserve old value of a0.2.
@@ -12557,28 +12603,57 @@ unsigned GraphColor::edgeWeightARF(const LiveRange *lr1, const LiveRange *lr2) {
     unsigned lr1_nreg = lr1->getNumRegNeeded();
     unsigned lr2_nreg = lr2->getNumRegNeeded();
 
+    if (lr1_align < lr2_align) {
+      G4_SubReg_Align tmp_align = lr1_align;
+      unsigned tmp_nreg = lr1_nreg;
+      lr1_align = lr2_align;
+      lr2_align = tmp_align;
+      lr1_nreg = lr2_nreg;
+      lr2_nreg = tmp_nreg;
+    }
+
     if (lr1_align == Any) {
+      // Any vs
       return lr1_nreg + lr2_nreg - 1;
     } else if (lr1_align == Four_Word && lr2_align == Any) {
+      // 4 vs Any
       return lr1_nreg + lr2_nreg + 3 - (lr1_nreg + lr2_nreg) % 4;
     } else if (lr1_align == Four_Word && lr2_align == Four_Word) {
+      // 4 vs 4
       return lr1_nreg + lr2_nreg - 1 + (4 - lr1_nreg % 4) % 4 +
              (4 - lr2_nreg % 4) % 4;
-    } else if (lr1_align == Four_Word && lr2_align == Eight_Word) {
-      if (((8 - lr2_nreg % 8) % 8) >= 4)
-        return lr2_nreg + lr1_nreg - 1 + (8 - lr2_nreg % 8) % 8 - 4;
-      return lr1_nreg + lr2_nreg - 1 + (8 - lr2_nreg % 8) % 8 +
-             (4 - lr1_nreg % 4) % 4;
     } else if (lr1_align == Eight_Word && lr2_align == Any) {
+      // 8 vs Any
       return lr1_nreg + lr2_nreg + 7 - (lr1_nreg + lr2_nreg) % 8;
     } else if (lr1_align == Eight_Word && lr2_align == Four_Word) {
+      // 8 vs 4
       if (((8 - lr1_nreg % 8) % 8) >= 4)
         return lr1_nreg + lr2_nreg - 1 + (8 - lr1_nreg % 8) % 8 - 4;
       return lr1_nreg + lr2_nreg - 1 + (8 - lr1_nreg % 8) % 8 +
              (4 - lr2_nreg % 4) % 4;
     } else if (lr1_align == Eight_Word && lr2_align == Eight_Word) {
+      // 8 vs 8
       return lr1_nreg + lr2_nreg - 1 + (8 - lr1_nreg % 8) % 8 +
              (8 - lr2_nreg % 8) % 8;
+    } else if (lr1_align == Sixteen_Word && lr2_align == Any) {
+      // 16 vs Any
+      return lr1_nreg + lr2_nreg + 15 - (lr1_nreg + lr2_nreg) % 16;
+    } else if (lr1_align == Sixteen_Word && lr2_align == Four_Word) {
+      // 16 vs 4
+      if (((16 - lr1_nreg % 16) % 16) >= 4)
+        return lr1_nreg + lr2_nreg - 1 + (16 - lr1_nreg % 16) % 16 - 4;
+      return lr1_nreg + lr2_nreg - 1 + (16 - lr1_nreg % 16) % 16 +
+             (4 - lr2_nreg % 4) % 4;
+    } else if (lr1_align == Sixteen_Word && lr2_align == Eight_Word) {
+      // 16 vs 8
+      if (((16 - lr1_nreg % 16) % 16) >= 8)
+        return lr1_nreg + lr2_nreg - 1 + (16 - lr1_nreg % 16) % 16 - 8;
+      return lr1_nreg + lr2_nreg - 1 + (16 - lr1_nreg % 16) % 16 +
+             (8 - lr2_nreg % 8) % 8;
+    } else if (lr1_align == Sixteen_Word && lr2_align == Sixteen_Word) {
+      // 16 vs 16
+      return lr1_nreg + lr2_nreg - 1 + (16 - lr1_nreg % 16) % 16 +
+             (16 - lr2_nreg % 16) % 16;
     } else {
       vISA_ASSERT_UNREACHABLE(
           "Found unsupported subRegAlignment in address register allocation!");

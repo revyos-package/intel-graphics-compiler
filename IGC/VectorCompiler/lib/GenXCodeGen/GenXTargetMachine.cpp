@@ -68,7 +68,10 @@ SPDX-License-Identifier: MIT
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Transforms/IPO.h"
 #include "llvm/Transforms/IPO/AlwaysInliner.h"
+#include "llvm/Transforms/IPO/Annotation2Metadata.h"
+#include "llvm/Transforms/IPO/ForceFunctionAttrs.h"
 #include "llvm/Transforms/IPO/GlobalDCE.h"
+#include "llvm/Transforms/IPO/InferFunctionAttrs.h"
 #include "llvm/Transforms/IPO/PassManagerBuilder.h"
 #include "llvm/Transforms/InstCombine/InstCombine.h"
 #include "llvm/Transforms/Scalar.h"
@@ -83,6 +86,7 @@ SPDX-License-Identifier: MIT
 #include "llvm/Transforms/Scalar/LoopIdiomRecognize.h"
 #include "llvm/Transforms/Scalar/LoopRotation.h"
 #include "llvm/Transforms/Scalar/LoopUnrollPass.h"
+#include "llvm/Transforms/Scalar/LowerExpectIntrinsic.h"
 #include "llvm/Transforms/Scalar/Reassociate.h"
 #include "llvm/Transforms/Scalar/SROA.h"
 #include "llvm/Transforms/Scalar/SimplifyCFG.h"
@@ -242,6 +246,7 @@ void initializeGenXPasses(PassRegistry &registry) {
   initializeGenXLCECalculationPass(registry);
   initializeGenXFloatControlPass(registry);
   initializeGenXCountIndirectStatelessPass(registry);
+  initializeGenXUnfreezePass(registry);
   // WRITE HERE MORE PASSES IF IT'S NEEDED;
 }
 
@@ -499,6 +504,8 @@ bool GenXTargetMachine::addPassesToEmitFile(PassManagerBase &PM,
   GenXPassConfig *PassConfig = createGenXPassConfig(*this, PM);
   vc::addPass(PM, PassConfig);
   const GenXBackendConfig &BackendConfig = PassConfig->getBackendConfig();
+
+  vc::addPass(PM, createGenXUnfreezePass());
 
   vc::addPass(PM, createGenXInitBiFConstantsPass());
   vc::addPass(PM, createGenXFixInvalidFuncNamePass());
@@ -1054,6 +1061,8 @@ void GenXTargetMachine::adjustPassManager(PassManagerBuilder &PMBuilder) {
     PM.add(createGenXSimplifyPass());
   };
   PMBuilder.addExtension(PassManagerBuilder::EP_Peephole, AddGenXPeephole);
+  PMBuilder.addExtension(PassManagerBuilder::EP_EnabledOnOptLevel0,
+                         AddGenXPeephole);
 }
 
 #else // LLVM_VERSION_MAJOR < 16
@@ -1072,6 +1081,16 @@ void GenXTargetMachine::registerPassBuilderCallbacks(PassBuilder &PB) {
 
     // Lower aggr copies.
     PM.addPass(createModuleToFunctionPassAdaptor(GenXLowerAggrCopiesPass()));
+
+    // Standard set of passes called in llvm-14
+    PM.addPass(createModuleToFunctionPassAdaptor(LowerExpectIntrinsicPass()));
+    PM.addPass(createModuleToFunctionPassAdaptor(SimplifyCFGPass()));
+    PM.addPass(
+        createModuleToFunctionPassAdaptor(SROAPass(SROAOptions::ModifyCFG)));
+    PM.addPass(createModuleToFunctionPassAdaptor(EarlyCSEPass(true)));
+    PM.addPass(Annotation2MetadataPass());
+    PM.addPass(ForceFunctionAttrsPass());
+    PM.addPass(InferFunctionAttrsPass());
 
     // Packetize.
     PM.addPass(GenXLegalizeGVLoadUsesPass());
@@ -1162,11 +1181,11 @@ void GenXTargetMachine::registerPassBuilderCallbacks(PassBuilder &PB) {
     }
 
     // AddIndirect
-    PM.addPass(GenXCloneIndirectFunctionsPass());
-    PM.addPass(GenXTrampolineInsertionPass());
+    PM.addPass(GenXCloneIndirectFunctionsPass(BC->getResult()));
+    PM.addPass(GenXTrampolineInsertionPass(BC->getResult()));
 
     // AddLinkageCorruptor
-    PM.addPass(GenXLinkageCorruptorPass());
+    PM.addPass(GenXLinkageCorruptorPass(BC->getResult()));
 
     // AddCMImpParam
     PM.addPass(CMImpParamPass(Subtarget.hasThreadPayloadInMemory()));
@@ -1175,7 +1194,7 @@ void GenXTargetMachine::registerPassBuilderCallbacks(PassBuilder &PB) {
     PM.addPass(CMABIPass());
 
     // BTI assignment.
-    PM.addPass(GenXBTIAssignmentPass());
+    PM.addPass(GenXBTIAssignmentPass(BC->getResult()));
 
     PM.addPass(CMKernelArgOffsetPass(Subtarget.getGRFByteSize(),
                                      BC->useBindlessImages()));

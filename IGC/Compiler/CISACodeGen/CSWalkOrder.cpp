@@ -7,15 +7,10 @@ SPDX-License-Identifier: MIT
 ============================= end_copyright_notice ===========================*/
 
 #include "common/LLVMWarningsPush.hpp"
-#include <llvm/IR/PatternMatch.h>
 #include <llvm/Pass.h>
-#include <llvm/Support/Debug.h>
-#include <llvm/Support/raw_ostream.h>
 #include <optional>
 #include "common/LLVMWarningsPop.hpp"
-#include "GenISAIntrinsics/GenIntrinsics.h"
 #include "Compiler/CISACodeGen/ShaderCodeGen.hpp"
-#include "Compiler/MetaDataUtilsWrapper.h"
 #include "Compiler/CISACodeGen/CSWalkOrder.hpp"
 #include "Probe/Assertion.h"
 
@@ -235,6 +230,20 @@ void IGC::overrideWalkOrderKeysInPass(
     if (IGC_IS_FLAG_ENABLED(OverrideCsTileLayoutEnable))
     {
         threadIDLayout = (ThreadIDLayout)IGC_IS_FLAG_ENABLED(OverrideCsTileLayout);
+    }
+
+    const IGC::TriboolFlag overrideHWGenerateLID =
+        static_cast<TriboolFlag>(IGC_GET_FLAG_VALUE(OverrideHWGenerateLID));
+    switch (overrideHWGenerateLID)
+    {
+    case TriboolFlag::Enabled:
+        enableHWGenerateLID = true;
+        break;
+    case TriboolFlag::Disabled:
+        enableHWGenerateLID = false;
+        break;
+    default:
+        break;
     }
 }
 

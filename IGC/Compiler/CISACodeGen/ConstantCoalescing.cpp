@@ -16,7 +16,6 @@ SPDX-License-Identifier: MIT
 #include "Compiler/CISACodeGen/EmitVISAPass.hpp"
 #include "Compiler/CodeGenContextWrapper.hpp"
 #include "Compiler/IGCPassSupport.h"
-#include "common/IGCIRBuilder.h"
 #include "common/LLVMWarningsPush.hpp"
 #include "llvmWrapper/IR/DerivedTypes.h"
 #include "llvmWrapper/Support/Alignment.h"
@@ -1596,7 +1595,7 @@ bool ConstantCoalescing::DecomposePtrExp(
         int64_t Offset = 0;
         auto *Ptr = getPointerBaseWithConstantOffset(ptr_val, Offset, *dataLayout);
 
-        if (Ptr == ptr_val || Offset < 0)
+        if ((m_ctx->type != ShaderType::OPENCL_SHADER && Ptr == ptr_val) || Offset < 0)
             return false;
 
         buf_idxv = Ptr;
@@ -1792,7 +1791,7 @@ Instruction* ConstantCoalescing::FindOrAddChunkExtract(BufChunk* cov_chunk, uint
 void ConstantCoalescing::AdjustChunk(
     BufChunk* cov_chunk, uint start_adj, uint size_adj, const ExtensionKind &Extension)
 {
-    cov_chunk->chunkSize += size_adj;
+    cov_chunk->chunkSize = RoundChunkSize(cov_chunk->chunkSize + size_adj, cov_chunk->elementSize);
     cov_chunk->chunkStart -= start_adj;
     // mutateType to change array-size
     Type* originalType = cov_chunk->chunkIO->getType();
@@ -2038,7 +2037,7 @@ void ConstantCoalescing::MoveExtracts(BufChunk* cov_chunk, Instruction* load, ui
 
 void ConstantCoalescing::EnlargeChunk(BufChunk* cov_chunk, uint size_adj)
 {
-    cov_chunk->chunkSize += size_adj;
+    cov_chunk->chunkSize = RoundChunkSize(cov_chunk->chunkSize + size_adj, cov_chunk->elementSize);
     // mutateType to change array-size
     Type* originalType = cov_chunk->chunkIO->getType();
     Type* vty = IGCLLVM::FixedVectorType::get(cov_chunk->chunkIO->getType()->getScalarType(), cov_chunk->chunkSize);

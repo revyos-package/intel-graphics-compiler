@@ -16,7 +16,6 @@ SPDX-License-Identifier: MIT
 #include <llvm/IR/Module.h>
 #include <llvm/IR/Function.h>
 #include <llvm/IR/Instructions.h>
-#include <llvm/IR/GetElementPtrTypeIterator.h>
 #include "llvm/Support/Debug.h"
 #include <llvm/Transforms/Utils/Local.h>
 #include "llvmWrapper/Transforms/Utils/LoopUtils.h"
@@ -26,7 +25,6 @@ SPDX-License-Identifier: MIT
 
 #include "Probe/Assertion.h"
 #include "common/igc_regkeys.hpp"
-#include "common/IGCIRBuilder.h"
 #include "Compiler/CISACodeGen/IGCLivenessAnalysis.h"
 #include "Compiler/CodeGenPublic.h"
 
@@ -1122,6 +1120,13 @@ bool Analyzer::deconstructSCEV(const SCEV *S, Analyzer::DeconstructedSCEV &Resul
             return false;
 
         if (Add->getNumOperands() != 2)
+            return false;
+
+        // Scalar Evolution can produce SCEVAddRecExpr based on boolean type, for example:
+        //   {(true + (trunc i16 %localIdX to i1)),+,true}
+        // Ignore such expressions.
+        Type *Ty = Add->getStart()->getType();
+        if (Ty->isIntegerTy() && Ty->getScalarSizeInBits() == 1)
             return false;
 
         const SCEV *OpStep = Add->getOperand(1);

@@ -13,7 +13,6 @@ SPDX-License-Identifier: MIT
 #include "common/allocator.h"
 #include "common/Types.hpp"
 #include "common/Stats.hpp"
-#include "common/MemStats.h"
 #include "common/debug/Dump.hpp"
 #include "common/igc_regkeys.hpp"
 #include "common/secure_mem.h"
@@ -2444,48 +2443,39 @@ namespace IGC
         }
     }
 
+    bool CEncoder::isSamplerIdxLT16(const SamplerDescriptor& sampler)
+    {
+        if (sampler.m_samplerType == ESAMPLER_NORMAL) {
+            if (sampler.m_sampler->IsImmediate()) {
+                uint immediate = int_cast<uint>(sampler.m_sampler->GetImmediateValue());
+                if (immediate < 16)
+                    return true;
+                else
+                    return false;
+            }
+            else {
+                // for dynamic index, avoid generate additional code for APIs only supporting 16 samplers
+                if (m_program->GetContext()->m_DriverInfo.SupportMoreThan16Samplers())
+                    return false;
+                else
+                    return true;
+            }
+        }
+        else
+            return true;
+    }
+
     VISA_StateOpndHandle* CEncoder::GetSamplerOperand(
-        const SamplerDescriptor& sampler,
-        bool& isIdxLT16)
+        const SamplerDescriptor& sampler)
     {
         //Sampler index
         VISA_VectorOpnd* dstOpnd = nullptr;
         VISA_SamplerVar* samplerVar = nullptr;
 
         if (sampler.m_samplerType == ESAMPLER_NORMAL)
-        {
             samplerVar = samplervar;
-
-            if (sampler.m_sampler->IsImmediate())
-            {
-                uint immediate = int_cast<uint>(sampler.m_sampler->GetImmediateValue());
-                if (immediate < 16)
-                {
-                    isIdxLT16 = true;
-                }
-                else
-                {
-                    isIdxLT16 = false;
-                }
-            }
-            else
-            {
-                // for dynamic index, avoid generate additional code for APIs only supporting 16 samplers
-                if (m_program->GetContext()->m_DriverInfo.SupportMoreThan16Samplers())
-                {
-                    isIdxLT16 = false;
-                }
-                else
-                {
-                    isIdxLT16 = true;
-                }
-            }
-        }
         else
-        {
             V(vKernel->GetBindlessSampler(samplerVar));
-            isIdxLT16 = true;
-        }
 
         V(vKernel->CreateVISAStateOperand(dstOpnd, samplerVar, 0, true));
 
@@ -2512,9 +2502,8 @@ namespace IGC
     VISA_StateOpndHandle* CEncoder::GetSamplerOperand(CVariable* samplerIndex)
     {
         SamplerDescriptor sampler;
-        bool isIdxLT16;
         sampler.m_sampler = samplerIndex;
-        return GetSamplerOperand(sampler, isIdxLT16);
+        return GetSamplerOperand(sampler);
     }
 
     void CEncoder::Sample(
@@ -2542,9 +2531,6 @@ namespace IGC
 
         int numMsgSpecificOpnds = numSources;
         VISA_PredOpnd* predOpnd = GetFlagOperand(m_encoderState.m_flag);
-        bool isIdxLT16;
-        VISA_StateOpndHandle* samplerOpnd = GetSamplerOperand(sampler, isIdxLT16);
-        VISA_StateOpndHandle* btiOpnd = GetVISASurfaceOpnd(resource);
         VISA_RawOpnd* pairedResourceBSSOOpnd = GetPairedResourceOperand(pairedResource);
         VISA_RawOpnd* dstVar = GetRawDestination(dst);
         VISA_RawOpnd* opndArray[11];
@@ -2557,7 +2543,7 @@ namespace IGC
         // Use bit 15 of aoffimmi to tell VISA the sample index could be greater
         // than 15.  In this case, we need to use msg header, and setup M0.3
         // to point to next 16 sampler state.
-        if (!isIdxLT16)
+        if (!isSamplerIdxLT16(sampler))
         {
             uint16_t aoffimmiVal = (uint16_t)offset->GetImmediateValue() | BIT(15);
             V(vKernel->CreateVISAImmediate(aoffimmi, &aoffimmiVal, ISA_TYPE_UW));
@@ -2565,6 +2551,9 @@ namespace IGC
 
         {
         int status = -1; //VISA_FAILURE;
+        {
+            VISA_StateOpndHandle* samplerOpnd = GetSamplerOperand(sampler);
+            VISA_StateOpndHandle* btiOpnd = GetVISASurfaceOpnd(resource);
             status = vKernel->AppendVISA3dSampler(
                 ConvertSubOpcode(subOpcode, zeroLOD),
                 feedbackEnable, // pixel null mask
@@ -2581,6 +2570,7 @@ namespace IGC
                 dstVar,
                 numSources,
                 opndArray);
+        }
 
             V(status);
         }
@@ -2606,7 +2596,6 @@ namespace IGC
         }
 
         VISA_PredOpnd* predOpnd = GetFlagOperand(m_encoderState.m_flag);
-        VISA_StateOpndHandle* surfOpnd = GetVISASurfaceOpnd(resource);
         VISA_RawOpnd* pairedResourceBSSOOpnd = GetPairedResourceOperand(pairedResource);
         VISA_RawOpnd* dstVar = GetRawDestination(dst);
 
@@ -2621,6 +2610,8 @@ namespace IGC
         {
 
         int status = -1; // VISA_FAILURE
+        {
+            VISA_StateOpndHandle* surfOpnd = GetVISASurfaceOpnd(resource);
             status = vKernel->AppendVISA3dLoad(
                 ConvertSubOpcode(subOpcode, zeroLOD),
                 feedbackEnable, // pixel null mask
@@ -2634,6 +2625,7 @@ namespace IGC
                 dstVar,
                 numSources,
                 opndArray);
+        }
 
             V(status);
         }
@@ -2727,8 +2719,9 @@ namespace IGC
         }
 
         VISA_PredOpnd* predOpnd = GetFlagOperand(m_encoderState.m_flag);
-        bool isIdxLT16;
-        VISA_StateOpndHandle* samplerOpnd = GetSamplerOperand(sampler, isIdxLT16);
+        VISA_StateOpndHandle* samplerOpnd =
+            GetSamplerOperand(sampler);
+
         VISA_StateOpndHandle* surfOpnd =
             GetVISASurfaceOpnd(resource);
         uint32_t samplerImmIndex = 0;
@@ -2742,7 +2735,7 @@ namespace IGC
         }
 
         VISA_VectorOpnd* aoffimmi = GetSourceOperandNoModifier(offset);
-        if (!isIdxLT16)
+        if (!isSamplerIdxLT16(sampler))
         {
             uint16_t aoffimmiVal = (uint16_t)offset->GetImmediateValue() | BIT(15);
             V(vKernel->CreateVISAImmediate(aoffimmi, &aoffimmiVal, ISA_TYPE_UW));
@@ -2916,13 +2909,13 @@ namespace IGC
         uint imm_data = 0;
 
         CodeGenContext* pCtx = m_program->GetContext();
-        if (pCtx->m_floatDenormMode16 == FLOAT_DENORM_RETAIN)
+        if (pCtx->getModuleMetaData()->compOpt.FloatDenormMode16 == FLOAT_DENORM_RETAIN)
             imm_data |= 0x400;
-        if (pCtx->m_floatDenormMode32 == FLOAT_DENORM_RETAIN)
+        if (pCtx->getModuleMetaData()->compOpt.FloatDenormMode32 == FLOAT_DENORM_RETAIN)
             imm_data |= 0x80;
-        if (pCtx->m_floatDenormMode64 == FLOAT_DENORM_RETAIN)
+        if (pCtx->getModuleMetaData()->compOpt.FloatDenormMode64 == FLOAT_DENORM_RETAIN)
             imm_data |= 0x40;
-        if (pCtx->m_floatDenormModeBFTF == FLOAT_DENORM_RETAIN)
+        if (pCtx->getModuleMetaData()->compOpt.FloatDenormModeBFTF == FLOAT_DENORM_RETAIN)
             imm_data |= (0x1 << 30);
 
         uint RM_bits = 0;
@@ -2941,7 +2934,13 @@ namespace IGC
         }
         imm_data |= RM_bits;
 
-        if (IGC_IS_FLAG_ENABLED(deadLoopForFloatException))
+        bool EnableIEEEFloatExceptionTrap = IGC_IS_FLAG_ENABLED(deadLoopForFloatException) || IGC_IS_FLAG_ENABLED(EnableIEEEFloatExceptionTrap);
+        if (pCtx->type == ShaderType::OPENCL_SHADER &&
+            static_cast<OpenCLProgramContext*>(pCtx)->m_Options.EnableIEEEFloatExceptionTrap)
+        {
+            EnableIEEEFloatExceptionTrap = true;
+        }
+        if (EnableIEEEFloatExceptionTrap)
         {
             imm_data |= 0x200; //Cr0 , bit 9 to enable float exception trap
         }
@@ -3963,13 +3962,14 @@ namespace IGC
         }
     }
 
-    void CEncoder::InitBuildParams(llvm::SmallVector<std::unique_ptr< char, std::function<void(char*)>>, 10>& params)
+    void CEncoder::InitBuildParams(llvm::SmallVector<std::unique_ptr<const char, std::function<void(const char*)>>, 10>& params)
     {
         CodeGenContext* context = m_program->GetContext();
         bool isOptDisabled = context->getModuleMetaData()->compOpt.OptDisable;
-        using param_uptr = std::unique_ptr<char, std::function<void(char*)>>;
-        auto literal_deleter = [](char* val) {};
-        auto dup_deleter = [](char* val) {free(val); };
+        using param_uptr = std::unique_ptr<const char, std::function<void(const char*)>>;
+        auto literal_deleter = [](const char* val) {};
+        auto dup_deleter = [](const char* val) { free(const_cast<char*>(val)); };
+
         // create vbuilder->Compile() params
         if (IGC_IS_FLAG_ENABLED(EnableVISADotAll))
         {
@@ -4041,7 +4041,7 @@ namespace IGC
             (context->m_DriverInfo.EnableShaderDebugHashCodeInKernel() ||
              IGC_IS_FLAG_ENABLED(ShaderDebugHashCodeInKernel)))
         {
-            auto addHash = [&](char* OptName, QWORD Hash)
+            auto addHash = [&](const char* OptName, QWORD Hash)
             {
                 params.push_back(param_uptr(OptName, literal_deleter));
                 std::string Low = std::to_string((DWORD)Hash);
@@ -4289,6 +4289,11 @@ namespace IGC
             }
         }
 
+        if (IGC_IS_FLAG_ENABLED(ShaderSendInfoRework))
+        {
+          SaveOption(vISA_DumpSendInfoStats, true);
+        }
+
         if (IGC_IS_FLAG_ENABLED(EnableSamplerSplit))
         {
             SaveOption(vISA_enableCloneSampleInst, true);
@@ -4347,10 +4352,10 @@ namespace IGC
 
         CodeGenContext* pCtx = m_program->GetContext();
         bool needsDenormRetainForMathInstructions =
-             (pCtx->m_floatDenormMode16 == FLOAT_DENORM_FLUSH_TO_ZERO) ||
-             (pCtx->m_floatDenormMode32 == FLOAT_DENORM_FLUSH_TO_ZERO) ||
-             (pCtx->m_floatDenormMode64 == FLOAT_DENORM_FLUSH_TO_ZERO) ||
-             (m_program->m_Platform->hasBFTFDenormMode() && pCtx->m_floatDenormModeBFTF == FLOAT_DENORM_FLUSH_TO_ZERO);
+             (context->getModuleMetaData()->compOpt.FloatDenormMode16 == FLOAT_DENORM_FLUSH_TO_ZERO) ||
+             (context->getModuleMetaData()->compOpt.FloatDenormMode32 == FLOAT_DENORM_FLUSH_TO_ZERO) ||
+             (context->getModuleMetaData()->compOpt.FloatDenormMode64 == FLOAT_DENORM_FLUSH_TO_ZERO) ||
+             (m_program->m_Platform->hasBFTFDenormMode() && context->getModuleMetaData()->compOpt.FloatDenormModeBFTF == FLOAT_DENORM_FLUSH_TO_ZERO);
 
         if (m_program->m_Platform->hasCorrectlyRoundedMacros() && needsDenormRetainForMathInstructions)
         {
@@ -4411,7 +4416,7 @@ namespace IGC
             }
         }
 
-        auto enableScheduler = [=]() {
+        auto enableScheduler = [this, isOptDisabled, context]() {
             // Check if preRA scheduler is disabled from input.
             if (isOptDisabled)
                 return false;
@@ -4429,8 +4434,7 @@ namespace IGC
             bool enableForRetry = m_program->m_DriverInfo->enableVISAPreRASchedulerForRetry() ||
                 context->m_retryManager.AllowVISAPreRAScheduler();
             // PreRA scheduler runs always when VRT is enabled
-            enableForRetry |= m_program->m_Platform->supportsVRT() && m_program->m_DriverInfo->supportsVRT() &&
-                (context->getModuleMetaData()->compOpt.EnableVRT || IGC_IS_FLAG_ENABLED(EnableVRT));
+            enableForRetry |= context->supportsVRT();
 
             if (IGC_IS_FLAG_ENABLED(EnableVISAPreSched) &&
                 m_program->m_DriverInfo->enableVISAPreRAScheduler() &&
@@ -4443,27 +4447,51 @@ namespace IGC
         if (enableScheduler())
         {
             SaveOption(vISA_preRA_Schedule, true);
-            if (uint32_t Val = IGC_GET_FLAG_VALUE(VISAPreSchedCtrl))
+            bool hasDpas = m_program->m_State.GetHasDPAS();
+            uint32_t ctrlDpas = IGC_GET_FLAG_VALUE(VISAPreSchedCtrlDpas);
+            if (hasDpas && ctrlDpas != 0)
+            {
+                SaveOption(vISA_preRA_ScheduleCtrl, ctrlDpas);
+            }
+            else if (uint32_t Val = IGC_GET_FLAG_VALUE(VISAPreSchedCtrl))
             {
                 SaveOption(vISA_preRA_ScheduleCtrl, Val);
             }
             else
             {
-                uint32_t V = m_program->m_DriverInfo->getVISAPreRASchedulerCtrl();
-                if (context->type == ShaderType::TASK_SHADER || m_program->m_State.GetHasDPAS())
+                uint32_t VISAPreSchedCtrlVal = 0;
+                if (context->type == ShaderType::COMPUTE_SHADER)
+                    VISAPreSchedCtrlVal = context->getModuleMetaData()->csInfo.VISAPreSchedCtrl;
+                else if (context->type == ShaderType::PIXEL_SHADER)
+                    VISAPreSchedCtrlVal = context->getModuleMetaData()->compOpt.VISAPreSchedCtrl;
+
+                if (VISAPreSchedCtrlVal != 0)
                 {
-                    V = 4; // register pressure only
+                    SaveOption(vISA_preRA_ScheduleCtrl, VISAPreSchedCtrlVal);
                 }
-                else  // platform-dependent setting for latency-scheduling
+                else
                 {
-                    if (!m_program->m_Platform->isCoreChildOf(IGFX_XE_HPG_CORE)) {
-                        V |= (1<<5);  // do not use iterative scheduling before DG2
+                    uint32_t V = m_program->m_DriverInfo->getVISAPreRASchedulerCtrl();
+                    ctrlDpas = m_program->m_DriverInfo->getVISAPreRASchedulerCtrlDpas();
+                    if (context->type == ShaderType::TASK_SHADER)
+                    {
+                        V = 4; // register pressure only
                     }
-                    if (!m_program->m_Platform->isCoreChildOf(IGFX_XE_HPC_CORE)) {
-                        V |= (1<<4);  // skip hold-list before PVC
+                    else if (hasDpas && ctrlDpas != 0)
+                    {
+                        V = ctrlDpas;
                     }
+                    else  // platform-dependent setting for latency-scheduling
+                    {
+                        if (!m_program->m_Platform->isCoreChildOf(IGFX_XE_HPG_CORE)) {
+                            V |= (1 << 5);  // do not use iterative scheduling before DG2
+                        }
+                        if (!m_program->m_Platform->isCoreChildOf(IGFX_XE_HPC_CORE)) {
+                            V |= (1 << 4);  // skip hold-list before PVC
+                        }
+                    }
+                    SaveOption(vISA_preRA_ScheduleCtrl, V);
                 }
-                SaveOption(vISA_preRA_ScheduleCtrl, V);
             }
 
             uint32_t VISAPreSchedVal = 0;
@@ -4547,7 +4575,7 @@ namespace IGC
 
         SetAbortOnSpillThreshold(canAbortOnSpill, AllowSpill);
 
-        if (context->type == ShaderType::COMPUTE_SHADER)
+        if (context->type == ShaderType::COMPUTE_SHADER || (context->type == ShaderType::OPENCL_SHADER && !(context->getModuleMetaData()->NBarrierCnt > 0)))
         {
             SaveOption(vISA_ActiveThreadsOnlyBarrier, true);
         }
@@ -4558,6 +4586,11 @@ namespace IGC
             {
                 context->m_spillAllowed = Val;
                 SaveOption(vISA_SpillAllowed, Val);
+            }
+            if (uint Val = IGC_GET_FLAG_VALUE(VISASpillAllowed256GRF))
+            {
+                context->m_spillAllowedFor256GRF = Val;
+                SaveOption(vISA_SpillAllowed256GRF, Val);
             }
         }
         bool r0Reserved = false;
@@ -4768,9 +4801,9 @@ namespace IGC
             SaveOption(vISA_Compaction, false);
         }
 
-        if (auto *regex = IGC_GET_REGKEYSTRING(ShaderDumpFilter))
+        if (auto *regex = IGC_GET_REGKEYSTRING(ShaderDumpRegexFilter))
         {
-            SaveOption(vISA_ShaderDumpFilter, regex);
+            SaveOption(vISA_ShaderDumpRegexFilter, regex);
         }
 
         auto *forceSpillVaraibles = IGC_GET_REGKEYSTRING(ForceSpillVariables);
@@ -4806,7 +4839,8 @@ namespace IGC
             SaveOption(vISA_enableUnsafeCP_DF, true);
         }
 
-        uint32_t NumGRFSetting = context->getNumGRFPerThread(/*returnDefault*/ false );
+        uint32_t NumGRFSetting =
+            context->getNumGRFPerThread(/*returnDefault*/ false);
         if (IGC_GET_FLAG_VALUE(ReservedRegisterNum) != 0)
         {
             IGC_ASSERT_MESSAGE(NumGRFSetting == 0, "ReservedRegisterNum and TotalGRFNum registry keys cannot be used at the same time");
@@ -4820,6 +4854,11 @@ namespace IGC
         if (context->getModuleMetaData()->compOpt.WaEnableALTModeVisaWA)
         {
             SaveOption(vISA_ALTMode, true);
+        }
+
+        if (IGC_GET_FLAG_VALUE(EnableEmitMoreMoviCases))
+        {
+            SaveOption(vISA_emitMoreMoviCases, true);
         }
 
         //
@@ -4901,16 +4940,13 @@ namespace IGC
             else if ((m_program->m_Platform->supportsAutoGRFSelection() &&
                       context->m_DriverInfo.supportsAutoGRFSelection() &&
                       IGC_IS_FLAG_ENABLED(ForceSupportsAutoGRFSelection)) ||
-                     (m_program->m_Platform->supportsVRT() &&
-                      m_program->m_DriverInfo->supportsVRT() &&
-                      IGC_IS_FLAG_ENABLED(EnableVRT)))
+                      context->supportsVRT())
             {
                 // When user hasn't specified number of threads, we can rely on
                 // compiler heuristics
                 SaveOption(vISA_AutoGRFSelection, true);
             }
         }
-
         if (m_program->m_Platform->forceSamplerHeader())
         {
             SaveOption(vISA_samplerHeaderWA, true);
@@ -5124,9 +5160,19 @@ namespace IGC
                      IGC_GET_FLAG_VALUE(EnableIndirectInstEnd));
         }
 
+        if (IGC_IS_FLAG_ENABLED(GetSendAfterWriteDistance))
+        {
+            SaveOption(vISA_SendAWProfiling, true);
+        }
+
         if (IGC_IS_FLAG_ENABLED(EnableGroupScheduleForBC))
         {
             SaveOption(vISA_EnableGroupScheduleForBC, true);
+        }
+
+        if (IGC_IS_FLAG_ENABLED(SchedWithSendSrcReadCycle))
+        {
+            SaveOption(vISA_schedWithSendSrcReadCycle, true);
         }
 
         if (IGC_IS_FLAG_ENABLED(CopyA0ToDBG0))
@@ -5367,8 +5413,7 @@ namespace IGC
             SaveOption(vISA_IncSpillCostAllAddrTaken, false);
         }
 
-        if ((IGC_GET_FLAG_VALUE(LscImmOffsMatch) > 0 && m_program->m_DriverInfo->supportsLSCImmediateGlobalBaseOffsetForA32()) ||
-            IGC_GET_FLAG_VALUE(LscImmOffsMatch) > 1) {
+        if (IGC_GET_FLAG_VALUE(LscImmOffsMatch) > 0) {
             auto val = IGC_GET_FLAG_VALUE(LscImmOffsVisaOpts);
             SaveOption(vISA_lscEnableImmOffsFor, val);
         } else {
@@ -5556,7 +5601,8 @@ namespace IGC
         }
     }
 
-    void CEncoder::InitEncoder(bool canAbortOnSpill, bool hasStackCall, bool hasInlineAsmCall, bool hasAdditionalVisaAsmToLink, int numThreadsPerEU, uint lowerBoundGRF, VISAKernel* prevKernel)
+    void CEncoder::InitEncoder(bool canAbortOnSpill, bool hasStackCall, bool hasInlineAsmCall, bool hasAdditionalVisaAsmToLink, int numThreadsPerEU,
+        uint lowerBoundGRF, uint upperBoundGRF, VISAKernel* prevKernel)
     {
         m_aliasesMap.clear();
         m_encoderState.m_SubSpanDestination = false;
@@ -5577,7 +5623,7 @@ namespace IGC
         SetVISAWaTable(m_program->m_Platform->getWATable());
 
         llvm::SmallVector<const char*, 10> params;
-        llvm::SmallVector<std::unique_ptr< char, std::function<void(char*)>>, 10> params2;
+        llvm::SmallVector<std::unique_ptr<const char, std::function<void(const char*)>>, 10> params2;
         if (!m_hasInlineAsm)
         {
             // Asm text writer mode doesnt need dump params
@@ -5621,9 +5667,14 @@ namespace IGC
             SaveOption(vISA_AutoGRFSelection, true);
         }
 
-        if (lowerBoundGRF > 0)
+        if (lowerBoundGRF > 0 && vbuilder->GetuInt32Option(vISA_MinGRFNum) == 0)
         {
             SaveOption(vISA_MinGRFNum, lowerBoundGRF);
+        }
+
+        if (upperBoundGRF > 0 && vbuilder->GetuInt32Option(vISA_MaxGRFNum) == 0)
+        {
+            SaveOption(vISA_MaxGRFNum, upperBoundGRF);
         }
 
         // Pass all build options to builder
@@ -6406,7 +6457,7 @@ namespace IGC
         const std::string kernelName)
     {
         llvm::SmallVector<const char *, 10> params;
-        llvm::SmallVector<std::unique_ptr<char, std::function<void(char *)>>, 10>
+        llvm::SmallVector<std::unique_ptr<const char, std::function<void(const char *)>>, 10>
             params2;
         InitBuildParams(params2);
         for (const auto &ptr : params2) {
@@ -6631,7 +6682,8 @@ namespace IGC
 
         // Depend on vISA information about barriers presence to make sure that it's
         // always set properly, even if a barrier is used as a part of Inline vISA code only.
-        if (jitInfo->numBarriers != 0)
+        if (jitInfo->numBarriers != 0 &&
+            !m_program->m_State.GetHasBarrier())
         {
             if (context->getModuleMetaData()->NBarrierCnt > 0 ||
                 additionalVISAAsmToLink)
@@ -6883,9 +6935,14 @@ namespace IGC
                                         jitInfo->stats.spillMemUsed, pFGA,
                                         jitInfo->numBytesScratchGtpin);
 
-        pMainKernel->GetGTPinBuffer(pOutput->m_gtpinBuffer,
-                                    pOutput->m_gtpinBufferSize,
-                                    pOutput->m_scratchSpaceUsedBySpills);
+        unsigned int scratchUsage = 0;
+        if (pOutput->m_UseScratchSpacePrivateMemory &&
+            !pOutput->m_SeparatingSpillAndPrivateScratchMemorySpace)
+          scratchUsage = pOutput->m_scratchSpaceUsedByShader;
+
+        pMainKernel->GetGTPinBuffer(
+            pOutput->m_gtpinBuffer, pOutput->m_gtpinBufferSize,
+            pOutput->m_scratchSpaceUsedBySpills + scratchUsage);
 
         createSymbolAndGlobalHostAccessTables(
             hasSymbolTable, *pMainKernel, pOutput->m_scratchSpaceUsedBySpills);
@@ -8246,6 +8303,7 @@ namespace IGC
         case PrecisionType::BF16: return GenPrecision::BF16;
         case PrecisionType::FP16: return GenPrecision::FP16;
         case PrecisionType::BF8: return GenPrecision::BF8;
+        case PrecisionType::HF8: return GenPrecision::HF8;
         case PrecisionType::TF32: return GenPrecision::TF32;
         }
 
@@ -8744,6 +8802,7 @@ namespace IGC
             }
 
             // 1st D32-V4 or D64-V2
+            bool ov = false;
             V(vKernel->AppendVISALscUntypedLoad(
                 subOp,
                 lscSfid,
@@ -8751,6 +8810,7 @@ namespace IGC
                 visaExecSize(mode),
                 GetAluEMask(offset),
                 cacheOpts,
+                ov,
                 addr,
                 dataShape,
                 globalOffsetOpnd,
@@ -8766,6 +8826,7 @@ namespace IGC
                 visaExecSize(mode),
                 GetAluEMask(offset),
                 cacheOpts,
+                ov,
                 addr2,
                 dataShape2,
                 globalOffsetOpnd2,
@@ -8777,6 +8838,7 @@ namespace IGC
         }
 
         unsigned surfaceIndex = 0x0;
+        bool ov = false;
         V(vKernel->AppendVISALscUntypedLoad(
             subOp,
             lscSfid,
@@ -8784,6 +8846,7 @@ namespace IGC
             visaExecSize(mode),
             GetAluEMask(offset),
             cacheOpts,
+            ov,
             addr,
             dataShape,
             globalOffsetOpnd,
@@ -8916,6 +8979,8 @@ namespace IGC
 
             return;
         }
+
+        unsigned surfaceIndex = 0x0;
         V(vKernel->AppendVISALscUntypedStore(
             subOp,
             lscSfid,
@@ -8926,7 +8991,7 @@ namespace IGC
             addr,
             dataShape,
             globalOffsetOpnd,
-            0,
+            surfaceIndex,
             addressOpnd,
             src1Opnd));
     }
@@ -8970,6 +9035,7 @@ namespace IGC
         auto execSize = visaExecSize(m_encoderState.m_simdSize);
         auto execOff = ConvertMaskToVisaType(m_encoderState.m_mask, false);
 
+        bool ov = false;
         V(vKernel->AppendVISALscUntypedLoad(
             LSC_LOAD_STRIDED,
             lscSfid,
@@ -8977,6 +9043,7 @@ namespace IGC
             execSize,
             execOff,
             cacheOpts,
+            false,
             addr,
             dataShape,
             globalOffsetOpnd,

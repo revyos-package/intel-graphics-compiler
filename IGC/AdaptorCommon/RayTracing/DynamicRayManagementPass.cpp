@@ -112,27 +112,19 @@ bool DynamicRayManagementPass::runOnFunction(Function& F)
     m_DT = &getAnalysis<DominatorTreeWrapperPass>().getDomTree();
     m_PDT = &getAnalysis<PostDominatorTreeWrapperPass>().getPostDomTree();
     m_LI = &getAnalysis<LoopInfoWrapperPass>().getLoopInfo();
+    m_RayQueryCheckReleasePairs.clear();
 
     bool changed = false;
-
-    bool hasDiscard = llvm::any_of(
-        instructions(F),
-        [](auto& I) {
-            return isDiscardInstruction(&I);
-        }
-    );
 
     // Dot not process further if:
     // 1. RayTracing is not supported on this platform.
     // 2. Shader does not use RayQuery at all.
     // 3. There are more than 1 exit block.
     // 4. RayQuery needs splitting due to forced SIMD32
-    // 5. Shader has discards
     if ((m_CGCtx->platform.supportRayTracing() == false) ||
         (!m_CGCtx->hasSyncRTCalls()) ||
         (getNumberOfExitBlocks(F) > 1) ||
-        m_CGCtx->syncRTCallsNeedSplitting() ||
-        hasDiscard)
+        m_CGCtx->syncRTCallsNeedSplitting())
     {
         return false;
     }
@@ -245,10 +237,9 @@ void DynamicRayManagementPass::FindLoadsFromAlloca(
 bool DynamicRayManagementPass::requiresSplittingCheckReleaseRegion(Instruction& I)
 {
     return
-        isa<ContinuationHLIntrinsic>(I) ||
         isBarrierIntrinsic(&I) ||
         isUserFunctionCall(&I) ||
-        isDiscardInstruction(&I);
+        isHidingComplexControlFlow(&I);
 }
 
 void DynamicRayManagementPass::FindProceedsInOperands(Instruction* I, SetVector<TraceRaySyncProceedHLIntrinsic*>& proceeds, SmallPtrSetImpl<Instruction*>& cache)
@@ -441,7 +432,7 @@ bool DynamicRayManagementPass::TryProceedBasedApproach(Function& F)
         {
             IP = &I;
 
-            if (isa<TraceRaySyncProceedHLIntrinsic>(&I))
+            if (isa<TraceRaySyncProceedHLIntrinsic>(&I) || isa<TraceRayInlineHLIntrinsic>(&I))
                 break;
         }
 
@@ -566,6 +557,7 @@ bool DynamicRayManagementPass::TryProceedBasedApproach(Function& F)
             I->addFnAttr(llvm::Attribute::NoMerge);
         }
     }
+
 
     llvm::for_each(
         toErase,
@@ -875,6 +867,7 @@ bool DynamicRayManagementPass::AddDynamicRayManagement(Function& F)
     // RayQueryCheck-Release pair identification.
     RayQueryReleaseIntrinsic* rayQueryRelease = builder.CreateRayQueryReleaseIntrinsic();
 
+
     // There is a possibility that the check is no longer post-dominated by the
     // release now (because release insertion logic changes the control flow).
     // If that's the case, iterate over descendants of the check and find a
@@ -973,21 +966,6 @@ void DynamicRayManagementPass::HandleComplexControlFlow(Function& F)
 
             if (m_DT->dominates(rayQueryCheckIntrinsic, &I) && m_PDT->dominates(rayQueryReleaseIntrinsic, &I))
             {
-                // If the DisableRayQueryDynamicRayManagementMechanismForExternalFunctionsCalls flag
-                // is enabled, remove Check/Release pairs which encapsulates any external function call.
-                if (IGC_IS_FLAG_ENABLED(DisableRayQueryDynamicRayManagementMechanismForExternalFunctionsCalls) &&
-                    isa<ContinuationHLIntrinsic>(&I))
-                {
-                    rayQueryReleaseIntrinsic->eraseFromParent();
-                    rayQueryCheckIntrinsic->eraseFromParent();
-
-                    // Remove the pair from the vector in case more Barriers or External
-                    // calls are between them.
-                    m_RayQueryCheckReleasePairs.erase(m_RayQueryCheckReleasePairs.begin() + rayQueryCheckReleasePairIndex);
-
-                    break;
-                }
-
                 // If the DisableRayQueryDynamicRayManagementMechanismForBarriers flag
                 // is enabled, remove Check/Release pairs which encapsulates any Barrier.
                 if (IGC_IS_FLAG_ENABLED(DisableRayQueryDynamicRayManagementMechanismForBarriers) &&
@@ -1003,7 +981,7 @@ void DynamicRayManagementPass::HandleComplexControlFlow(Function& F)
                     break;
                 }
 
-                if (isDiscardInstruction(&I) && !m_CGCtx->platform.allowDivergentControlFlowRayQueryCheckRelease())
+                if (isHidingComplexControlFlow(&I) && !m_CGCtx->platform.allowDivergentControlFlowRayQueryCheckRelease())
                 {
                     rayQueryReleaseIntrinsic->eraseFromParent();
                     rayQueryCheckIntrinsic->eraseFromParent();

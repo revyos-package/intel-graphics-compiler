@@ -125,8 +125,7 @@ private:
   Value *packetizeLLVMInstruction(Instruction *Inst);
   Value *packetizeInstruction(Instruction *Inst);
 
-  void replaceAllUsesNoTypeCheck(Value *Inst, Value *NewInst);
-  void removeDeadInstructions(Function &F);
+  void removeDeadInstructions();
   void fixupLLVMIntrinsics(Function &F);
 
   Function *vectorizeSIMTFunction(Function *F, unsigned Width);
@@ -273,9 +272,9 @@ Function *GenXPacketize::vectorizeSIMTFunction(Function *F, unsigned Width) {
   std::vector<Type *> ArgTypes;
   for (const Argument &Arg : F->args()) {
     auto *ArgTy = Arg.getType();
-    if (UniformArgs.count(&Arg))
+    if (UniformArgs.count(&Arg) || ArgTy->isOpaquePointerTy())
       ArgTypes.push_back(ArgTy);
-    else if (ArgTy->isPointerTy() && !ArgTy->isOpaquePointerTy()) {
+    else if (ArgTy->isPointerTy()) {
       // FIXME: check the pointer defined by an argument or an alloca
       // [N x float]* should packetize to [N x <8 x float>]*
       auto *VTy = PointerType::get(
@@ -349,7 +348,7 @@ Function *GenXPacketize::vectorizeSIMTFunction(Function *F, unsigned Width) {
         Phi->setOperand(Idx, It->second);
     }
   }
-  removeDeadInstructions(*ClonedFunc);
+  removeDeadInstructions();
   return ClonedFunc;
 }
 
@@ -396,7 +395,7 @@ bool GenXPacketize::vectorizeSIMTEntry(Function &F) {
       }
     }
   }
-  removeDeadInstructions(F);
+  removeDeadInstructions();
   // a SIMT entry is always inlined after vectorization
   // This is required in order to handle structure argument,
   // for example, generated from lambda capture.
@@ -446,8 +445,7 @@ void GenXPacketize::findFunctionVectorizationOrder(Module *M) {
     }
     for (auto UI = F->use_begin(), UE = F->use_end(); UI != UE; ++UI) {
       if (auto *CI = dyn_cast<CallInst>(UI->getUser())) {
-        auto *Blk = CI->getParent();
-        auto *Caller = Blk->getParent();
+        auto *Caller = CI->getFunction();
         auto *CallerNode = &CallGraph[Caller];
         CallerNode->F = Caller;
         CGN->UnvisitedCallers.insert(CallerNode);
@@ -763,6 +761,23 @@ Value *GenXPacketize::packetizeConstant(Constant *C) {
   }
 }
 
+// Helper: vectorize scalar MD_range metadata for a vector instruction
+static void vectorizeRangeMetadata(Instruction *OldCI, Instruction *NewCI) {
+  auto *OldRangeMD = OldCI->getMetadata(LLVMContext::MD_range);
+  if (!OldRangeMD)
+    return;
+  Type *Ty = NewCI->getType();
+
+  // Currently, llvm15/16 work inconsistently with MD_range metadata for vectors.
+  // Link1: Verifier.cpp Verifier::visitRangeMetadata
+  //     -> "Range types must match instruction type!"
+  // Link2: ValueTracking.cpp llvm::computeKnownBitsFromRangeMetadata
+  //     -> ConstantInt *Lower = ... Ranges.getOperand(2 * i + 0)
+  if (auto *VecTy = dyn_cast<VectorType>(Ty))
+      NewCI->setMetadata(LLVMContext::MD_range, nullptr);
+  return;
+}
+
 //////////////////////////////////////////////////////////////////////////
 /// @brief Packetize an LLVM intrinsic.  Generally this means replacing
 ///        a scalar intrinsic function call with a vectored equivalent.
@@ -778,9 +793,12 @@ Value *GenXPacketize::packetizeLLVMIntrinsic(Instruction *Inst) {
   auto ID = GenXIntrinsic::getAnyIntrinsicID(F);
   // packetize intrinsic operands
   std::vector<Type *> VectorArgTys;
+  std::vector<Value *> Args;
   std::vector<Value *> PacketizedArgs;
   for (auto &Op : CI->args()) {
-    auto *VV = getPacketizeValue(Op.get());
+    auto *Arg = Op.get();
+    Args.push_back(Arg);
+    auto *VV = getPacketizeValue(Arg);
     PacketizedArgs.push_back(VV);
     VectorArgTys.push_back(VV->getType());
   }
@@ -798,7 +816,14 @@ Value *GenXPacketize::packetizeLLVMIntrinsic(Instruction *Inst) {
     break;
   }
   auto *NewF = getVectorIntrinsic(B->M, ID, VectorArgTys);
-  auto *NewCI = CallInst::Create(NewF, PacketizedArgs, "", CI);
+  // Some arguments are not overloadable and mush stay scalar
+  std::vector<Value *> NewArgs;
+  auto *NewFTy = NewF->getFunctionType();
+  for (unsigned Idx = 0; Idx < NewFTy->getNumParams(); Idx++)
+    NewArgs.push_back(NewFTy->getParamType(Idx) == VectorArgTys[Idx]
+                          ? PacketizedArgs[Idx]
+                          : Args[Idx]);
+  auto *NewCI = CallInst::Create(NewF, NewArgs, "", CI);
   return NewCI;
 }
 
@@ -833,15 +858,14 @@ Value *GenXPacketize::packetizeLLVMInstruction(Instruction *Inst) {
     auto *PacketizedSrcTy = PacketizedSrc->getType();
     // packetize dst type
     Type *ReturnTy;
-    if (Inst->getType()->isPointerTy() &&
-        !Inst->getType()->isOpaquePointerTy()) {
+    if (Inst->getType()->isPointerTy()) {
       // two types of pointers, <N x Ty>* or <N x Ty*>
       if (PacketizedSrc->getType()->isVectorTy()) {
         // <N x Ty*>
         uint32_t numElems =
             cast<IGCLLVM::FixedVectorType>(PacketizedSrcTy)->getNumElements();
         ReturnTy = IGCLLVM::FixedVectorType::get(Inst->getType(), numElems);
-      } else {
+      } else if (!Inst->getType()->isOpaquePointerTy()) {
         // <N x Ty>*
         auto *DstScalarTy = IGCLLVM::getNonOpaquePtrEltTy(Inst->getType());
         if (VectorType::isValidElementType(DstScalarTy))
@@ -862,6 +886,8 @@ Value *GenXPacketize::packetizeLLVMInstruction(Instruction *Inst) {
           ReplacedInst = B->GEPA(TmpTy, TmpInst, VecIndices);
           break;
         }
+      } else {
+        ReturnTy = Inst->getType();
       }
     } else {
       ReturnTy = B->getVectorType(Inst->getType());
@@ -1650,33 +1676,18 @@ Value *GenXPacketize::packetizeInstruction(Instruction *Inst) {
         DII->replaceVariableLocationOp(Inst, Result);
     }
     // Copy any metadata to new instruction
-    if (Result != Inst && isa<Instruction>(Result))
+    if (Result != Inst && isa<Instruction>(Result)) {
       cast<Instruction>(Result)->copyMetadata(*Inst);
+      vectorizeRangeMetadata(Inst, dyn_cast<Instruction>(Result));
+    }
   }
   return Result;
 }
 
 //////////////////////////////////////////////////////////////////////////
-/// @brief Replace all uses but avoid any type checking as instructions
-///        maybe in a partial bad state.
-/// @param Inst - old instruction we're replacing.
-/// @param NewInst - new instruction
-void GenXPacketize::replaceAllUsesNoTypeCheck(Value *Inst, Value *NewInst) {
-  SmallVector<User *, 8> Users;
-  SmallVector<uint32_t, 8> OpNum;
-  for (auto &U : Inst->uses()) {
-    Users.push_back(U.getUser());
-    OpNum.push_back(U.getOperandNo());
-  }
-  for (uint32_t Idx = 0; Idx < Users.size(); ++Idx) {
-    Users[Idx]->setOperand(OpNum[Idx], NewInst);
-  }
-}
-
-//////////////////////////////////////////////////////////////////////////
 /// @brief Remove replaced instructions. DCE will not remove calls, etc.
 ///        So we have to remove these manually.
-void GenXPacketize::removeDeadInstructions(Function &F) {
+void GenXPacketize::removeDeadInstructions() {
   SmallVector<Instruction *, 8> Unused;
   for (const auto &RMI : ReplaceMap)
     if (RMI.first != RMI.second)
@@ -1791,8 +1802,20 @@ void GenXPacketize::lowerControlFlowAfter(std::vector<Function *> &SIMTFuncs) {
   // Derive an order to process functions such that a function is visited
   // after anything that calls it.
   int N = SIMTFuncs.size();
-  for (int Idx = N - 1; Idx >= 0; --Idx)
-    CFL.processFunction(SIMTFuncs[Idx]);
+  for (int Idx = N - 1; Idx >= 0; --Idx) {
+    auto *Fn = SIMTFuncs[Idx];
+    CFL.processFunction(Fn);
+    // Remove 'NoInline' attributes from calls - up to this point, they
+    // have only been removed from the definition of functions
+    for(auto ui = Fn->use_begin(), ue = Fn->use_end(); ui != ue; ++ui) {
+      if (auto *I = dyn_cast<CallInst>(ui->getUser())) {
+        if (I->hasFnAttr(Attribute::NoInline)) {
+          I->removeFnAttr(Attribute::NoInline);
+          I->addFnAttr(Attribute::AlwaysInline);
+        }
+      }
+    }
+  }
 }
 
 // foward declare the initializer

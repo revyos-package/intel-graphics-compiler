@@ -13,6 +13,7 @@
 
 # =============================================== Tools ================================================
 include(BiFModuleCache)
+add_subdirectory(Languages/OpenCL/PreRelease/Matrix)
 
 # In new Clang versions VME types are built-in. Keep this flag until all OS's update Clang version to 8
 if(NOT DEFINED VME_TYPES_DEFINED)
@@ -30,27 +31,32 @@ if(UNIX)
     if(CCLANG_READELF_RESULT AND NOT CCLANG_READELF_RESULT EQUAL 0)
       message(FATAL_ERROR "[IGC\\BiFModule] : Error occurred while executing readelf:  ${CCLANG_READELF_RESULT}")
     endif()
-    string(REGEX MATCH "\\[${COMMON_CLANG_LIB_FULL_NAME}\\.([0-9](\\.[0-9]*)*[a-zA-Z0-9]*)\\]" CCLANG_SONAME_VERSION "${CCLANG_READELF_CALL}")
-    set(CCLANG_SONAME_VERSION "${CMAKE_MATCH_1}")
 
-    # Check if common clang library is newer than 5.0.0 version on which we have SPIR-V support
-    if("${CCLANG_SONAME_VERSION}" VERSION_GREATER "5.0.0")
-      set_property(TARGET opencl-clang-lib PROPERTY "IMPORTED_SONAME" "${COMMON_CLANG_LIB_FULL_NAME}.${CCLANG_SONAME_VERSION}")
-    else()
-      # Handle libopencl-clang2.so
-      string(REPLACE "-clang${CMAKE_SHARED_LIBRARY_SUFFIX}" "-clang2${CMAKE_SHARED_LIBRARY_SUFFIX}" TEST_COMMON_CLANG_LIB_FULL_NAME ${COMMON_CLANG_LIB_FULL_NAME})
-      string(REGEX MATCH "\\[${TEST_COMMON_CLANG_LIB_FULL_NAME}\\.([0-9](\\.[0-9]*)*[a-zA-Z0-9]*)\\]" CCLANG_SONAME_VERSION "${CCLANG_READELF_CALL}")
-      set(CCLANG_SONAME_VERSION "${CMAKE_MATCH_1}")
-      if(NOT CCLANG_SONAME_VERSION STREQUAL "")
-        set_property(TARGET opencl-clang-lib PROPERTY "IMPORTED_SONAME" "${TEST_COMMON_CLANG_LIB_FULL_NAME}.${CCLANG_SONAME_VERSION}")
-      else()
-        message(FATAL_ERROR "[IGC\\BiFModule] : Version ${CCLANG_SONAME_VERSION} of library ${COMMON_CLANG_LIB_FULL_NAME} is below version 5.0.0 (where it's starts support of SPIR-V), please upgrade this library at least to version 5.0.0")
-      endif()
-    endif()
+    # READ ELF CALL Output:
+    # Dynamic section at offset 0x6957838 contains 35 entries:
+    #   Tag        Type                         Name/Value
+    #  0x0000000000000001 (NEEDED)             Shared library: [libz.so.1]
+    #  0x0000000000000001 (NEEDED)             Shared library: [libzstd.so.1]
+    #  0x0000000000000001 (NEEDED)             Shared library: [libstdc++.so.6]
+    #  0x0000000000000001 (NEEDED)             Shared library: [libm.so.6]
+    #  0x0000000000000001 (NEEDED)             Shared library: [libgcc_s.so.1]
+    #  0x0000000000000001 (NEEDED)             Shared library: [libc.so.6]
+    #  0x0000000000000001 (NEEDED)             Shared library: [ld-linux-x86-64.so.2]
+    #  0x000000000000000e (SONAME)             Library soname: [libopencl-clang.so.16]
+    #  0x0000000000000010 (SYMBOLIC)           0x0
+    #  0x000000000000001d (RUNPATH)            Library runpath: [$ORIGIN/../lib]
+    #  0x000000000000000c (INIT)               0x7ab000
+    #  0x000000000000000d (FINI)               0x53ed664
+
+    set(CLANG_LIB_REGEX "${COMMON_CLANG_LIB_NAME_WITH_PREFIX}([0-9]+|\\.|so)+")
+    string(REGEX MATCH  "${CLANG_LIB_REGEX}" IMPORTED_SONAME "${CCLANG_READELF_CALL}")
+    message("Extraced SONAME: ${IMPORTED_SONAME}")
+
+    set_property(TARGET opencl-clang-lib PROPERTY "IMPORTED_SONAME" "${IMPORTED_SONAME}")
   endif()
   if (NOT CCLANG_FROM_SYSTEM)
     install(FILES $<TARGET_SONAME_FILE:opencl-clang-lib> DESTINATION ${CMAKE_INSTALL_FULL_LIBDIR} COMPONENT igc-opencl)
-
+    install(FILES $<TARGET_FILE:opencl-clang-lib> DESTINATION ${CMAKE_INSTALL_FULL_LIBDIR} COMPONENT igc-opencl-devel)
 
     # Get header opencl-c.h directory
     get_filename_component(opencl-headers-dir ${opencl-header} DIRECTORY)
@@ -302,7 +308,7 @@ function(igc_bif_build_bc)
     add_custom_command(
         OUTPUT "${_bcTempFilePath}"
         COMMAND "${CMAKE_COMMAND}" -E compare_files ${BiFModule_PREBUILD_SHA_PATH} ${BiFModule_SRC_SHA_PATH} || "${CMAKE_COMMAND}" -E make_directory "${_outBcFileDir}"
-        COMMAND "${CMAKE_COMMAND}" -E compare_files ${BiFModule_PREBUILD_SHA_PATH} ${BiFModule_SRC_SHA_PATH} || "${bif-llvm-as_exe}" -o "${_bcTempFilePath}" ${_options_DEFAULT} ${_options_LL} "${_srcFilePath}"
+        COMMAND "${CMAKE_COMMAND}" -E compare_files ${BiFModule_PREBUILD_SHA_PATH} ${BiFModule_SRC_SHA_PATH} || "${bif-llvm-as_exe}" ${IGC_BUILD__OPAQUE_POINTERS_DEFAULT_ARG_OPT} -o "${_bcTempFilePath}" ${_options_DEFAULT} ${_options_LL} "${_srcFilePath}"
         DEPENDS "${_srcFilePath}" ${_dependencies}
         COMMENT "BiF: \"${_outBcFileName}\": Compiling OpenCL source: \"${_srcFileName}\""
       )
@@ -333,7 +339,7 @@ function(igc_bif_build_bc)
     add_custom_command(
         OUTPUT "${_bcTempFilePath}"
         COMMAND "${CMAKE_COMMAND}" -E compare_files ${BiFModule_PREBUILD_SHA_PATH} ${BiFModule_SRC_SHA_PATH} || "${CMAKE_COMMAND}" -E make_directory "${_outBcFileDir}"
-        COMMAND "${CMAKE_COMMAND}" -E compare_files ${BiFModule_PREBUILD_SHA_PATH} ${BiFModule_SRC_SHA_PATH} || "${bif-llvm-link_exe}" -o "${_bcTempFilePath}" ${_options_DEFAULT} ${_options_BC} ${_bcFiles}
+        COMMAND "${CMAKE_COMMAND}" -E compare_files ${BiFModule_PREBUILD_SHA_PATH} ${BiFModule_SRC_SHA_PATH} || "${bif-llvm-link_exe}" ${IGC_BUILD__OPAQUE_POINTERS_DEFAULT_ARG_OPT} -o "${_bcTempFilePath}" ${_options_DEFAULT} ${_options_BC} ${_bcFiles}
         DEPENDS ${_bcFiles} ${_dependencies}
         COMMENT "BiF: \"${_outBcFileName}\": Linking intermediate .bc into output .bc."
       )
@@ -358,7 +364,7 @@ function(igc_bif_build_bc)
     add_custom_command(
         OUTPUT "${_bcTempFilePath}"
         COMMAND "${CMAKE_COMMAND}" -E compare_files ${BiFModule_PREBUILD_SHA_PATH} ${BiFModule_SRC_SHA_PATH} || "${CMAKE_COMMAND}" -E make_directory "${_outBcFileDir}"
-        COMMAND "${CMAKE_COMMAND}" -E compare_files ${BiFModule_PREBUILD_SHA_PATH} ${BiFModule_SRC_SHA_PATH} || "${bif-llvm-opt_exe}" -O2 -o "${_bcTempFilePath}" ${IGC_BUILD__OPAQUE_POINTERS_DEFAULT_ARG_OPT} ${_options_DEFAULT} ${_options_OPT} ${_bcFiles}
+        COMMAND "${CMAKE_COMMAND}" -E compare_files ${BiFModule_PREBUILD_SHA_PATH} ${BiFModule_SRC_SHA_PATH} || "${bif-llvm-opt_exe}" ${IGC_BUILD__OPAQUE_POINTERS_DEFAULT_ARG_OPT} -O2 -o "${_bcTempFilePath}" ${IGC_BUILD__OPAQUE_POINTERS_DEFAULT_ARG_OPT} ${_options_DEFAULT} ${_options_OPT} ${_bcFiles}
         DEPENDS ${_bcFiles} ${_dependencies}
         COMMENT "BiF: \"${_outBcFileName}\": Optmizing output .bc."
       )
@@ -475,9 +481,6 @@ set(FLAG "")
 if(${VME_TYPES_DEFINED})
     list(APPEND FLAG "__VME_TYPES_DEFINED__")
 endif(${VME_TYPES_DEFINED})
-if(IGC_OPTION__USE_KHRONOS_SPIRV_TRANSLATOR_IN_SC)
-    list(APPEND FLAG "__USE_KHRONOS_SPIRV_TRANSLATOR__")
-endif(IGC_OPTION__USE_KHRONOS_SPIRV_TRANSLATOR_IN_SC)
 
 igc_bif_find_cl_files(IGC_BUILD__BIF_OCL_COMMON_DEPENDS ${IGC_BUILD__BIF_OCL_COMMON_INC_DIRS} "${IGC_OPTION__BIF_SRC_OCL_DIR}/Implementation")
 
@@ -526,9 +529,9 @@ igc_bif_build_bc(
       TRIPLE               spir64
       SOURCES              ${IGC_OPTION__BIF_SRC_OCL_DIR}/Languages/OpenCL/PreRelease/IBIF_PreRelease_Impl.cl
       FORCE_INCLUDE        ${IGC_BUILD__BIF_OCL_INCLUDES}
-      INCLUDE_DIRECTORIES  ${IGC_BUILD__BIF_OCL_COMMON_INC_DIRS}
+      INCLUDE_DIRECTORIES  ${IGC_BUILD__BIF_OCL_COMMON_INC_DIRS} ${CMAKE_CURRENT_BINARY_DIR}/Languages/OpenCL/PreRelease/Matrix
       DEFINES              "__EXECUTION_MODEL_DEBUG=1" "__OPENCL_C_VERSION__=200" "__IGC_BUILD__" ${KHR_DEFINES} "cl_intel_device_side_avc_vme_enable" "cl_intel_device_side_avc_motion_estimation" ${FLAG}
-      DEPENDS              ${IGC_BUILD__BIF_OCL_COMMON_DEPENDS}
+      DEPENDS              ${IGC_BUILD__BIF_OCL_COMMON_DEPENDS} IBiF_matrix_generator
       OPTIONS CL           ${CL_OPTIONS} -cl-std=CL2.0
      )
  endif()

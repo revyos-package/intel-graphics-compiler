@@ -1,6 +1,6 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (C) 2019-2022 Intel Corporation
+Copyright (C) 2019-2025 Intel Corporation
 
 SPDX-License-Identifier: MIT
 
@@ -25,10 +25,12 @@ SPDX-License-Identifier: MIT
 #include "Probe/Assertion.h"
 
 #include "common/LLVMWarningsPush.hpp"
+#include <llvm/Transforms/Utils/BasicBlockUtils.h>
 #include <llvmWrapper/ADT/Optional.h>
 #include "llvmWrapper/IR/Argument.h"
 #include "llvmWrapper/IR/DerivedTypes.h"
 #include "llvmWrapper/Support/Alignment.h"
+#include <llvm/IR/Verifier.h>
 #include "llvm/ADT/None.h"
 #include "common/LLVMWarningsPop.hpp"
 
@@ -87,7 +89,7 @@ void RTBuilder::setInvariantLoad(LoadInst* LI)
         LI->setMetadata(LLVMContext::MD_invariant_load, EmptyNode);
 }
 
-Value* RTBuilder::getRtMemBasePtr(void)
+Value* RTBuilder::getRtMemBasePtr(Value* globalBufferPtr)
 {
 #define STYLE(X) {                                                      \
     using T = std::conditional_t<                                       \
@@ -98,7 +100,9 @@ Value* RTBuilder::getRtMemBasePtr(void)
         offsetof(T, rtMemBasePtr)); }
 #include "RayTracingMemoryStyle.h"
 #undef STYLE
-    return _get_rtMemBasePtr_Xe(VALUE_NAME("rtMemBasePtr"));
+    return globalBufferPtr ?
+        _get_rtMemBasePtr_fromGlobals_Xe(globalBufferPtr, VALUE_NAME("rtMemBasePtr")) :
+        _get_rtMemBasePtr_Xe(VALUE_NAME("rtMemBasePtr"));
 }
 
 Value* RTBuilder::getStackSizePerRay(void)
@@ -135,15 +139,16 @@ Value* RTBuilder::getStatelessScratchPtr(void)
 
 
 Value* RTBuilder::getIsFrontFace(
-    RTBuilder::StackPointerVal* StackPointer, IGC::CallableShaderTypeMD ShaderTy)
+    RTBuilder::StackPointerVal* StackPointer, Value* ShaderTy)
 {
+    auto* isCommitted = CreateICmpEQ(ShaderTy, getInt32(CallableShaderTypeMD::ClosestHit));
     switch (getMemoryStyle())
     {
 #define STYLE(X)                                     \
     case RTMemoryStyle::X:                           \
         return _getIsFrontFace_##X(                  \
             StackPointer,                            \
-            VAdapt{ *this, ShaderTy == ClosestHit }, \
+            isCommitted,                             \
             VALUE_NAME("is_front_face"));
 #include "RayTracingMemoryStyle.h"
 #undef STYLE
@@ -196,7 +201,6 @@ RayQueryReleaseIntrinsic* RTBuilder::CreateRayQueryReleaseIntrinsic(Value* predi
         predicate = getTrue();
 
     Value* rayQueryRelease = CreateCall(GenISAIntrinsic::getDeclaration(M, GenISAIntrinsic::GenISA_RayQueryRelease), predicate);
-
     return cast<RayQueryReleaseIntrinsic>(rayQueryRelease);
 }
 
@@ -303,11 +307,15 @@ Value* RTBuilder::getSyncStackOffset(bool rtMemBasePtr)
         VALUE_NAME("SyncStackOffset"));
 }
 
-RTBuilder::SyncStackPointerVal* RTBuilder::getSyncStackPointer(Value* syncStackOffset, RTBuilder::RTMemoryAccessMode Mode)
+RTBuilder::SyncStackPointerVal *RTBuilder::getSyncStackPointer(
+    RTBuilder::RTMemoryAccessMode Mode,
+    Value *syncStackOffset,
+    Value* globalBufferPtr)
 {
     auto* PointeeTy = getRTStack2Ty();
     if (Mode == RTBuilder::STATEFUL)
     {
+        IGC_ASSERT_MESSAGE(!globalBufferPtr, "Arbitrary global buffer is not supported in stateful mode");
         uint32_t AddrSpace = getRTSyncStackStatefulAddrSpace(*Ctx.getModuleMetaData());
         Value* perLaneStackPointer = this->CreateIntToPtr(syncStackOffset, PointerType::get(PointeeTy, AddrSpace));
         return static_cast<RTBuilder::SyncStackPointerVal*>(perLaneStackPointer);
@@ -316,7 +324,7 @@ RTBuilder::SyncStackPointerVal* RTBuilder::getSyncStackPointer(Value* syncStackO
     {
         Value* memBasePtr = nullptr;
         {
-            memBasePtr = this->getRtMemBasePtr();
+            memBasePtr = this->getRtMemBasePtr(globalBufferPtr);
         }
         IGC_ASSERT(memBasePtr != nullptr);
 
@@ -330,11 +338,20 @@ RTBuilder::SyncStackPointerVal* RTBuilder::getSyncStackPointer(Value* syncStackO
     }
 }
 
-RTBuilder::SyncStackPointerVal* RTBuilder::getSyncStackPointer()
+// forceRTStackAccessMode is an optional parameter which allows to
+// override the global settings.
+RTBuilder::SyncStackPointerVal* RTBuilder::getSyncStackPointer(
+    Value* globalBufferPtr,
+    std::optional<RTBuilder::RTMemoryAccessMode> forceRTStackAccessMode)
 {
     auto Mode = Ctx.getModuleMetaData()->rtInfo.RTSyncStackSurfaceStateOffset ?
         RTBuilder::STATEFUL :
         RTBuilder::STATELESS;
+
+    if (forceRTStackAccessMode.has_value())
+    {
+        Mode = *forceRTStackAccessMode;
+    }
 
     // requests for the sync stack pointer in early phases of compilation
     // will return a marker intrinsic that can be analyzed later by cache ctrl pass.
@@ -342,7 +359,7 @@ RTBuilder::SyncStackPointerVal* RTBuilder::getSyncStackPointer()
     auto* PtrTy = this->getRTStack2PtrTy(Mode, false);
 
     Value* stackOffset = this->getSyncStackOffset(RTBuilder::STATELESS == Mode);
-    stackOffset = this->getSyncStackPointer(stackOffset, Mode);
+    stackOffset = this->getSyncStackPointer(Mode, stackOffset, globalBufferPtr);
     return static_cast<RTBuilder::SyncStackPointerVal*>(
         this->CreateSyncStackPtrIntrinsic(stackOffset, PtrTy, true));
 }
@@ -352,11 +369,13 @@ TraceRayIntrinsic* RTBuilder::createTraceRay(
     Value* bvhLevel,
     Value* traceRayCtrl,
     bool isRayQuery,
+    Value* globalBufferPointer,
     const Twine& PayloadName)
 {
     Module* module = this->GetInsertBlock()->getModule();
 
-    Value* GlobalPointer = this->getGlobalBufferPtr();
+    if (!globalBufferPointer)
+        globalBufferPointer = this->getGlobalBufferPtr();
 
     GenISAIntrinsic::ID ID = isRayQuery ?
         GenISAIntrinsic::GenISA_TraceRaySync :
@@ -365,12 +384,12 @@ TraceRayIntrinsic* RTBuilder::createTraceRay(
     Function* traceFn = GenISAIntrinsic::getDeclaration(
         module,
         ID,
-        GlobalPointer->getType());
+        globalBufferPointer->getType());
 
     Value* payload = getTraceRayPayload(
         bvhLevel, traceRayCtrl, isRayQuery, PayloadName);
 
-    SmallVector<Value*, 4> Args{ GlobalPointer, payload };
+    SmallVector<Value*, 4> Args{ globalBufferPointer, payload };
 
 
     return cast<TraceRayIntrinsic>(this->CreateCall(traceFn, Args));
@@ -388,17 +407,19 @@ void RTBuilder::createReadSyncTraceRay(Value* val)
 TraceRaySyncIntrinsic* RTBuilder::createSyncTraceRay(
     Value* bvhLevel,
     Value* traceRayCtrl,
+    Value* globalBufferPointer,
     const Twine& PayloadName)
 {
-    return cast<TraceRaySyncIntrinsic>(createTraceRay(bvhLevel, this->CreateZExt(traceRayCtrl, this->getInt32Ty()), true, PayloadName));
+    return cast<TraceRaySyncIntrinsic>(createTraceRay(bvhLevel, this->CreateZExt(traceRayCtrl, this->getInt32Ty()), true, globalBufferPointer, PayloadName));
 }
 
 TraceRaySyncIntrinsic* RTBuilder::createSyncTraceRay(
     uint32_t bvhLevel,
     Value* traceRayCtrl,
+    Value* globalBufferPointer,
     const Twine& PayloadName)
 {
-    return cast<TraceRaySyncIntrinsic>(createTraceRay(this->getInt32(bvhLevel), this->CreateZExt(traceRayCtrl, this->getInt32Ty()), true, PayloadName));
+    return cast<TraceRaySyncIntrinsic>(createTraceRay(this->getInt32(bvhLevel), this->CreateZExt(traceRayCtrl, this->getInt32Ty()), true, globalBufferPointer, PayloadName));
 }
 
 
@@ -444,20 +465,25 @@ static BasicBlock* getUnsetPhiBlock(PHINode* PN)
 //  BasicBlock* is validLeafBB to let caller insert logic to this BB
 //  PHINode*    is %97 above to let caller add another incoming node for phi
 std::pair<BasicBlock*, PHINode*> RTBuilder::validateInstanceLeafPtr(
-    RTBuilder::StackPointerVal* perLaneStackPtr, Instruction* I, bool forCommitted)
+    RTBuilder::StackPointerVal* perLaneStackPtr, Instruction* I, Value* forCommitted)
 {
-    Value* valid = nullptr;
-    if (forCommitted)
-    {
-        valid = getHitValid(perLaneStackPtr, forCommitted);
-    }
-    else
-    {
-        valid = this->CreateICmpNE(
-            getLeafType(perLaneStackPtr, forCommitted),
-            this->getInt32(NODE_TYPE_INVALID),
-            VALUE_NAME("validLeafType"));
-    }
+    Instruction* trueTerm = nullptr;
+    Instruction* falseTerm = nullptr;
+    SplitBlockAndInsertIfThenElse(forCommitted, I, &trueTerm, &falseTerm);
+
+    SetInsertPoint(trueTerm);
+    auto* trueV = getHitValid(perLaneStackPtr, forCommitted);
+
+    SetInsertPoint(falseTerm);
+    auto* falseV = this->CreateICmpNE(
+        getLeafType(perLaneStackPtr, forCommitted),
+        this->getInt32(NODE_TYPE_INVALID),
+        VALUE_NAME("validLeafType"));
+
+    SetInsertPoint(I);
+    auto* valid = CreatePHI(trueV->getType(), 2, VALUE_NAME("leafType"));
+    valid->addIncoming(trueV, trueTerm->getParent());
+    valid->addIncoming(falseV, falseTerm->getParent());
 
     auto& C = I->getContext();
     auto* CSBlock = I->getParent();
@@ -719,59 +745,112 @@ Value* RTBuilder::getWorldRayDir(RTBuilder::StackPointerVal* perLaneStackPtr, ui
 }
 
 Value* RTBuilder::getObjRayOrig(
-    RTBuilder::StackPointerVal* perLaneStackPtr, uint32_t dim, IGC::CallableShaderTypeMD ShaderTy,
+    RTBuilder::StackPointerVal* perLaneStackPtr, uint32_t dim, Value* ShaderTy,
     Instruction* I, bool checkInstanceLeafPtr)
 {
-    Value* info = nullptr;
-    const bool transformWorldToObject =
-        ShaderTy == CallableShaderTypeMD::ClosestHit;
-    if (transformWorldToObject)
-    {
-        info = this->TransformWorldToObject(perLaneStackPtr, dim, true, ShaderTy, I, checkInstanceLeafPtr);
-    }
-    else
-    {
-        info = getMemRayOrig(
-            perLaneStackPtr,
-            dim,
-            BOTTOM_LEVEL_BVH,
-            VALUE_NAME("ObjRayOrig[" + Twine(dim) + "]"));
-    }
+
+    auto* IP = &*GetInsertPoint();
+
+    auto* oldBB = IP->getParent();
+    auto* bb = SplitBlock(oldBB, IP);
+
+    auto* isClosestHitBB = BasicBlock::Create(*Ctx.getLLVMContext(), VALUE_NAME("isClosestHitBB"), IP->getFunction(), bb);
+    SetInsertPoint(isClosestHitBB);
+    auto* isClosestHitBBTerm = CreateBr(bb); // we have to do this because the functions we call are going to split the block again...
+    SetInsertPoint(isClosestHitBBTerm);
+    auto* newI = I->clone();
+    Insert(newI);
+    auto* isClosestHitV = this->TransformWorldToObject(perLaneStackPtr, dim, true, ShaderTy, newI, checkInstanceLeafPtr);
+    isClosestHitV->setName(VALUE_NAME("isClosestHitV"));
+    newI->eraseFromParent();
+
+    auto* isMissBB = BasicBlock::Create(Context, VALUE_NAME("isMissBB"), IP->getFunction(), bb);
+    SetInsertPoint(isMissBB);
+    auto* isMissBBTerm = CreateBr(bb);
+    SetInsertPoint(isMissBBTerm);
+    auto* isMissV = getWorldRayOrig(perLaneStackPtr, dim);
+    isMissV->setName(VALUE_NAME("isMissV"));
+
+    auto* defaultBB = BasicBlock::Create(Context, VALUE_NAME("default"), IP->getFunction(), bb);
+    SetInsertPoint(defaultBB);
+    auto* defaultBBTerm = CreateBr(bb);
+    SetInsertPoint(defaultBBTerm);
+    auto* defaultV = getMemRayOrig(perLaneStackPtr, dim, BOTTOM_LEVEL_BVH, VALUE_NAME("ObjRayOrig[" + Twine(dim) + "]"));
+    defaultV->setName(VALUE_NAME("defaultV"));
+
+    // create switch statement
+    oldBB->getTerminator()->eraseFromParent();
+    SetInsertPoint(oldBB);
+    auto* switchI = CreateSwitch(ShaderTy, defaultBB);
+    switchI->addCase(getInt32(Miss), isMissBB);
+    switchI->addCase(getInt32(ClosestHit), isClosestHitBB);
+
+    SetInsertPoint(IP);
+    auto* info = CreatePHI(isClosestHitV->getType(), 3);
+    info->addIncoming(isClosestHitV, isClosestHitBBTerm->getParent());
+    info->addIncoming(isMissV, isMissBBTerm->getParent());
+    info->addIncoming(defaultV, defaultBBTerm->getParent());
+
     return info;
 }
 
 Value* RTBuilder::getObjRayDir(
-    RTBuilder::StackPointerVal* perLaneStackPtr, uint32_t dim, IGC::CallableShaderTypeMD ShaderTy,
+    RTBuilder::StackPointerVal* perLaneStackPtr, uint32_t dim, Value* ShaderTy,
     Instruction* I, bool checkInstanceLeafPtr)
 {
-    Value* info = nullptr;
-    const bool transformWorldToObject =
-        ShaderTy == CallableShaderTypeMD::ClosestHit;
-    if (transformWorldToObject)
-    {
-        info = this->TransformWorldToObject(perLaneStackPtr, dim, false, ShaderTy, I, checkInstanceLeafPtr);
-    }
-    else
-    {
-        info = getMemRayDir(
-            perLaneStackPtr,
-            dim,
-            BOTTOM_LEVEL_BVH,
-            VALUE_NAME("ObjRayDir[" + Twine(dim) + "]"));
-    }
+
+    auto* IP = &*GetInsertPoint();
+
+    auto* oldBB = IP->getParent();
+    auto* bb = SplitBlock(oldBB, IP);
+
+    auto* isClosestHitBB = BasicBlock::Create(*Ctx.getLLVMContext(), VALUE_NAME("isClosestHitBB"), IP->getFunction(), bb);
+    SetInsertPoint(isClosestHitBB);
+    auto* isClosestHitBBTerm = CreateBr(bb); // we have to do this because the functions we call are going to split the block again...
+    SetInsertPoint(isClosestHitBBTerm);
+    auto* newI = I->clone();
+    Insert(newI);
+    auto* isClosestHitV = this->TransformWorldToObject(perLaneStackPtr, dim, false, ShaderTy, newI, checkInstanceLeafPtr);
+    newI->eraseFromParent();
+
+    auto* isMissBB = BasicBlock::Create(Context, VALUE_NAME("isMissBB"), IP->getFunction(), bb);
+    SetInsertPoint(isMissBB);
+    auto* isMissBBTerm = CreateBr(bb);
+    SetInsertPoint(isMissBBTerm);
+    auto* isMissV = getWorldRayDir(perLaneStackPtr, dim);
+
+    auto* defaultBB = BasicBlock::Create(Context, VALUE_NAME("default"), IP->getFunction(), bb);
+    SetInsertPoint(defaultBB);
+    auto* defaultBBTerm = CreateBr(bb);
+    SetInsertPoint(defaultBBTerm);
+    auto* defaultV = getMemRayDir(perLaneStackPtr, dim, BOTTOM_LEVEL_BVH, VALUE_NAME("ObjRayDir[" + Twine(dim) + "]"));
+
+    // create switch statement
+    oldBB->getTerminator()->eraseFromParent();
+    SetInsertPoint(oldBB);
+    auto* switchI = CreateSwitch(ShaderTy, defaultBB);
+    switchI->addCase(getInt32(Miss), isMissBB);
+    switchI->addCase(getInt32(ClosestHit), isClosestHitBB);
+
+    SetInsertPoint(IP);
+    auto* info = CreatePHI(isClosestHitV->getType(), 3);
+    info->addIncoming(isClosestHitV, isClosestHitBBTerm->getParent());
+    info->addIncoming(isMissV, isMissBBTerm->getParent());
+    info->addIncoming(defaultV, defaultBBTerm->getParent());
+
     return info;
 }
 
 Value* RTBuilder::getRayTCurrent(
-    RTBuilder::StackPointerVal* perLaneStackPtr, IGC::CallableShaderTypeMD ShaderTy)
+    RTBuilder::StackPointerVal* perLaneStackPtr, Value* ShaderTy)
 {
     switch (getMemoryStyle())
     {
-#define STYLE(X)                                     \
-    case RTMemoryStyle::X:                           \
-        return _getRayTCurrent_##X(                  \
-            perLaneStackPtr,                         \
-            VAdapt{ *this, ShaderTy },               \
+#define STYLE(X)                    \
+    case RTMemoryStyle::X:          \
+        return _getRayTCurrent_##X( \
+            perLaneStackPtr,        \
+            ShaderTy,               \
             VALUE_NAME("rayTCurrent"));
 #include "RayTracingMemoryStyle.h"
 #undef STYLE
@@ -781,13 +860,13 @@ Value* RTBuilder::getRayTCurrent(
 }
 
 Value* RTBuilder::getInstanceIndex(
-    RTBuilder::StackPointerVal* perLaneStackPtr, IGC::CallableShaderTypeMD ShaderTy,
+    RTBuilder::StackPointerVal* perLaneStackPtr, Value* ShaderTy,
     Instruction* I, bool checkInstanceLeafPtr)
 {
     if (checkInstanceLeafPtr && IGC_IS_FLAG_ENABLED(ForceRTCheckInstanceLeafPtr))
     {
         auto [ValidBB, PN] =
-            validateInstanceLeafPtr(perLaneStackPtr, I, (ShaderTy == CallableShaderTypeMD::ClosestHit));
+            validateInstanceLeafPtr(perLaneStackPtr, I, CreateICmpEQ(ShaderTy, getInt32(CallableShaderTypeMD::ClosestHit)));
         this->SetInsertPoint(ValidBB->getTerminator());
         Value* validVal = getInstanceIndex(perLaneStackPtr, ShaderTy);
         PN->addIncoming(validVal, getUnsetPhiBlock(PN));
@@ -801,15 +880,15 @@ Value* RTBuilder::getInstanceIndex(
 }
 
 Value* RTBuilder::getInstanceIndex(
-    RTBuilder::StackPointerVal* perLaneStackPtr, IGC::CallableShaderTypeMD ShaderTy)
+    RTBuilder::StackPointerVal* perLaneStackPtr, Value* ShaderTy)
 {
     switch (getMemoryStyle())
     {
-#define STYLE(X)                                     \
-    case RTMemoryStyle::X:                           \
-        return _getInstanceIndex_##X(                \
-            perLaneStackPtr,                         \
-            VAdapt{ *this, ShaderTy },               \
+#define STYLE(X)                      \
+    case RTMemoryStyle::X:            \
+        return _getInstanceIndex_##X( \
+            perLaneStackPtr,          \
+            ShaderTy,                 \
             VALUE_NAME("InstanceIndex"));
 #include "RayTracingMemoryStyle.h"
 #undef STYLE
@@ -819,13 +898,13 @@ Value* RTBuilder::getInstanceIndex(
 }
 
 Value* RTBuilder::getInstanceID(
-    RTBuilder::StackPointerVal* perLaneStackPtr, IGC::CallableShaderTypeMD ShaderTy,
+    RTBuilder::StackPointerVal* perLaneStackPtr, Value* ShaderTy,
     Instruction* I, bool checkInstanceLeafPtr)
 {
     if (checkInstanceLeafPtr && IGC_IS_FLAG_ENABLED(ForceRTCheckInstanceLeafPtr))
     {
         auto [ValidBB, PN] =
-            validateInstanceLeafPtr(perLaneStackPtr, I, (ShaderTy == CallableShaderTypeMD::ClosestHit));
+            validateInstanceLeafPtr(perLaneStackPtr, I, CreateICmpEQ(ShaderTy, getInt32(CallableShaderTypeMD::ClosestHit)));
         this->SetInsertPoint(ValidBB->getTerminator());
         Value* validVal = getInstanceID(perLaneStackPtr, ShaderTy);
         PN->addIncoming(validVal, getUnsetPhiBlock(PN));
@@ -839,15 +918,15 @@ Value* RTBuilder::getInstanceID(
 }
 
 Value* RTBuilder::getInstanceID(
-    RTBuilder::StackPointerVal* perLaneStackPtr, IGC::CallableShaderTypeMD ShaderTy)
+    RTBuilder::StackPointerVal* perLaneStackPtr, Value* ShaderTy)
 {
     switch (getMemoryStyle())
     {
-#define STYLE(X)                                     \
-    case RTMemoryStyle::X:                           \
-        return _getInstanceID_##X(                   \
-            perLaneStackPtr,                         \
-            VAdapt{ *this, ShaderTy },               \
+#define STYLE(X)                   \
+    case RTMemoryStyle::X:         \
+        return _getInstanceID_##X( \
+            perLaneStackPtr,       \
+            ShaderTy,              \
             VALUE_NAME("InstanceID"));
 #include "RayTracingMemoryStyle.h"
 #undef STYLE
@@ -860,29 +939,27 @@ Value* RTBuilder::getPrimitiveIndex(
     RTBuilder::StackPointerVal* perLaneStackPtr,
     Instruction* I,
     Value* leafType,
-    IGC::CallableShaderTypeMD ShaderTy,
+    Value* ShaderTy,
     bool checkInstanceLeafPtr)
 {
-    uint32_t mask = (ShaderTy == CallableShaderTypeMD::ClosestHit ? 1 : 2);
-    bool bMask = (IGC_GET_FLAG_VALUE(ForceRTCheckInstanceLeafPtrMask) & mask);
-    if (checkInstanceLeafPtr && IGC_IS_FLAG_ENABLED(ForceRTCheckInstanceLeafPtr) && bMask)
+    if (checkInstanceLeafPtr && IGC_IS_FLAG_ENABLED(ForceRTCheckInstanceLeafPtr))
     {
         auto [ValidBB, PN] =
-            validateInstanceLeafPtr(perLaneStackPtr, I, (ShaderTy == CallableShaderTypeMD::ClosestHit));
+            validateInstanceLeafPtr(perLaneStackPtr, I, CreateICmpEQ(ShaderTy, getInt32(CallableShaderTypeMD::ClosestHit)));
         this->SetInsertPoint(ValidBB->getTerminator());
-        auto* validPrimIndex = getPrimitiveIndex(perLaneStackPtr, leafType, ShaderTy == ClosestHit);
+        auto* validPrimIndex = getPrimitiveIndex(perLaneStackPtr, leafType, ShaderTy);
         PN->addIncoming(validPrimIndex, getUnsetPhiBlock(PN));
         this->SetInsertPoint(I);
         return PN;
     }
     else
     {
-        return getPrimitiveIndex(perLaneStackPtr, leafType, ShaderTy == ClosestHit);
+        return getPrimitiveIndex(perLaneStackPtr, leafType, ShaderTy);
     }
 }
 
 Value* RTBuilder::getPrimitiveIndex(
-    RTBuilder::StackPointerVal* perLaneStackPtr, Value* leafType, bool Committed)
+    RTBuilder::StackPointerVal* perLaneStackPtr, Value* leafType, Value* ShaderTy)
 {
         switch (getMemoryStyle())
         {
@@ -891,7 +968,7 @@ Value* RTBuilder::getPrimitiveIndex(
         return _getPrimitiveIndex_##X(  \
             perLaneStackPtr,            \
             leafType,                   \
-            VAdapt{ *this, Committed }, \
+            ShaderTy,                   \
             VALUE_NAME("primitiveIndex"));
 #include "RayTracingMemoryStyle.h"
 #undef STYLE
@@ -905,40 +982,38 @@ Value* RTBuilder::getGeometryIndex(
     RTBuilder::StackPointerVal* perLaneStackPtr,
     Instruction* I,
     Value* leafType,
-    IGC::CallableShaderTypeMD ShaderTy,
+    Value* ShaderTy,
     bool checkInstanceLeafPtr)
 {
-    uint32_t mask = (ShaderTy == CallableShaderTypeMD::ClosestHit ? 1 : 2);
-    bool bMask = (IGC_GET_FLAG_VALUE(ForceRTCheckInstanceLeafPtrMask) & mask);
-    if (checkInstanceLeafPtr && IGC_IS_FLAG_ENABLED(ForceRTCheckInstanceLeafPtr) && bMask)
+    if (checkInstanceLeafPtr && IGC_IS_FLAG_ENABLED(ForceRTCheckInstanceLeafPtr))
     {
         auto [ValidBB, PN] =
-            validateInstanceLeafPtr(perLaneStackPtr, I, (ShaderTy == CallableShaderTypeMD::ClosestHit));
+            validateInstanceLeafPtr(perLaneStackPtr, I, CreateICmpEQ(ShaderTy, getInt32(CallableShaderTypeMD::ClosestHit)));
         this->SetInsertPoint(ValidBB->getTerminator());
-        Value* validGeomIndex = getGeometryIndex(perLaneStackPtr, leafType, ShaderTy == CallableShaderTypeMD::ClosestHit);
+        Value* validGeomIndex = getGeometryIndex(perLaneStackPtr, leafType, ShaderTy);
         PN->addIncoming(validGeomIndex, getUnsetPhiBlock(PN));
         this->SetInsertPoint(I);
         return PN;
     }
     else
     {
-        return getGeometryIndex(perLaneStackPtr, leafType, ShaderTy == CallableShaderTypeMD::ClosestHit);
+        return getGeometryIndex(perLaneStackPtr, leafType, ShaderTy);
     }
 }
 
 Value* RTBuilder::getGeometryIndex(
     RTBuilder::StackPointerVal* perLaneStackPtr,
     Value* leafType,
-    bool committed)
+    Value* ShaderTy)
 {
         switch (getMemoryStyle())
         {
-#define STYLE(X)                                     \
-    case RTMemoryStyle::X:                           \
-        return _getGeometryIndex_##X(                \
-            perLaneStackPtr,                         \
-            leafType,                                \
-            VAdapt{ *this, committed }, \
+#define STYLE(X)                      \
+    case RTMemoryStyle::X:            \
+        return _getGeometryIndex_##X( \
+            perLaneStackPtr,          \
+            leafType,                 \
+            ShaderTy,                 \
             VALUE_NAME("geometryIndex"));
 #include "RayTracingMemoryStyle.h"
 #undef STYLE
@@ -949,7 +1024,7 @@ Value* RTBuilder::getGeometryIndex(
 
 Value* RTBuilder::getInstanceContributionToHitGroupIndex(
     RTBuilder::StackPointerVal* perLaneStackPtr,
-    IGC::CallableShaderTypeMD ShaderTy)
+    Value* ShaderTy)
 {
     switch (getMemoryStyle())
     {
@@ -957,7 +1032,7 @@ Value* RTBuilder::getInstanceContributionToHitGroupIndex(
     case RTMemoryStyle::X:                                  \
         return _getInstanceContributionToHitGroupIndex_##X( \
             perLaneStackPtr,                                \
-            VAdapt{ *this, ShaderTy },                      \
+            ShaderTy,                                       \
             VALUE_NAME("InstanceContributionToHitGroupIndex"));
 #include "RayTracingMemoryStyle.h"
 #undef STYLE
@@ -986,7 +1061,7 @@ Value* RTBuilder::getRayMask(
 Value* RTBuilder::getObjToWorld(
     RTBuilder::StackPointerVal* perLaneStackPtr,
     uint32_t dim,
-    IGC::CallableShaderTypeMD ShaderTy,
+    Value* ShaderTy,
     Instruction* I,
     bool checkInstanceLeafPtr)
 {
@@ -996,7 +1071,7 @@ Value* RTBuilder::getObjToWorld(
 Value* RTBuilder::getWorldToObj(
     RTBuilder::StackPointerVal* perLaneStackPtr,
     uint32_t dim,
-    IGC::CallableShaderTypeMD ShaderTy,
+    Value* ShaderTy,
     Instruction* I,
     bool checkInstanceLeafPtr)
 {
@@ -1007,14 +1082,14 @@ Value* RTBuilder::getObjWorldAndWorldObj(
     RTBuilder::StackPointerVal* perLaneStackPtr,
     uint32_t infoKind,
     uint32_t dim,
-    IGC::CallableShaderTypeMD ShaderTy,
+    Value* ShaderTy,
     Instruction* I,
     bool checkInstanceLeafPtr)
 {
     if (checkInstanceLeafPtr && IGC_IS_FLAG_ENABLED(ForceRTCheckInstanceLeafPtr))
     {
         auto [ValidBB, PN] =
-            validateInstanceLeafPtr(perLaneStackPtr, I, (ShaderTy == CallableShaderTypeMD::ClosestHit));
+            validateInstanceLeafPtr(perLaneStackPtr, I, CreateICmpEQ(ShaderTy, getInt32(CallableShaderTypeMD::ClosestHit)));
         this->SetInsertPoint(ValidBB->getTerminator());
         Value* validVal = getObjWorldAndWorldObj(perLaneStackPtr, infoKind, dim, ShaderTy);
         PN->addIncoming(validVal, getUnsetPhiBlock(PN));
@@ -1031,7 +1106,7 @@ Value* RTBuilder::getObjWorldAndWorldObj(
     RTBuilder::StackPointerVal* perLaneStackPtr,
     uint32_t infoKind,
     uint32_t dim,
-    IGC::CallableShaderTypeMD ShaderTy)
+    Value* ShaderTy)
 {
     switch (getMemoryStyle())
     {
@@ -1041,7 +1116,7 @@ Value* RTBuilder::getObjWorldAndWorldObj(
             perLaneStackPtr,                                   \
             VAdapt{ *this, dim },                              \
             VAdapt{ *this, infoKind == IGC::OBJECT_TO_WORLD }, \
-            VAdapt{ *this, ShaderTy },                         \
+            ShaderTy,                                          \
             VALUE_NAME("matrix[" + Twine(dim) + "]"));
 #include "RayTracingMemoryStyle.h"
 #undef STYLE
@@ -1054,14 +1129,18 @@ Value* RTBuilder::TransformWorldToObject(
     RTBuilder::StackPointerVal* perLaneStackPtr,
     unsigned int dim,
     bool isOrigin,
-    IGC::CallableShaderTypeMD ShaderTy,
+    Value* ShaderTy,
     Instruction* I,
     bool checkInstanceLeafPtr)
 {
     if (checkInstanceLeafPtr && IGC_IS_FLAG_ENABLED(ForceRTCheckInstanceLeafPtr))
     {
+        this->SetInsertPoint(I);
+        auto *forCommitted =
+          CreateICmpEQ(ShaderTy, getInt32(CallableShaderTypeMD::ClosestHit),
+                       VALUE_NAME("TransformWorldToObjectShaderTy"));
         auto [ValidBB, PN] =
-            validateInstanceLeafPtr(perLaneStackPtr, I, (ShaderTy == CallableShaderTypeMD::ClosestHit));
+          validateInstanceLeafPtr(perLaneStackPtr, I, forCommitted);
         this->SetInsertPoint(ValidBB->getTerminator());
         Value* validVal = TransformWorldToObject(perLaneStackPtr, dim, isOrigin, ShaderTy);
         PN->addIncoming(validVal, getUnsetPhiBlock(PN));
@@ -1078,7 +1157,7 @@ Value* RTBuilder::TransformWorldToObject(
     RTBuilder::StackPointerVal* perLaneStackPtr,
     unsigned int dim,
     bool isOrigin,
-    IGC::CallableShaderTypeMD ShaderTy)
+    Value* ShaderTy)
 {
     IGC_ASSERT_MESSAGE((dim < 3), "dim out of bounds!");
 
@@ -1090,7 +1169,7 @@ Value* RTBuilder::TransformWorldToObject(
             perLaneStackPtr,                \
             VAdapt{ *this, dim },           \
             VAdapt{ *this, isOrigin },      \
-            VAdapt{ *this, ShaderTy });
+            ShaderTy);
 #include "RayTracingMemoryStyle.h"
 #undef STYLE
     }
@@ -1381,15 +1460,15 @@ Value* RTBuilder::getBvhLevel(StackPointerVal* StackPointer, bool Committed)
     return {};
 }
 
-Value* RTBuilder::getHitValid(RTBuilder::StackPointerVal* StackPointer, bool CommittedHit)
+Value* RTBuilder::getHitValid(RTBuilder::StackPointerVal* StackPointer, Value* CommittedHit)
 {
     switch (getMemoryStyle())
     {
-#define STYLE(X)                            \
-    case RTMemoryStyle::X:                  \
-        return _isValid_##X(                \
-            StackPointer,                   \
-            VAdapt{ *this, CommittedHit },  \
+#define STYLE(X)             \
+    case RTMemoryStyle::X:   \
+        return _isValid_##X( \
+            StackPointer,    \
+            CommittedHit,    \
             VALUE_NAME("valid"));
 #include "RayTracingMemoryStyle.h"
 #undef STYLE
@@ -1424,7 +1503,7 @@ void RTBuilder::setSyncTraceRayControl(GetElementPtrInst* ptrCtrl, RTStackFormat
 }
 
 Value* RTBuilder::getHitBaryCentric(
-    RTBuilder::StackPointerVal* StackPointer, uint32_t idx, bool CommittedHit)
+    RTBuilder::StackPointerVal* StackPointer, uint32_t idx, Value* CommittedHit)
 {
     IGC_ASSERT_MESSAGE(idx == 0 || idx == 1, "Only U V are supported.");
     switch (getMemoryStyle())
@@ -1434,7 +1513,7 @@ Value* RTBuilder::getHitBaryCentric(
         return _getHitBaryCentric_##X(      \
             StackPointer,                   \
             VAdapt{ *this, idx },           \
-            VAdapt{ *this, CommittedHit },  \
+            CommittedHit,                   \
             VALUE_NAME(idx ? "MemHit.v" : "MemHit.u"));
 #include "RayTracingMemoryStyle.h"
 #undef STYLE
@@ -1445,15 +1524,15 @@ Value* RTBuilder::getHitBaryCentric(
 
 
 Value* RTBuilder::getLeafType(
-    StackPointerVal* StackPointer, bool CommittedHit)
+    StackPointerVal* StackPointer, Value* CommittedHit)
 {
     switch (getMemoryStyle())
     {
-#define STYLE(X)                            \
-    case RTMemoryStyle::X:                  \
-        return _createLeafType_##X(         \
-            StackPointer,                   \
-            VAdapt{ *this, CommittedHit },  \
+#define STYLE(X)                    \
+    case RTMemoryStyle::X:          \
+        return _createLeafType_##X( \
+            StackPointer,           \
+            CommittedHit,           \
             VALUE_NAME("leafType"));
 #include "RayTracingMemoryStyle.h"
 #undef STYLE
@@ -1464,7 +1543,7 @@ Value* RTBuilder::getLeafType(
 
 
 
-Value* RTBuilder::getLeafNodeSubType(StackPointerVal* StackPointer, bool CommittedHit)
+Value* RTBuilder::getLeafNodeSubType(StackPointerVal* StackPointer, Value* CommittedHit)
 {
     switch (getMemoryStyle())
     {
@@ -1472,7 +1551,7 @@ Value* RTBuilder::getLeafNodeSubType(StackPointerVal* StackPointer, bool Committ
         return this->getInt32(0);
 
     case RTMemoryStyle::Xe3:
-        return _getLeafNodeSubType_Xe3(StackPointer, getInt1(CommittedHit),
+        return _getLeafNodeSubType_Xe3(StackPointer, CommittedHit,
             VALUE_NAME("MemHit.LeafNodeSubType"));
 
     }
@@ -1574,6 +1653,31 @@ Value* RTBuilder::getGlobalBufferPtr(IGC::ADDRESS_SPACE Addrspace)
         this->setReturnAlignment(CI, RTGlobalsAlign);
 
     return CI;
+}
+
+Value *RTBuilder::getGlobalBufferPtrForSlot(IGC::ADDRESS_SPACE Addrspace, Value* slot) {
+  auto *pFunc = GenISAIntrinsic::getDeclaration(
+      Ctx.getModule(), GenISAIntrinsic::GenISA_RuntimeValue,
+      getRayDispatchGlobalDataPtrTy(*Ctx.getModule(),
+                                        ADDRESS_SPACE_CONSTANT));
+
+  auto *mainGlobalBufferPtr = CreateCall(
+      pFunc,
+      getInt32(Ctx.getModuleMetaData()->pushInfo.inlineRTGlobalPtrOffset),
+      VALUE_NAME("globalBufferPtrFromRuntimeValue"));
+
+  auto *offset = CreateMul(
+      slot,
+      getInt32(IGC::Align(sizeof(RayDispatchGlobalData), IGC::RTGlobalsAlign)));
+
+  auto *globalBufferPtr = CreateBitCast(
+      mainGlobalBufferPtr, getInt8PtrTy(ADDRESS_SPACE_CONSTANT));
+  globalBufferPtr = CreateInBoundsGEP(getInt8Ty(), globalBufferPtr, offset);
+  globalBufferPtr = CreateBitCast(
+      globalBufferPtr, mainGlobalBufferPtr->getType(),
+      VALUE_NAME("globalBuffer[]"));
+
+  return globalBufferPtr;
 }
 
 
@@ -1726,6 +1830,13 @@ Type* RTBuilder::getRTStack2Ty() const
     }
     IGC_ASSERT(0);
     return {};
+}
+
+Type* RTBuilder::getRTStack2PtrTy(bool async) const
+{
+    auto& rtInfo = Ctx.getModuleMetaData()->rtInfo;
+    auto& SSO = async ? rtInfo.RTAsyncStackSurfaceStateOffset : rtInfo.RTSyncStackSurfaceStateOffset;
+    return getRTStack2PtrTy(SSO ? RTBuilder::STATEFUL : RTBuilder::STATELESS, async);
 }
 
 Type* RTBuilder::getRTStack2PtrTy(
@@ -1940,7 +2051,9 @@ void RTBuilder::createTraceRayInlinePrologue(
     Value* RayFlags,
     Value* InstanceInclusionMask,
     Value* ComparisonValue,
-    Value* TMax)
+    Value* TMax,
+    bool updateFlags,
+    bool initialDoneBitValue)
 {
     switch (getMemoryStyle())
     {
@@ -1952,7 +2065,9 @@ void RTBuilder::createTraceRayInlinePrologue(
             RayFlags,
             InstanceInclusionMask,
             ComparisonValue,
-            TMax);
+            TMax,
+            VAdapt{ *this, updateFlags },
+            VAdapt{ *this, initialDoneBitValue });
         break;
     case RTMemoryStyle::Xe3:
         _createTraceRayInlinePrologue_Xe3(
@@ -1962,7 +2077,9 @@ void RTBuilder::createTraceRayInlinePrologue(
             RayFlags,
             InstanceInclusionMask,
             ComparisonValue,
-            TMax);
+            TMax,
+            VAdapt{ *this, updateFlags },
+            VAdapt{ *this, initialDoneBitValue });
         break;
     }
 }
@@ -2091,3 +2208,101 @@ Value* RTBuilder::getHitAddress(StackPointerVal* StackPtr, bool Committed)
     IGC_ASSERT(0);
     return {};
 }
+
+template<typename StackPointerValT, typename RayInfoIntrinsicT>
+Value* RTBuilder::lowerRayInfo(StackPointerValT* perLaneStackPtr, RayInfoIntrinsicT* I, Value* shaderType, Value* isProcedural)
+{
+    bool checkInstanceLeafPtr = std::is_same_v<RayInfoIntrinsicT, RayQueryInfoIntrinsic>;
+
+    Value* info = nullptr;
+    uint32_t dim = I->getDim();
+    auto infoKind = I->getInfoKind();
+
+    switch (infoKind)
+    {
+    case WORLD_RAY_ORG:
+        info = getWorldRayOrig(perLaneStackPtr, dim);
+        break;
+    case WORLD_RAY_DIR:
+        info = getWorldRayDir(perLaneStackPtr, dim);
+        break;
+    case OBJ_RAY_ORG:
+        info = getObjRayOrig(perLaneStackPtr, dim, shaderType, I, checkInstanceLeafPtr);
+        break;
+    case OBJ_RAY_DIR:
+        info = getObjRayDir(perLaneStackPtr, dim, shaderType, I, checkInstanceLeafPtr);
+        break;
+    case RAY_T_MIN:
+        info = getRayTMin(perLaneStackPtr);
+        break;
+    case RAY_T_CURRENT:
+        info = getRayTCurrent(perLaneStackPtr, shaderType);
+        break;
+    case INSTANCE_ID:
+        info = getInstanceID(perLaneStackPtr, shaderType, I, checkInstanceLeafPtr);
+        break;
+    case INSTANCE_INDEX:
+        info = getInstanceIndex(perLaneStackPtr, shaderType, I, checkInstanceLeafPtr);
+        break;
+    case PRIMITIVE_INDEX:
+    {
+        auto* nodeType = isProcedural ?
+            CreateSelect(isProcedural, getInt32(NODE_TYPE_PROCEDURAL), getInt32(NODE_TYPE_QUAD)) :
+            getLeafType(perLaneStackPtr, CreateICmpEQ(shaderType, getInt32(CallableShaderTypeMD::ClosestHit)));
+        info = getPrimitiveIndex(perLaneStackPtr, I, nodeType, shaderType, checkInstanceLeafPtr);
+        break;
+    }
+    case RAY_FLAGS:
+        info = CreateZExt(
+            getRayFlags(perLaneStackPtr),
+            I->getType());
+        break;
+    case OBJECT_TO_WORLD:
+        info = getObjToWorld(perLaneStackPtr, dim, shaderType, I, checkInstanceLeafPtr);
+        break;
+    case WORLD_TO_OBJECT:
+        info = getWorldToObj(perLaneStackPtr, dim, shaderType, I, checkInstanceLeafPtr);
+        break;
+    case GEOMETRY_INDEX:
+    {
+        auto* nodeType = isProcedural ?
+            CreateSelect(isProcedural, getInt32(NODE_TYPE_PROCEDURAL), getInt32(NODE_TYPE_QUAD)) :
+            getLeafType(perLaneStackPtr, CreateICmpEQ(shaderType, getInt32(CallableShaderTypeMD::ClosestHit)));
+        info = getGeometryIndex(perLaneStackPtr, I, nodeType, shaderType, checkInstanceLeafPtr);
+        break;
+    }
+    case INST_CONTRIBUTION_TO_HITGROUP_INDEX:
+        info = getInstanceContributionToHitGroupIndex(perLaneStackPtr, shaderType);
+        break;
+    case RAY_MASK:
+        info = getRayMask(perLaneStackPtr);
+        break;
+    case TRIANGLE_FRONT_FACE:
+    case CANDIDATE_PROCEDURAL_PRIM_NON_OPAQUE: // Procedural Primitive Opaque Info is stored in Front Face bit
+    {
+        info = getIsFrontFace(perLaneStackPtr, shaderType);
+
+        if (infoKind == CANDIDATE_PROCEDURAL_PRIM_NON_OPAQUE)
+            info = CreateICmpEQ(info, getInt1(0), VALUE_NAME("is_nonopaque"));
+
+        break;
+    }
+    case BARYCENTRICS:
+    {
+        info = getHitBaryCentric(perLaneStackPtr, I->getDim(), CreateICmpEQ(shaderType, getInt32(CallableShaderTypeMD::ClosestHit)));
+        break;
+    }
+    default:
+        IGC_ASSERT_MESSAGE(0, "Unsupported Ray Info");
+        break;
+    }
+
+    return info;
+}
+template Value* RTBuilder::lowerRayInfo<RTBuilder::SyncStackPointerVal, RayQueryInfoIntrinsic>(
+    RTBuilder::SyncStackPointerVal*,
+    RayQueryInfoIntrinsic*,
+    Value *,
+    std::optional<bool>
+);
+

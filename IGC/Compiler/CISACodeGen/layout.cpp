@@ -10,9 +10,6 @@ SPDX-License-Identifier: MIT
 #include "Compiler/CISACodeGen/ShaderCodeGen.hpp"
 #include "Compiler/IGCPassSupport.h"
 #include "common/debug/Debug.hpp"
-#include "common/debug/Dump.hpp"
-#include "common/MemStats.h"
-#include "common/LLVMUtils.h"
 #include <vector>
 #include <set>
 #include "Probe/Assertion.h"
@@ -301,7 +298,7 @@ void Layout::moveAtomicWrites2Loop(Function& func, LoopInfo& LI, bool onlyLocalM
     }
 
     // write: LoopWhereToMove mapping
-    std::map<Instruction*, llvm::Loop*> writesToMove;
+    llvm::MapVector<Instruction*, llvm::Loop*> writesToMove;
 
     for (auto read : reads)
     {
@@ -455,7 +452,7 @@ void Layout::LayoutBlocks(Function& func, LoopInfo& LI)
     std::vector<llvm::BasicBlock*> visitVec;
     std::set<llvm::BasicBlock*> visitSet;
     // Insertion Position per loop header
-    std::map<llvm::BasicBlock*, llvm::BasicBlock*> InsPos;
+    llvm::MapVector<llvm::BasicBlock*, llvm::BasicBlock*> InsPos;
 
     llvm::BasicBlock* entry = &(func.getEntryBlock());
     visitVec.push_back(entry);

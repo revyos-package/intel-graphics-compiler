@@ -420,7 +420,6 @@ typedef enum {
   ISA_RESERVED_9A = 0x9A,
   ISA_INVM = 0x9B,
   ISA_RSQTM = 0x9C,
-  ISA_RESERVED_9D = 0x9D,
   ISA_NUM_OPCODE,
   ISA_OPCODE_ENUM_SIZE = 0xFF
 } ISA_Opcode;
@@ -679,6 +678,7 @@ enum class GenPrecision : unsigned char {
   FP16 = 10, // half (1, 5, 10)
   BF8 = 11,  // bfloat8 (1, 5, 2)
   TF32 = 12, // TensorFloat (1, 8, 10), 19 bits
+  HF8 = 14, // HF8 (1, 4, 3)
   TOTAL_NUM
 };
 

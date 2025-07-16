@@ -85,6 +85,9 @@ if config.spirv_as_enabled:
   config.available_features.add('spirv-as')
   llvm_config.add_tool_substitutions([ToolSubst('spirv-as', unresolved='fatal')], tool_dirs)
 
+if int(config.llvm_version_major) >= 16:
+  config.available_features.add('llvm-16-plus')
+
 if config.llvm_spirv_enabled:
   config.available_features.add('llvm-spirv')
   llvm_config.add_tool_substitutions([ToolSubst('llvm-spirv', unresolved='fatal')], tool_dirs)
@@ -95,10 +98,3 @@ if config.is32b == "1":
 if config.debug_build:
   config.available_features.add('debug')
 
-if config.use_khronos_spirv_translator_in_sc == "1":
-  config.available_features.add('khronos-translator')
-  config.available_features.add('khronos-translator-' + config.llvm_version_major)
-  config.substitutions.append(('%SPV_CHECK_PREFIX%', 'CHECK-KHR'))
-else:
-  config.available_features.add('legacy-translator')
-  config.substitutions.append(('%SPV_CHECK_PREFIX%', 'CHECK-LEGACY'))

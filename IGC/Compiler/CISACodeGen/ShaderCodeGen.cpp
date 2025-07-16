@@ -7,20 +7,22 @@ SPDX-License-Identifier: MIT
 ============================= end_copyright_notice ===========================*/
 
 #include "Compiler/CISACodeGen/ShaderCodeGen.hpp"
+#include "AdaptorOCL/MergeAllocasOCL.h"
 #include "Compiler/Legalizer/PeepholeTypeLegalizer.hpp"
 #include "Compiler/CISACodeGen/layout.hpp"
 #include "Compiler/CISACodeGen/DeSSA.hpp"
 #include "Compiler/CISACodeGen/GenCodeGenModule.h"
 #include "Compiler/CISACodeGen/AdvCodeMotion.h"
 #include "Compiler/CISACodeGen/RematAddressArithmetic.h"
+#include "Compiler/CISACodeGen/VectorShuffleAnalysis.hpp"
 #include "Compiler/CISACodeGen/IGCLivenessAnalysis.h"
 #include "Compiler/CISACodeGen/IGCVectorizer.h"
 #include "Compiler/CISACodeGen/AdvMemOpt.h"
 #include "Compiler/CISACodeGen/Emu64OpsPass.h"
-#include "Compiler/CISACodeGen/PullConstantHeuristics.hpp"
 #include "Compiler/CISACodeGen/PushAnalysis.hpp"
 #include "Compiler/CISACodeGen/ScalarizerCodeGen.hpp"
 #include "Compiler/CISACodeGen/HoistCongruentPhi.hpp"
+#include "Compiler/CISACodeGen/CodeScheduling.hpp"
 #include "Compiler/CISACodeGen/CodeSinking.hpp"
 #include "Compiler/CISACodeGen/AddressArithmeticSinking.hpp"
 #include "Compiler/CISACodeGen/AtomicOptPass.hpp"
@@ -31,7 +33,6 @@ SPDX-License-Identifier: MIT
 #include "Compiler/CISACodeGen/EstimateFunctionSize.h"
 #include "Compiler/CISACodeGen/GenerateBlockMemOpsPass.hpp"
 #include "Compiler/CISACodeGen/GenerateFrequencyData.hpp"
-#include "Compiler/CISACodeGen/PassTimer.hpp"
 #include "Compiler/CISACodeGen/FixAddrSpaceCast.h"
 #include "Compiler/CISACodeGen/FixupExtractValuePair.h"
 #include "Compiler/CISACodeGen/GenIRLowering.h"
@@ -40,15 +41,13 @@ SPDX-License-Identifier: MIT
 #include "Compiler/CISACodeGen/LdShrink.h"
 #include "Compiler/CISACodeGen/MemOpt.h"
 #include "Compiler/CISACodeGen/MemOpt2.h"
+#include "Compiler/CISACodeGen/SplitLoads.h"
 #include "Compiler/CISACodeGen/PreRARematFlag.h"
 #include "Compiler/CISACodeGen/PromoteConstantStructs.hpp"
-#include "Compiler/Optimizer/OpenCLPasses/AlignmentAnalysis/AlignmentAnalysis.hpp"
 #include "Compiler/Optimizer/OpenCLPasses/Decompose2DBlockFuncs/Decompose2DBlockFuncs.hpp"
 #include "Compiler/Optimizer/OpenCLPasses/GenericAddressResolution/GASResolving.h"
 #include "Compiler/Optimizer/OpenCLPasses/PrivateMemory/LowerByValAttribute.hpp"
-#include "Compiler/CISACodeGen/ResolvePredefinedConstant.h"
 #include "Compiler/CISACodeGen/Simd32Profitability.hpp"
-#include "Compiler/CISACodeGen/SimplifyConstant.h"
 #include "Compiler/CISACodeGen/TimeStatsCounter.h"
 #include "Compiler/CISACodeGen/TypeDemote.h"
 #include "Compiler/CISACodeGen/UniformAssumptions.hpp"
@@ -69,14 +68,16 @@ SPDX-License-Identifier: MIT
 #include "Compiler/MSAAInsertDiscard.hpp"
 #include "Compiler/CISACodeGen/PromoteInt8Type.hpp"
 #include "Compiler/CISACodeGen/PrepareLoadsStoresPass.h"
+#include "Compiler/CISACodeGen/CallMergerPass.hpp"
 #include "Compiler/CISACodeGen/EvaluateFreeze.hpp"
 #include "Compiler/CISACodeGen/DpasScan.hpp"
 #include "Compiler/CISACodeGen/FPRoundingModeCoalescing.hpp"
 
 #include "Compiler/CISACodeGen/SLMConstProp.hpp"
+#include "Compiler/Optimizer/OpenCLPasses/SplitStructurePhisPass/SplitStructurePhisPass.hpp"
+#include "Compiler/Optimizer/OpenCLPasses/MergeScalarPhisPass/MergeScalarPhisPass.hpp"
 #include "Compiler/Legalizer/AddRequiredMemoryFences.h"
 #include "Compiler/Optimizer/OpenCLPasses/GenericAddressResolution/GenericAddressDynamicResolution.hpp"
-#include "Compiler/Optimizer/OpenCLPasses/PrivateMemory/PrivateMemoryUsageAnalysis.hpp"
 #include "Compiler/Optimizer/OpenCLPasses/PrivateMemory/PrivateMemoryResolution.hpp"
 #include "Compiler/Optimizer/OpenCLPasses/PrivateMemory/PrivateMemoryToSLM.hpp"
 #include "Compiler/Optimizer/OpenCLPasses/ProgramScopeConstants/ProgramScopeConstantResolution.hpp"
@@ -85,25 +86,25 @@ SPDX-License-Identifier: MIT
 #include "Compiler/Optimizer/OpenCLPasses/ReplaceUnsupportedIntrinsics/ReplaceUnsupportedIntrinsics.hpp"
 #include "Compiler/Optimizer/PreCompiledFuncImport.hpp"
 #include "Compiler/Optimizer/OpenCLPasses/AddressSpaceAliasAnalysis/AddressSpaceAliasAnalysis.h"
-#include "Compiler/Optimizer/OpenCLPasses/UndefinedReferences/UndefinedReferencesPass.hpp"
 #include "Compiler/Optimizer/OpenCLPasses/StatelessToStateful/StatelessToStateful.hpp"
 #include "Compiler/Optimizer/OpenCLPasses/DisableLoopUnrollOnRetry/DisableLoopUnrollOnRetry.hpp"
 #include "Compiler/Optimizer/OpenCLPasses/TransformUnmaskedFunctionsPass/TransformUnmaskedFunctionsPass.h"
 #include "Compiler/Optimizer/OpenCLPasses/UnreachableHandling/UnreachableHandling.hpp"
 #include "Compiler/Optimizer/OpenCLPasses/WIFuncs/WIFuncResolution.hpp"
-#include "Compiler/Optimizer/OpenCLPasses/ScalarArgAsPointer/ScalarArgAsPointer.hpp"
 #include "Compiler/Optimizer/OpenCLPasses/GEPLoopStrengthReduction/GEPLoopStrengthReduction.hpp"
 #include "Compiler/Optimizer/OpenCLPasses/StackOverflowDetection/StackOverflowDetection.hpp"
 #include "Compiler/Optimizer/OpenCLPasses/SubGroupReductionPattern/SubGroupReductionPattern.hpp"
 #include "Compiler/Optimizer/MCSOptimization.hpp"
 #include "Compiler/Optimizer/GatingSimilarSamples.hpp"
 #include "Compiler/Optimizer/IntDivConstantReduction.hpp"
+#include "Compiler/Optimizer/IntDivRemIncrementReduction.hpp"
 #include "Compiler/Optimizer/IntDivRemCombine.hpp"
 #include "Compiler/Optimizer/SynchronizationObjectCoalescing.hpp"
 #include "Compiler/Optimizer/BarrierControlFlowOptimization.hpp"
 #include "Compiler/Optimizer/RuntimeValueVectorExtractPass.h"
 #include "Compiler/Optimizer/WaveShuffleIndexSinking.hpp"
 #include "Compiler/Optimizer/WaveAllJointReduction.hpp"
+#include "Compiler/Optimizer/InstructionHoistingOptimization.hpp"
 #include "Compiler/MetaDataApi/PurgeMetaDataUtils.hpp"
 #include "Compiler/HandleLoadStoreInstructions.hpp"
 #include "Compiler/CustomSafeOptPass.hpp"
@@ -122,7 +123,6 @@ SPDX-License-Identifier: MIT
 #include "Compiler/WorkaroundAnalysisPass.h"
 #include "Compiler/MetaDataApi/MetaDataApi.h"
 #include "Compiler/MetaDataUtilsWrapper.h"
-#include "Compiler/MetaDataApi/IGCMetaDataHelper.h"
 #include "Compiler/CodeGenContextWrapper.hpp"
 #include "Compiler/DynamicTextureFolding.h"
 #include "Compiler/SampleMultiversioning.hpp"
@@ -130,18 +130,13 @@ SPDX-License-Identifier: MIT
 #include "Compiler/GenRotate.hpp"
 #include "Compiler/Optimizer/Scalarizer.h"
 #include "Compiler/RemoveCodeAssumptions.hpp"
-#include "common/debug/Debug.hpp"
 #include "common/igc_regkeys.hpp"
 #include "common/debug/Dump.hpp"
-#include "common/MemStats.h"
-#include <iStdLib/utility.h>
 #include "common/LLVMWarningsPush.hpp"
 #include "llvm/Config/llvm-config.h"
-#include "llvm/ADT/PostOrderIterator.h"
 #include <llvm/IR/DebugInfo.h>
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Verifier.h>
-#include <llvm/Analysis/CFGPrinter.h>
 #include <llvm/Analysis/Passes.h>
 #include <llvm/Pass.h>
 #include <llvm/IR/LegacyPassManager.h>
@@ -149,25 +144,15 @@ SPDX-License-Identifier: MIT
 #include <llvm/Transforms/IPO/AlwaysInliner.h>
 #include <llvm/Transforms/Scalar.h>
 #include <llvm/Transforms/Scalar/GVN.h>
-#include <llvm/IR/Module.h>
 #include <llvm/IR/Function.h>
-#include <llvm/Linker/Linker.h>
 #include <llvm/Analysis/ScopedNoAliasAA.h>
 #include <llvm/Analysis/TargetLibraryInfo.h>
-#include <llvm/ADT/StringExtras.h>
-#include <llvm/IRReader/IRReader.h>
-#include <llvm/Support/MathExtras.h>
-#include <llvm/Support/MemoryBuffer.h>
 #include <llvm/Support/ErrorHandling.h>
-#include <llvm/Support/SourceMgr.h>
 #include <llvm/Transforms/IPO/FunctionAttrs.h>
 #include <llvm/Transforms/Utils.h>
-#include <llvm/Transforms/Scalar/InstSimplifyPass.h>
 #include <llvm/Transforms/Scalar.h>
 #include <llvm/Bitcode/BitcodeWriter.h>
-#include <llvm/Transforms/InstCombine/InstCombine.h>
 #include "common/LLVMWarningsPop.hpp"
-#include <sstream>
 #include "Compiler/CISACodeGen/PatternMatchPass.hpp"
 #include "Compiler/CISACodeGen/EmitVISAPass.hpp"
 #include "Compiler/CISACodeGen/CoalescingEngine.hpp"
@@ -175,9 +160,9 @@ SPDX-License-Identifier: MIT
 #include "Compiler/GenRotate.hpp"
 #include "Compiler/SampleCmpToDiscard.h"
 #include "Compiler/Optimizer/IGCInstCombiner/IGCInstructionCombining.hpp"
-#include "DebugInfo.hpp"
 #include "AdaptorCommon/RayTracing/RayTracingPasses.hpp"
 #include "AdaptorCommon/RayTracing/RayTracingAddressSpaceAliasAnalysis.h"
+#include "AdaptorCommon/RayTracing/API/RayDispatchGlobalData.h"
 #include "Compiler/SamplerPerfOptPass.hpp"
 #include "Compiler/CISACodeGen/HalfPromotion.h"
 #include "Compiler/CISACodeGen/CapLoopIterationsPass.h"
@@ -241,6 +226,15 @@ void AddAnalysisPasses(CodeGenContext& ctx, IGCPassManager& mpm)
             mpm.add(createMemOpt2Pass(16));
     }
 
+    if (!isOptDisabled) {
+        mpm.add(createSplitLoadsPass());
+    }
+
+
+    if (IGC_IS_FLAG_ENABLED(EnableScalarPhisMerger) && ctx.type == ShaderType::OPENCL_SHADER) {
+        mpm.add(new MergeScalarPhisPass());
+    }
+
     // only limited code-sinking to several shader-type
     // vs input has the URB-reuse issue to be resolved.
     // Also need to understand the performance benefit better.
@@ -254,6 +248,10 @@ void AddAnalysisPasses(CodeGenContext& ctx, IGCPassManager& mpm)
              && ctx.m_instrTypes.numInsts >= IGC_GET_FLAG_VALUE(CodeLoopSinkingMinSize))
         {
             mpm.add(new CodeLoopSinking());
+        }
+        if (IGC_IS_FLAG_DISABLED(DisableCodeScheduling) && (ctx.type == ShaderType::OPENCL_SHADER))
+        {
+            mpm.add(new CodeScheduling());
         }
     }
 
@@ -315,7 +313,7 @@ void AddAnalysisPasses(CodeGenContext& ctx, IGCPassManager& mpm)
         mpm.add(createPromoteMemoryToRegisterPass());
         if (IGC_IS_FLAG_DISABLED(DisableMergeAllocasPrivateMemory) && ctx.type == ShaderType::OPENCL_SHADER)
         {
-            mpm.add(createMergeAllocas());
+            mpm.add(createMergeAllocasOCL());
         }
         if (ctx.type == ShaderType::OPENCL_SHADER &&
             !isOptDisabled &&
@@ -410,15 +408,6 @@ static void UpdateInstTypeHint(CodeGenContext& ctx)
 
 // forward declaration
 llvm::ModulePass* createPruneUnusedArgumentsPass();
-
-static bool useStatelessToStateful(CodeGenContext& ctx)
-{
-    return (ctx.m_instrTypes.hasLoadStore &&
-        ctx.m_DriverInfo.SupportsStatelessToStatefulBufferTransformation() &&
-        !ctx.getModuleMetaData()->compOpt.GreaterThan4GBBufferRequired &&
-        IGC_IS_FLAG_ENABLED(EnableStatelessToStateful) &&
-        !ctx.m_instrTypes.hasInlineAsmPointerAccess);
-}
 
 void AddLegalizationPasses(CodeGenContext& ctx, IGCPassManager& mpm, PSSignature* pSignature)
 {
@@ -712,7 +701,7 @@ void AddLegalizationPasses(CodeGenContext& ctx, IGCPassManager& mpm, PSSignature
     {
         if (IGC_IS_FLAG_DISABLED(DisableMergeAllocasPrivateMemory) && ctx.type == ShaderType::OPENCL_SHADER)
         {
-            mpm.add(createMergeAllocas());
+            mpm.add(createMergeAllocasOCL());
         }
         if (ctx.type == ShaderType::OPENCL_SHADER &&
             !isOptDisabled &&
@@ -750,7 +739,7 @@ void AddLegalizationPasses(CodeGenContext& ctx, IGCPassManager& mpm, PSSignature
             mpm.add(createPrepareLoadsStoresPass());
         }
 
-        // run AdvMemOpt and MemOPt back-to-back so that we only
+        // run AdvMemOpt and MemOPt back-to-back so that we only
         // need to run WIAnalysis once
         if (IGC_IS_FLAG_ENABLED(EnableAdvMemOpt))
             mpm.add(createAdvMemOptPass());
@@ -802,7 +791,7 @@ void AddLegalizationPasses(CodeGenContext& ctx, IGCPassManager& mpm, PSSignature
         }
     }
 
-    if (!isOptDisabled && useStatelessToStateful(ctx))
+    if (!isOptDisabled && ctx.useStatelessToStateful())
     {
         mpm.add(new StatelessToStateful(TargetAddressing::BINDFUL));
     }
@@ -993,16 +982,17 @@ void AddLegalizationPasses(CodeGenContext& ctx, IGCPassManager& mpm, PSSignature
         mpm.add(createVectorBitCastOptPass());
     }
 
-    bool csForceUniformSurfaceSampler = ( ctx.type == ShaderType::COMPUTE_SHADER && ctx.getModuleMetaData()->csInfo.forceUniformSurfaceSampler );
-    bool csForceUniformBuffer = ( ctx.type == ShaderType::COMPUTE_SHADER && ctx.getModuleMetaData()->csInfo.forceUniformBuffer );
+    bool forceUniformSurfaceSampler = ctx.getModuleMetaData()->compOpt.ForceUniformSurfaceSampler;
+    bool forceUniformBuffer = ctx.getModuleMetaData()->compOpt.ForceUniformBuffer;
+
     if (ctx.m_instrTypes.hasUniformAssumptions ||
         IGC_IS_FLAG_ENABLED(ForceUniformSurfaceSampler) ||
-        csForceUniformSurfaceSampler ||
+        forceUniformSurfaceSampler ||
         IGC_IS_FLAG_ENABLED(ForceUniformBuffer) ||
-        csForceUniformBuffer ) {
+        forceUniformBuffer ) {
         mpm.add(new UniformAssumptions(
-                        IGC_IS_FLAG_ENABLED(ForceUniformSurfaceSampler) || csForceUniformSurfaceSampler,
-                        IGC_IS_FLAG_ENABLED(ForceUniformBuffer) || csForceUniformBuffer )
+                        IGC_IS_FLAG_ENABLED(ForceUniformSurfaceSampler) || forceUniformSurfaceSampler,
+                        IGC_IS_FLAG_ENABLED(ForceUniformBuffer) || forceUniformBuffer )
         );
     }
 
@@ -1466,6 +1456,7 @@ void OptimizeIR(CodeGenContext* const pContext)
                                FastestS1Options(pContext) == FCEXP_NO_EXPRIMENT ||
                                pContext->getModuleMetaData()->compOpt.DisableFastestGopt));
 
+
         // EnableBarrierControlFlowOptimizationPass: enable BCF optimization
         // UseBarrierControlFlowOptimization: UMD AIL option to use BCF optimization
         // supportBarrierControlFlowOptimization: API control (D3D12, Vulkan, OCL)
@@ -1478,7 +1469,6 @@ void OptimizeIR(CodeGenContext* const pContext)
         {
             mpm.add(createBarrierControlFlowOptimization());
         }
-
 
         if (pContext->m_instrTypes.hasMultipleBB && !disableGOPT)
         {
@@ -1510,7 +1500,7 @@ void OptimizeIR(CodeGenContext* const pContext)
                 bool runGEPLSR = IGC_IS_FLAG_ENABLED(EnableGEPLSR) &&
                     pContext->type == ShaderType::OPENCL_SHADER &&
                     pContext->platform.getPlatformInfo().eProductFamily == IGFX_PVC &&
-                    !useStatelessToStateful(*pContext) &&
+                    !pContext->useStatelessToStateful() &&
                     pContext->m_retryManager.IsFirstTry();
 
                 if (runGEPLSR && IGC_IS_FLAG_DISABLED(RunGEPLSRAfterLICM))
@@ -1567,9 +1557,15 @@ void OptimizeIR(CodeGenContext* const pContext)
                 {
                     LoopUnrollThreshold = IGC_GET_FLAG_VALUE(SetLoopUnrollThreshold);
                 }
+                else if (pContext->getModuleMetaData()->compOpt.SetLoopUnrollThreshold > 0)
+                {
+                    LoopUnrollThreshold = pContext->getModuleMetaData()->compOpt.SetLoopUnrollThreshold;
+                }
 
                 // if the shader contains indexable_temp, we'll keep unroll
-                bool unroll = IGC_IS_FLAG_DISABLED(DisableLoopUnroll);
+                bool unroll =
+                    !pContext->getModuleMetaData()->compOpt.DisableLoopUnroll &&
+                    IGC_IS_FLAG_DISABLED(DisableLoopUnroll);
                 bool hasIndexTemp = (pContext->m_indexableTempSize[0] > 0);
                 bool disableLoopUnrollStage1 =
                     IsStage1FastestCompile(pContext->m_CgFlag, pContext->m_StagingCtx) &&
@@ -1595,7 +1591,10 @@ void OptimizeIR(CodeGenContext* const pContext)
                 }
 
                 // Second unrolling with the same threshold.
-                if (LoopUnrollThreshold > 0 && !IGC_IS_FLAG_ENABLED(DisableLoopUnroll))
+                unroll =
+                    !pContext->getModuleMetaData()->compOpt.DisableLoopUnroll &&
+                    IGC_IS_FLAG_DISABLED(DisableLoopUnroll);
+                if (LoopUnrollThreshold > 0 && unroll)
                 {
                     mpm.add(llvm::createLoopUnrollPass(2, false, false, -1, -1,
                                                        -1, -1, -1, -1));
@@ -1623,6 +1622,8 @@ void OptimizeIR(CodeGenContext* const pContext)
                     }
                 }
             }
+
+            mpm.add(new SplitStructurePhisPass());
 
             if (IGC_IS_FLAG_ENABLED(EnableRemoveLoopDependency))
             {
@@ -1771,9 +1772,15 @@ void OptimizeIR(CodeGenContext* const pContext)
                     {
                         LoopUnrollThreshold = IGC_GET_FLAG_VALUE(SetLoopUnrollThreshold);
                     }
+                    else if (pContext->getModuleMetaData()->compOpt.SetLoopUnrollThreshold > 0)
+                    {
+                        LoopUnrollThreshold = pContext->getModuleMetaData()->compOpt.SetLoopUnrollThreshold;
+                    }
 
                     // if the shader contains indexable_temp, we'll keep unroll
-                    bool unroll = IGC_IS_FLAG_DISABLED(DisableLoopUnroll);
+                    bool unroll =
+                        !pContext->getModuleMetaData()->compOpt.DisableLoopUnroll &&
+                        IGC_IS_FLAG_DISABLED(DisableLoopUnroll);
                     bool hasIndexTemp = (pContext->m_indexableTempSize[0] > 0);
                     // Enable loop unrolling for stage 1 for now due to persisting regressions
                     bool disableLoopUnrollStage1 =
@@ -1835,6 +1842,11 @@ void OptimizeIR(CodeGenContext* const pContext)
             getFunctionControl(pContext) == FLAG_FCALL_DEFAULT)
         {
             mpm.add(createEstimateFunctionSizePass(EstimateFunctionSize::AL_Kernel));
+            if (IGC_IS_FLAG_ENABLED(EnableLargeFunctionCallMerging))
+            {
+                mpm.add(new CallMerger());
+            }
+            mpm.add(createEstimateFunctionSizePass(EstimateFunctionSize::AL_Kernel));
             mpm.add(createSubroutineInlinerPass());
         }
         else
@@ -1890,6 +1902,10 @@ void OptimizeIR(CodeGenContext* const pContext)
             // more efficient sequences of multiplies, shifts, and adds
             mpm.add(createIntDivConstantReductionPass());
         }
+
+        if (IGC_IS_FLAG_ENABLED(EnableIntDivRemIncrementReduction)) {
+          mpm.add(createIntDivRemIncrementReductionPass());
+        }
         GFX_ONLY_PASS { mpm.add(createMergeMemFromBranchOptPass()); }
 
         if (IGC_IS_FLAG_DISABLED(DisableLoadSinking) &&
@@ -1919,7 +1935,6 @@ void OptimizeIR(CodeGenContext* const pContext)
             mpm.add(createDeadPHINodeEliminationPass());
         }
 
-
         if (IGC_IS_FLAG_ENABLED(EnableMadLoopSlice)) {
             mpm.add(createMadLoopSlicePass());
         }
@@ -1930,6 +1945,7 @@ void OptimizeIR(CodeGenContext* const pContext)
             if (IGC_IS_FLAG_ENABLED(VectorizerCheckScalarizer))
                 mpm.add(createScalarizerPass(SelectiveScalarizer::Auto));
         }
+
 
         mpm.run(*pContext->getModule());
     } // end scope

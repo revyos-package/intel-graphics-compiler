@@ -1,6 +1,6 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (C) 2017-2023 Intel Corporation
+Copyright (C) 2017-2025 Intel Corporation
 
 SPDX-License-Identifier: MIT
 
@@ -475,7 +475,7 @@ namespace IGC
         unsigned int NOSBufferSize = 0;
         unsigned int ConstantBufferLoaded = 0;
         uint64_t     UavLoaded = 0;
-        unsigned int ShaderResourceLoaded[4];
+        unsigned int ShaderResourceLoaded[4] = {};
         unsigned int RenderTargetLoaded = 0;
 
         bool         hasControlFlow = false;
@@ -493,8 +493,10 @@ namespace IGC
         SSimplePushInfo simplePushInfoArr[g_c_maxNumberOfBufferPushed];
 
         uint64_t    SIMDInfo = 0;
-        void* m_StagingCtx;
-        bool m_RequestStage2;
+        void* m_StagingCtx = nullptr;
+        bool m_RequestStage2 = false;
+
+        uint numSyncRTStacks = 0;
     };
 
     /// Gen10+, corresponds to 3DSTATE_VF_SGVS_2 as described below
@@ -522,6 +524,7 @@ namespace IGC
         uint32_t ShaderStackSize = 0;
         CallableShaderTypeMD ShaderType = NumberOfCallableShaderTypes;
         bool isContinuation = false;
+        uint32_t NumCoherenceHintBits = 0;
         // if 'isContinuation' is true, this will contain the name of the
         // original shader.
         std::string ParentName;
@@ -565,6 +568,7 @@ namespace IGC
         // encounters a null shader. It is optional because there is
         // no need to compile it for collection state objects.
         std::optional<SBindlessProgram> callStackHandler;
+
 
         typedef llvm::SmallVector<SBindlessProgram, 8> BindlessShaderVec;
         // These are the raygen shaders
@@ -774,6 +778,7 @@ namespace IGC
         bool AllowConstantCoalescing(llvm::Function* F = nullptr) const;
         bool AllowLargeGRF(llvm::Function* F = nullptr) const;
         bool ForceIndirectCallsInSyncRT() const;
+        bool AllowRaytracingSpillCompaction() const;
         bool AllowLoadSinking(llvm::Function* F = nullptr) const;
         void SetFirstStateId(int id);
         bool IsFirstTry() const;
@@ -897,6 +902,11 @@ namespace IGC
         /// input: hash key
         ShaderHash    hash;
         ShaderType    type;
+        // This variable should probably only be set if there is one shader in
+        // the module. For example, raytracing and OpenCL modules can have an
+        // arbitrary number of shaders, so it's unclear what setting this would
+        // mean in that case.
+        std::string   shaderName = "";
         /// input: Platform features supported
         const CPlatform& platform;
         /// input: binding table layout used by the driver
@@ -909,11 +919,6 @@ namespace IGC
         /// output: list of buffer IDs which are promoted to direct AS
         // Map of promoted buffer ids with their respective buffer offsets if needed. Buffer offset will be -1 if no need of buffer offset
         std::map<unsigned, int> m_buffersPromotedToDirectAS;
-        // float 16, float32 and float64 denorm mode
-        Float_DenormMode    m_floatDenormMode16 = FLOAT_DENORM_FLUSH_TO_ZERO;
-        Float_DenormMode    m_floatDenormMode32 = FLOAT_DENORM_FLUSH_TO_ZERO;
-        Float_DenormMode    m_floatDenormMode64 = FLOAT_DENORM_FLUSH_TO_ZERO;
-        Float_DenormMode    m_floatDenormModeBFTF = FLOAT_DENORM_FLUSH_TO_ZERO;
 
         PushConstantMode m_pushConstantMode = PushConstantMode::DEFAULT;
 
@@ -1035,6 +1040,7 @@ namespace IGC
         std::map<std::string, uint64_t> inlineProgramScopeGlobalOffsets;
         std::vector<std::string> entry_names;
         uint m_spillAllowed = 0;
+        uint m_spillAllowedFor256GRF = 0;
     private:
         //For storing error message
         std::stringstream oclErrorMessage;
@@ -1291,9 +1297,27 @@ namespace IGC
             return false;
         }
 
-        bool hasSpills(uint mscratchSpaceUsedBySpills)
+        bool hasSpills(uint mscratchSpaceUsedBySpills, uint numGRF)
         {
-            return (mscratchSpaceUsedBySpills > m_spillAllowed);
+            if (numGRF == 256 && m_spillAllowedFor256GRF)
+                return (mscratchSpaceUsedBySpills > m_spillAllowedFor256GRF);
+            else
+                return (mscratchSpaceUsedBySpills > m_spillAllowed);
+        }
+
+        bool useStatelessToStateful()
+        {
+            return (m_instrTypes.hasLoadStore &&
+                    m_DriverInfo.SupportsStatelessToStatefulBufferTransformation() &&
+                    !getModuleMetaData()->compOpt.GreaterThan4GBBufferRequired &&
+                    IGC_IS_FLAG_ENABLED(EnableStatelessToStateful) &&
+                    !m_instrTypes.hasInlineAsmPointerAccess);
+        }
+
+        bool supportsVRT() const
+        {
+            return platform.supportsVRT() && m_DriverInfo.supportsVRT() &&
+                (getModuleMetaData()->compOpt.EnableVRT || IGC_IS_FLAG_ENABLED(EnableVRT));
         }
     };
 

@@ -38,6 +38,7 @@ public:
     void FixFunctionBody(llvm::Module& M);
     void FixFunctionUsers(llvm::Module& M);
     void FixCallInstruction(llvm::Module& M, llvm::CallInst* callInst);
+    void CopyAttributesAndAdjustForSkippedFunctionArgs(llvm::Function* pFunc, llvm::Function* pNewFunc, bool functionHasPromotableSRetArg);
 
     virtual llvm::StringRef getPassName() const
     {
@@ -45,5 +46,5 @@ public:
     }
 
 private:
-    std::map<llvm::Function*, llvm::Function*> oldToNewFuncMap;
+    llvm::MapVector<llvm::Function*, llvm::Function*> oldToNewFuncMap;
 };

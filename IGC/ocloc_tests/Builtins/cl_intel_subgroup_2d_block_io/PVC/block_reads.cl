@@ -12,7 +12,7 @@ SPDX-License-Identifier: MIT
 // RUN: -DINPUT_TYPE=ushort -DOUTPUT_TYPE=ushort -DFUNCTION=intel_sub_group_2d_block_read_8b_1r32x2c -DDST_ARRAY_EL_TYPE=ushort -DDST_ARRAY_EL_NUM=2" \
 // RUN: -internal_options "-cl-ext=-all,+cl_intel_subgroup_2d_block_io" | FileCheck %s --check-prefix=CHECK-VISAASM-8B-1R-32X2C
 
-// CHECK-VISAASM-8B-1R-32X2C: lsc_load_block2d.ugm (M1, 1)  V{{[0-9]+}}:d8.2x32x1nn  flat[{{.+}},0x1FF,0x2D,0x1FF,V{{[0-9]+}},V{{[0-9]+}}
+// CHECK-VISAASM-8B-1R-32X2C: lsc_load_block2d.ugm (M1, 1)  V{{[0-9]+}}:d8.64x1nn  flat[{{.+}},0x1FF,0x2D,0x1FF,V{{[0-9]+}},V{{[0-9]+}}
 
 // RUN: ocloc compile -file %s -device pvc -options "-igc_opts 'DumpVISAASMToConsole=1' \
 // RUN: -DINPUT_TYPE=ushort -DOUTPUT_TYPE=ushort -DFUNCTION=intel_sub_group_2d_block_read_8b_2r32x2c -DDST_ARRAY_EL_TYPE=ushort2 -DDST_ARRAY_EL_NUM=2" \
@@ -102,7 +102,7 @@ SPDX-License-Identifier: MIT
 // RUN: -DINPUT_TYPE=ushort -DOUTPUT_TYPE=ushort -DFUNCTION=intel_sub_group_2d_block_read_16b_1r16x2c -DDST_ARRAY_EL_TYPE=ushort -DDST_ARRAY_EL_NUM=2" \
 // RUN: -internal_options "-cl-ext=-all,+cl_intel_subgroup_2d_block_io" | FileCheck %s --check-prefix=CHECK-VISAASM-16B-1R-16X2C
 
-// CHECK-VISAASM-16B-1R-16X2C: lsc_load_block2d.ugm (M1, 1)  V{{[0-9]+}}:d16.2x16x1nn  flat[{{.+}},0x1FF,0x2D,0x1FF,V{{[0-9]+}},V{{[0-9]+}}
+// CHECK-VISAASM-16B-1R-16X2C: lsc_load_block2d.ugm (M1, 1)  V{{[0-9]+}}:d16.32x1nn  flat[{{.+}},0x1FF,0x2D,0x1FF,V{{[0-9]+}},V{{[0-9]+}}
 
 // RUN: ocloc compile -file %s -device pvc -options "-igc_opts 'DumpVISAASMToConsole=1' \
 // RUN: -DINPUT_TYPE=ushort -DOUTPUT_TYPE=ushort -DFUNCTION=intel_sub_group_2d_block_read_16b_2r16x2c -DDST_ARRAY_EL_TYPE=ushort2 -DDST_ARRAY_EL_NUM=2" \
@@ -326,11 +326,17 @@ SPDX-License-Identifier: MIT
 
 // CHECK-VISAASM-TRANSFORM-16B-16R-16X2C: lsc_load_block2d.ugm (M1, 1)  V{{[0-9]+}}:d16.2x16x16nt  flat[{{.+}},0x1FF,0x2D,0x1FF,V{{[0-9]+}},V{{[0-9]+}}
 
-// RUN: ocloc compile -file %s -device pvc -options "-igc_opts 'DumpVISAASMToConsole=1' \
+// RUN: ocloc compile -file %s -device pvc -options "-igc_opts 'ForceOCLSIMDWidth=16,DumpVISAASMToConsole=1' \
 // RUN: -DINPUT_TYPE=ushort -DOUTPUT_TYPE=uint -DFUNCTION=intel_sub_group_2d_block_read_transform_16b_32r16x2c -DDST_ARRAY_EL_TYPE=uint8 -DDST_ARRAY_EL_NUM=4" \
-// RUN: -internal_options "-cl-ext=-all,+cl_intel_subgroup_2d_block_io" | FileCheck %s --check-prefix=CHECK-VISAASM-TRANSFORM-16B-32R-16X2C
+// RUN: -internal_options "-cl-ext=-all,+cl_intel_subgroup_2d_block_io" | FileCheck %s --check-prefix=CHECK-VISAASM-TRANSFORM-16B-32R-16X2C-SIMD16
 
-// CHECK-VISAASM-TRANSFORM-16B-32R-16X2C: lsc_load_block2d.ugm (M1, 1)  V{{[0-9]+}}:d16.2x16x32nt  flat[{{.+}},0x1FF,0x2D,0x1FF,V{{[0-9]+}},V{{[0-9]+}}
+// CHECK-VISAASM-TRANSFORM-16B-32R-16X2C-SIMD16: lsc_load_block2d.ugm (M1, 1)  V{{[0-9]+}}:d16.2x16x32nt  flat[{{.+}},0x1FF,0x2D,0x1FF,V{{[0-9]+}},V{{[0-9]+}}
+
+// RUN: ocloc compile -file %s -device pvc -options "-igc_opts 'ForceOCLSIMDWidth=32,DumpVISAASMToConsole=1' \
+// RUN: -DINPUT_TYPE=ushort -DOUTPUT_TYPE=uint -DFUNCTION=intel_sub_group_2d_block_read_transform_16b_32r16x2c -DDST_ARRAY_EL_TYPE=uint8 -DDST_ARRAY_EL_NUM=4" \
+// RUN: -internal_options "-cl-ext=-all,+cl_intel_subgroup_2d_block_io" | FileCheck %s --check-prefix=CHECK-VISAASM-TRANSFORM-16B-32R-16X2C-SIMD32
+
+// CHECK-VISAASM-TRANSFORM-16B-32R-16X2C-SIMD32: lsc_load_block2d.ugm (M1, 1)  V{{[0-9]+}}:d16.2x16x32nt  flat[{{.+}},0x1FF,0x2D,0x1FF,V{{[0-9]+}},V{{[0-9]+}}
 
 __attribute__((intel_reqd_sub_group_size(16)))
 kernel void test_default(global INPUT_TYPE* input, const global int2* coord, global OUTPUT_TYPE* output) {

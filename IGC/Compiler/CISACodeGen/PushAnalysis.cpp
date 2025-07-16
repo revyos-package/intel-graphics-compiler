@@ -27,7 +27,6 @@ SPDX-License-Identifier: MIT
 #include "LLVM3DBuilder/MetadataBuilder.h"
 #include "Compiler/MetaDataUtilsWrapper.h"
 #include "common/debug/Debug.hpp"
-#include <list>
 #include "Probe/Assertion.h"
 
 /***********************************************************************************
@@ -1000,17 +999,13 @@ namespace IGC
         auto& inputs = m_context->getModuleMetaData()->pushInfo.inputs;
         typedef const std::map<unsigned int, SInputDesc>::value_type& inputPairType;
         unsigned int largestIndex = 0;
-        if (m_context->m_DriverInfo.EnableSimplePushRestriction())
-        {
-            auto largestPair = std::max_element(inputs.begin(), inputs.end(),
-                [](inputPairType a, inputPairType b) { return a.second.index < b.second.index; });
-            largestIndex = largestPair != inputs.end() ? largestPair->second.index : 0;
-        }
-        unsigned int maxPushedGRFs = 96;
-        if (m_context->platform.isCoreChildOf(IGFX_XE3_CORE))
-        {
-            maxPushedGRFs *= 2;
-        }
+        auto largestPair = std::max_element(inputs.begin(), inputs.end(),
+            [](inputPairType a, inputPairType b) { return a.second.index < b.second.index; });
+        largestIndex = largestPair != inputs.end() ? largestPair->second.index : 0;
+
+        uint32_t maxPushedGRFs = m_context->getNumGRFPerThread(false) ? (3 * m_context->getNumGRFPerThread(false)) / 4 :
+            m_context->platform.supportsVRT() ? ((3 * 256) / 4) : ((3 * 128) / 4);
+
         if (largestIndex >= maxPushedGRFs)
         {
             return;
@@ -1097,8 +1092,9 @@ namespace IGC
         {
             // Priority order of how the push constant mode is determined:
             //   1.) Registry Keys
-            //   2.) Compiler Input
-            //   3.) Default Logic dependent on platform and attributes of the shader
+            //   2.) UMD Input
+            //   3.) Compiler Input
+            //   4.) Default Logic dependent on platform and attributes of the shader
 
             // 1.) Check registry keys
             if(pushConstantMode == PushConstantMode::DEFAULT)
@@ -1109,13 +1105,23 @@ namespace IGC
                 }
             }
 
-            // 2.) Check compiler input
+            // 2.) Check UMD input
+            if (pushConstantMode == PushConstantMode::DEFAULT)
+            {
+                uint32_t val = m_context->getModuleMetaData()->compOpt.ForcePushConstantMode;
+                if (val != 0)
+                {
+                    pushConstantMode = (PushConstantMode)val;
+                }
+            }
+
+            // 3.) Check compiler input
             if (pushConstantMode == PushConstantMode::DEFAULT)
             {
                 pushConstantMode = m_context->m_pushConstantMode;
             }
 
-            // 3.) Default Logic dependent on platform and attributes of the shader
+            // 4.) Default Logic dependent on platform and attributes of the shader
             if (pushConstantMode == PushConstantMode::DEFAULT)
             {
                 if (m_context->m_DriverInfo.SupportsSimplePushOnly())
@@ -1607,20 +1613,6 @@ namespace IGC
         m_pMdUtils = getAnalysis<MetaDataUtilsWrapper>().getMetaDataUtils();
         m_pullConstantHeuristics = &getAnalysis<PullConstantHeuristics>();
         m_context = getAnalysis<CodeGenContextWrapper>().getCodeGenContext();
-
-        if (m_context->platform.isCoreChildOf(IGFX_XE3_CORE))
-        {
-            // VRT allows us to have 256GRFs, so we can double the number of pushed inputs
-            MaxNumOfPushedInputs = 24 * 2;
-            m_pMaxNumOfVSPushedInputs = 30;
-            m_pMaxNumOfDSPushedInputs = 24 * 2; // 48 * vec4 == 192 GRF == 3/4 256 GRF
-        }
-        else
-        {
-            MaxNumOfPushedInputs = 24;
-            m_pMaxNumOfVSPushedInputs = 24;
-            m_pMaxNumOfDSPushedInputs = 24;
-        }
 
         MapList<Function*, Function*> funcsMapping;
         bool retValue = false;

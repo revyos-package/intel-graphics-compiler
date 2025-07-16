@@ -86,6 +86,7 @@ static const char* const dep_str[] = {
 static const WIAnalysis::WIDependancy
 add_conversion[WIAnalysis::NumDeps][WIAnalysis::NumDeps] = {
     /*          UGL, UWG, UTH, SEQ, PTR, STR, RND */
+// clang-format off
     /* UGL */  {UGL, UWG, UTH, SEQ, PTR, STR, RND},
     /* UWG */  {UWG, UWG, UTH, SEQ, PTR, STR, RND},
     /* UTH */  {UTH, UTH, UTH, SEQ, PTR, STR, RND},
@@ -93,9 +94,11 @@ add_conversion[WIAnalysis::NumDeps][WIAnalysis::NumDeps] = {
     /* PTR */  {PTR, PTR, PTR, STR, STR, STR, RND},
     /* STR */  {STR, STR, STR, STR, STR, STR, RND},
     /* RND */  {RND, RND, RND, RND, RND, RND, RND}
+// clang-format on
 };
 
 static const WIAnalysis::WIDependancy
+// clang-format off
 sub_conversion[WIAnalysis::NumDeps][WIAnalysis::NumDeps] = {
     /*          UGL, UWG, UTH, SEQ, PTR, STR, RND */
     /* UGL */  {UGL, UWG, UTH, STR, RND, RND, RND},
@@ -105,11 +108,13 @@ sub_conversion[WIAnalysis::NumDeps][WIAnalysis::NumDeps] = {
     /* PTR */  {PTR, PTR, PTR, RND, RND, RND, RND},
     /* STR */  {STR, STR, STR, RND, RND, RND, RND},
     /* RND */  {RND, RND, RND, RND, RND, RND, RND}
+// clang-format on
 };
 
 
 static const WIAnalysis::WIDependancy
 mul_conversion[WIAnalysis::NumDeps][WIAnalysis::NumDeps] = {
+// clang-format off
     /*          UGL, UWG, UTH, SEQ, PTR, STR, RND */
     /* UGL */  {UGL, UWG, UTH, STR, STR, STR, RND},
     /* UWG */  {UWG, UWG, UTH, STR, STR, STR, RND},
@@ -118,11 +123,13 @@ mul_conversion[WIAnalysis::NumDeps][WIAnalysis::NumDeps] = {
     /* PTR */  {STR, STR, STR, RND, RND, RND, RND},
     /* STR */  {STR, STR, STR, RND, RND, RND, RND},
     /* RND */  {RND, RND, RND, RND, RND, RND, RND}
+// clang-format on
 };
 
 // select is to have a weaker dep of two
 static const WIAnalysis::WIDependancy
 select_conversion[WIAnalysis::NumDeps][WIAnalysis::NumDeps] = {
+// clang-format off
     /*          UGL, UWG, UTH, SEQ, PTR, STR, RND */
     /* UGL */  {UGL, UWG, UTH, STR, STR, STR, RND},
     /* UWG */  {UWG, UWG, UTH, STR, STR, STR, RND},
@@ -131,10 +138,12 @@ select_conversion[WIAnalysis::NumDeps][WIAnalysis::NumDeps] = {
     /* PTR */  {STR, STR, STR, STR, PTR, STR, RND},
     /* STR */  {STR, STR, STR, STR, STR, STR, RND},
     /* RND */  {RND, RND, RND, RND, RND, RND, RND}
+// clang-format on
 };
 
 static const WIAnalysis::WIDependancy
 gep_conversion[WIAnalysis::NumDeps][WIAnalysis::NumDeps] = {
+// clang-format off
     /* ptr\index UGL, UWG, UTH, SEQ, PTR, STR, RND */
     /* UGL */  {UGL, UWG, UTH, PTR, RND, RND, RND},
     /* UWG */  {UWG, UWG, UTH, PTR, RND, RND, RND},
@@ -143,6 +152,7 @@ gep_conversion[WIAnalysis::NumDeps][WIAnalysis::NumDeps] = {
     /* PTR */  {PTR, PTR, PTR, RND, RND, RND, RND},
     /* STR */  {RND, RND, RND, RND, RND, RND, RND},
     /* RND */  {RND, RND, RND, RND, RND, RND, RND}
+// clang-format on
 };
 
 // For better readability, the rank of a dependency is used to compare two dependencies
@@ -842,6 +852,7 @@ void WIAnalysisRunner::calculate_dep(const Value* val)
         else if (const VAArgInst* VAI = dyn_cast<VAArgInst>(inst))                  dep = calculate_dep(VAI);
 #if LLVM_VERSION_MAJOR >= 10
         else if (inst->getOpcode() == Instruction::FNeg)                            dep = calculate_dep_simple(inst);
+        else if (inst->getOpcode() == Instruction::Freeze)                          dep = calculate_dep_simple(inst);
 #endif
 
         if (m_func->hasFnAttribute("KMPLOCK"))
@@ -1451,6 +1462,8 @@ WIAnalysis::WIDependancy WIAnalysisRunner::calculate_dep(const CallInst* inst)
         GII_id == GenISAIntrinsic::GenISA_bf8tohf ||
         GII_id == GenISAIntrinsic::GenISA_srnd_ftohf ||
         GII_id == GenISAIntrinsic::GenISA_srnd_hftobf8 ||
+        GII_id == GenISAIntrinsic::GenISA_hftohf8 ||
+        GII_id == GenISAIntrinsic::GenISA_hf8tohf ||
         GII_id == GenISAIntrinsic::GenISA_ftotf32 ||
         GII_id == GenISAIntrinsic::GenISA_GlobalBufferPointer ||
         GII_id == GenISAIntrinsic::GenISA_LocalBufferPointer ||
@@ -1479,6 +1492,7 @@ WIAnalysis::WIDependancy WIAnalysisRunner::calculate_dep(const CallInst* inst)
         GII_id == GenISAIntrinsic::GenISA_vectorUniform ||
         GII_id == GenISAIntrinsic::GenISA_getR0 ||
         GII_id == GenISAIntrinsic::GenISA_getPayloadHeader ||
+        GII_id == GenISAIntrinsic::GenISA_getGlobalOffset ||
         GII_id == GenISAIntrinsic::GenISA_getWorkDim ||
         GII_id == GenISAIntrinsic::GenISA_getNumWorkGroups ||
         GII_id == GenISAIntrinsic::GenISA_getLocalSize ||
@@ -1502,7 +1516,10 @@ WIAnalysis::WIDependancy WIAnalysisRunner::calculate_dep(const CallInst* inst)
         GII_id == GenISAIntrinsic::GenISA_bitcastfromstruct ||
         GII_id == GenISAIntrinsic::GenISA_bitcasttostruct ||
         GII_id == GenISAIntrinsic::GenISA_LSC2DBlockCreateAddrPayload ||
-        GII_id == GenISAIntrinsic::GenISA_LSC2DBlockCopyAddrPayload)
+        GII_id == GenISAIntrinsic::GenISA_LSC2DBlockCopyAddrPayload ||
+        GII_id == GenISAIntrinsic::GenISA_PredicatedLoad ||
+        GII_id == GenISAIntrinsic::GenISA_PredicatedStore ||
+        GII_id == GenISAIntrinsic::GenISA_bfn)
     {
         switch (GII_id)
         {
@@ -1533,6 +1550,7 @@ WIAnalysis::WIDependancy WIAnalysisRunner::calculate_dep(const CallInst* inst)
             return WIAnalysis::UNIFORM_THREAD;
         case GenISAIntrinsic::GenISA_getR0:
         case GenISAIntrinsic::GenISA_getPayloadHeader:
+        case GenISAIntrinsic::GenISA_getGlobalOffset:
         case GenISAIntrinsic::GenISA_getWorkDim:
         case GenISAIntrinsic::GenISA_getNumWorkGroups:
         case GenISAIntrinsic::GenISA_getLocalSize:

@@ -45,8 +45,7 @@ public:
   CISA_IR_Builder(TARGET_PLATFORM platform, VISA_BUILDER_OPTION buildOption,
                   vISABuilderMode mode, int majorVersion, int minorVersion,
                   const WA_TABLE *pWaTable)
-      : mBuildOption(buildOption), m_builderMode(mode), m_mem(4096),
-        m_pWaTable(pWaTable) {
+      : mBuildOption(buildOption), m_builderMode(mode), m_pWaTable(pWaTable) {
     m_platformInfo = vISA::PlatformInfo::LookupPlatformInfo(platform);
     vISA_ASSERT(m_platformInfo != nullptr, "null m_platformInfo");
     m_header.major_version = majorVersion;
@@ -76,6 +75,9 @@ public:
   VISA_BUILDER_API int Compile(const char *isaasmFileName,
                                bool emit_visa_only = false) override;
 
+  VISA_BUILDER_API int GetuInt32Option(vISAOptions option) override {
+      return m_options.getuInt32Option(option);
+  }
   VISA_BUILDER_API void SetOption(vISAOptions option, bool val) override {
     m_options.setOption(option, val);
   }
@@ -625,7 +627,7 @@ public:
       VISA_opnd *offsets, VISA_opnd *dstSrc, int lineNum);
 
   bool CISA_create_lsc_untyped_inst(
-      VISA_opnd *pred, LSC_OP opcode, LSC_SFID sfid, LSC_CACHE_OPTS caching,
+      VISA_opnd *pred, LSC_OP opcode, LSC_SFID sfid, LSC_CACHE_OPTS caching, bool ov,
       VISA_Exec_Size execSize, VISA_EMask_Ctrl emask, LSC_ADDR addr,
       LSC_DATA_SHAPE dataShape,
       VISA_opnd *surface, unsigned surfaceIndex,
@@ -693,7 +695,7 @@ public:
 private:
   const vISA::PlatformInfo *m_platformInfo;
 
-  vISA::Mem_Manager m_mem;
+  vISA::Mem_Manager m_mem = 4096;
   const VISA_BUILDER_OPTION mBuildOption;
   // FIXME: we need to make 3D/media per kernel instead of per builder
   const vISABuilderMode m_builderMode;

@@ -6,7 +6,6 @@ SPDX-License-Identifier: MIT
 
 ============================= end_copyright_notice ===========================*/
 
-#include "IGC/common/StringMacros.hpp"
 #include "Compiler/Optimizer/OpenCLPasses/LSCFuncs/LSCFuncsResolution.hpp"
 #include "Compiler/Optimizer/OCLBIUtils.h"
 #include "Compiler/IGCPassSupport.h"
@@ -88,7 +87,7 @@ namespace {
         Instruction* CreateSubGroup2DBlockOperation(llvm::CallInst& CI, llvm::StringRef funcName, bool isRead);
 
         /// LSC Fence intrinsics call method
-        Instruction* CreateLSCFenceIntrinsicCallInst();
+        Instruction* CreateLSCFenceIntrinsicCallInst(CallInst& CI);
 
         Instruction* CreateLSCFenceEvictToMemory();
 
@@ -177,6 +176,7 @@ namespace {
         CodeGenContext* m_pCtx = nullptr;
         CallInst* m_pCurrInst = nullptr;
         Function* m_pCurrInstFunc = nullptr;
+        std::set<Instruction*> m_instsToErase{};
 
         // For verifying address payload for block 2d read/write.
         llvm::SmallVector<Instruction *, 32> m_lsc2dblock_readwrite;
@@ -278,6 +278,11 @@ bool LSCFuncsResolution::runOnFunction(Function &F)
     m_changed = false;
 
     visit(F);
+
+    for (auto* inst : m_instsToErase) {
+        inst->eraseFromParent();
+    }
+    m_instsToErase.clear();
 
     verifyBlock2DAddressPayload();
 
@@ -389,7 +394,7 @@ void LSCFuncsResolution::visitCallInst(CallInst &CI)
     }
     else if (FN.startswith(LSCFuncsResolution::PREFIX_LSC_FENCE)) {
         // LSC fence
-        lscCall = CreateLSCFenceIntrinsicCallInst();
+        lscCall = CreateLSCFenceIntrinsicCallInst(CI);
     } else {
         // not an LSC message, bail silently
         return;
@@ -405,7 +410,7 @@ void LSCFuncsResolution::visitCallInst(CallInst &CI)
     if (lscCall != nullptr) {
         lscCall->setDebugLoc(CI.getDebugLoc());
         CI.replaceAllUsesWith(lscCall);
-        CI.eraseFromParent();
+        m_instsToErase.insert(&CI);
 
         m_changed = true;
     }
@@ -950,6 +955,34 @@ Instruction* LSCFuncsResolution::CreateSubGroup2DBlockOperation(llvm::CallInst& 
         {
             IGC_ASSERT_MESSAGE(funcName.consume_front("v2"), "Unrecognized v element in __builtin_IB_subgroup_block_read/write.");
         }
+
+        // (1) Special handling of the following when GRF size = 64 bytes
+        //    intel_sub_group_2d_block_read_8b_1r32x2c  (u8_m1k32v2)
+        //    intel_sub_group_2d_block_read_16b_1r16x2c (u16_m1k16v2)
+        // They are defined to return 64 bytes, but the HW block read
+        // returns 128 bytes (two GRFs, as a block size must be multiple
+        // of GRF, unused part is zero-padded. Note that those APIs have
+        // their block size to be multiple of GRF (1 GRF) when GRF size
+        // is 32 bytes). Additional mov instructions are needed to pack
+        // the lower halves of each GRF as the final return value.
+        //
+        // For those cases, instead of 2 blocks, using equivalent single-block
+        // read to avoid those mov instructions by just doubling their width:
+        //   8b_m1k32v2  --> 8b_m1k64v1
+        //   16b_m1k16v2 --> 16b_m1k32v1
+        //
+        // (2) The following is an exception:
+        //    int2 = intel_sub_group_2d_block_read_32b_1r8x2c  (u32_m1k8v2)
+        // it is indeed defined as return 128 bytes. As this 2d read has
+        // 64 bytes, only lower 8 lanes have data and upper 8 lanes got zero.
+        // No change to this read!
+        if (m_pCtx->platform.getGRFSize() == 64 && isRead && numBlocksV == 2 &&
+            tileHeight == 1 && (elemSize * tileWidth) == 256 &&
+            elemSize != 32 /* exception shown above in (2) */)
+        {
+            numBlocksV = 1;
+            tileWidth *= 2;
+        }
     }
     else if (isTranspose && !isVnniTransform)
     {
@@ -957,16 +990,32 @@ Instruction* LSCFuncsResolution::CreateSubGroup2DBlockOperation(llvm::CallInst& 
         {
             numBlocksV = 1;
             tileHeight = subGrpSize;
+            if (funcName.consume_front("_m8"))
+            {
+                // For __builtin_IB_subgroup_block_read_cacheopts_transpose_u64_m8k1
+                //     __builtin_IB_subgroup_block_read_cacheopts_transpose_u64_m8k2
+                //     __builtin_IB_subgroup_block_read_cacheopts_transpose_u64_m8k4
+                // not tied to subGrpSize
+                tileHeight = 8;
+            }
 
             funcName.consume_front("_");
-            if (funcName.consume_front("k4"))
+            funcName = consume_number(funcName, "k", &tileWidth);
+            if (tileWidth == 4)
             {
             // __builtin_IB_subgroup_block_read_flat_transpose_u64_k4
-                tileWidth = 4;
+            // __builtin_IB_subgroup_block_read_cacheopts_transpose_u64_m8k4
+                ;
+            }
+            else if (tileHeight == 8 && (tileWidth == 1 || tileWidth == 2))
+            {
+                // For __builtin_IB_subgroup_block_read_cacheopts_transpose_u64_m8k1
+                //     __builtin_IB_subgroup_block_read_cacheopts_transpose_u64_m8k2
+                ;
             }
             else
             {
-                IGC_ASSERT_MESSAGE(0, "Transpose with 64 bit element size only supports width 4.");
+                IGC_ASSERT_MESSAGE(0, "Transpose with 64 bit element size only supports width 1, 2, 4 for height 8.");
                 return nullptr;
             }
         }
@@ -989,6 +1038,10 @@ Instruction* LSCFuncsResolution::CreateSubGroup2DBlockOperation(llvm::CallInst& 
             {
                 tileHeight = 16;
             }
+            else if (funcName.consume_front("_m8"))
+            {
+                tileHeight = 8;
+            }
 
             tileWidth = 8;
             funcName.consume_front("_");
@@ -1000,9 +1053,58 @@ Instruction* LSCFuncsResolution::CreateSubGroup2DBlockOperation(llvm::CallInst& 
                 return nullptr;
             }
         }
+        else if (elemSize == 16 && m_pCtx->platform.getGRFSize() == 64)
+        {
+            // The following are emulated on PVC+
+            // (GRF size: 64 bytes, simd size >= simd16)
+            //   __builtin_IB_subgroup_block_read_cacheopts_transpose_u16_m16k4
+            //   __builtin_IB_subgroup_block_read_cacheopts_transpose_u16_m16k8
+            //   __builtin_IB_subgroup_block_read_cacheopts_transpose_u16_m16k16
+            numBlocksV = 1;
+            if (funcName.consume_front("_m16"))
+            {
+                tileHeight = 16;
+            }
+            else
+            {
+                IGC_ASSERT_MESSAGE(0, "D16 transpose (emulated) supports height=16 only.");
+                return nullptr;
+            }
+
+            tileWidth = 0;
+            funcName = consume_number(funcName, "k", &tileWidth);
+            if (tileWidth != 4 && tileWidth != 8 && tileWidth != 16) {
+                IGC_ASSERT_MESSAGE(0, "D16 transpose (emulated) supports width 4, 8, 16 only.");
+                return nullptr;
+            }
+        }
+        else if (elemSize == 8 && m_pCtx->platform.getGRFSize() == 64) {
+            // The following are emulated on PVC+
+            // (GRF size: 64 bytes, simd size >= simd16)
+            //   __builtin_IB_subgroup_block_read_cacheopts_transpose_u8_m32k4
+            //   __builtin_IB_subgroup_block_read_cacheopts_transpose_u8_m32k8
+            //   __builtin_IB_subgroup_block_read_cacheopts_transpose_u8_m32k16
+            numBlocksV = 1;
+            if (funcName.consume_front("_m32"))
+            {
+                tileHeight = 32;
+            }
+            else
+            {
+                IGC_ASSERT_MESSAGE(0, "D8 transpose (emulated) support height=32 only.");
+                return nullptr;
+            }
+
+            tileWidth = 0;
+            funcName = consume_number(funcName, "k", &tileWidth);
+            if (tileWidth != 4 && tileWidth != 8 && tileWidth != 16) {
+                IGC_ASSERT_MESSAGE(0, "D8 transpose (emulated) support width 4, 8, 16 only.");
+                return nullptr;
+            }
+        }
         else
         {
-            IGC_ASSERT_MESSAGE(0, "Transpose only supports elemSize 32.");
+            IGC_ASSERT_MESSAGE(0, "Transpose only supports elemSize d32, d64.");
             return nullptr;
         }
     }
@@ -1092,6 +1194,11 @@ Instruction* LSCFuncsResolution::CreateSubGroup2DBlockOperation(llvm::CallInst& 
     if (isTranspose && isVnniTransform)
     {
         IGC_ASSERT_MESSAGE(0, "Cannot use both hw transpose and hw vnni at the same time for subgroup_block_read.");
+        return nullptr;
+    }
+
+    if (((tileWidth * elemSize) % 32) != 0) {
+        IGC_ASSERT_MESSAGE(0, "Block width * element size (bytes) must be a multiple of 4 bytes.");
         return nullptr;
     }
 
@@ -1353,7 +1460,7 @@ Instruction* LSCFuncsResolution::CreateLSCStoreCmaskIntrinsicCallInst(
     return lscCall;
 }
 
-Instruction* LSCFuncsResolution::CreateLSCFenceIntrinsicCallInst() {
+Instruction* LSCFuncsResolution::CreateLSCFenceIntrinsicCallInst(CallInst& CI) {
     LSC_SFID memPort = decodeSfidFromName();
 
     auto context = getAnalysis<CodeGenContextWrapper>().getCodeGenContext();
@@ -1378,6 +1485,12 @@ Instruction* LSCFuncsResolution::CreateLSCFenceIntrinsicCallInst() {
 
     if (scope && (scope->getZExtValue() == LSC_SCOPE_SYSACQ || scope->getZExtValue() == LSC_SCOPE_SYSREL))
     {
+        if (context->platform.isIntegratedGraphics() || context->platform.isCoreXE2())
+        {
+            // Global memory fences are not needed on integrated devices or on Xe2 platforms.
+            m_instsToErase.insert(&CI);
+            return nullptr;
+        }
         if (!context->platform.supportSystemFence())
         {
             reportError("platform does not support system fence");
@@ -1402,10 +1515,18 @@ Instruction* LSCFuncsResolution::CreateLSCFenceEvictToMemory()
         return nullptr;
     }
 
+    LSC_SCOPE scope = LSC_SCOPE_GPU;
+
+    if (context->platform.isCoreChildOf(IGFX_XE3_CORE) ||
+        (context->platform.getPlatformInfo().eProductFamily == IGFX_LUNARLAKE))
+    {
+        scope = LSC_SCOPE_SYSREL;
+    }
+
     Value* args[3]
     {
         getConstantInt32(LSC_UGM), // immediate sfid
-        getConstantInt32(LSC_SCOPE_GPU),  // immediate scope of the fence
+        getConstantInt32(scope),  // immediate scope of the fence
         (context->platform.getPlatformInfo().eRenderCoreFamily == IGFX_XE_HPC_CORE) ?
             getConstantInt32(LSC_FENCE_OP_NONE) :
             getConstantInt32(LSC_FENCE_OP_EVICT)   // immediate flush type

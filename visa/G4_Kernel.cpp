@@ -166,7 +166,7 @@ void *gtPinData::getIndirRefs(unsigned int &size) {
       auto size = target->getByteSize();
       indirs.push_back(std::make_pair(start, size));
     }
-    return std::move(indirs);
+    return indirs;
   };
 
   for (auto bb : kernel.fg.getBBList()) {
@@ -635,7 +635,8 @@ bool G4_Kernel::updateKernelToLargerGRF() {
 //
 // Updates kernel's related structures based on register pressure
 //
-void G4_Kernel::updateKernelByRegPressure(unsigned regPressure) {
+void G4_Kernel::updateKernelByRegPressure(unsigned regPressure,
+                                          bool forceGRFModeUp) {
   unsigned largestInputReg = getLargestInputRegister();
   if (m_kernelAttrs->isKernelAttrSet(Attributes::ATTR_MaxRegThreadDispatch)) {
     unsigned maxRegPayloadDispatch = m_kernelAttrs->getInt32KernelAttr(
@@ -643,7 +644,7 @@ void G4_Kernel::updateKernelByRegPressure(unsigned regPressure) {
     largestInputReg = std::max(largestInputReg, maxRegPayloadDispatch);
   }
 
-  unsigned newGRF = grfMode.setModeByRegPressure(regPressure, largestInputReg);
+  unsigned newGRF = grfMode.setModeByRegPressure(regPressure, largestInputReg, forceGRFModeUp);
 
   if (newGRF == numRegTotal)
     return;
@@ -703,6 +704,7 @@ void G4_Kernel::evalAddrExp() {
   }
 }
 
+[[maybe_unused]]
 static std::vector<std::string> split(const std::string &str,
                                       const char *delimiter) {
   std::vector<std::string> v;
@@ -903,6 +905,7 @@ uint32_t StackCallABI::getFPSPGRF() const {
   } else if (version == StackCallABIVersion::VER_2) {
     return (kernel->getNumRegTotal() - 1) - FPSPGRF;
   } else {
+
     return (kernel->getNumRegTotal() - 1) - FPSPGRF;
   }
 }
@@ -2116,7 +2119,8 @@ unsigned G4_Kernel::getSRFInWords() {
 
 // GRF modes supported by HW
 // There must be at least one Config that is VRTEnable for each platform
-GRFMode::GRFMode(const TARGET_PLATFORM platform, Options *op) : options(op) {
+GRFMode::GRFMode(const TARGET_PLATFORM plat, Options *op)
+    : platform(plat), options(op) {
   switch (platform) {
   case Xe_XeHPSDV:
   case Xe_DG2:
@@ -2167,13 +2171,17 @@ GRFMode::GRFMode(const TARGET_PLATFORM platform, Options *op) : options(op) {
   unsigned maxGRF = op->getuInt32Option(vISA_MaxGRFNum);
   upperBoundGRF = maxGRF > 0 ? maxGRF : configs.back().numGRF;
   vISA_ASSERT(isValidNumGRFs(upperBoundGRF), "Invalid upper bound for GRF number");
+
+  // Select higher GRF
+  GRFModeUpValue = op->getuInt32Option(vISA_ForceGRFModeUp);
+  vISA_ASSERT(GRFModeUpValue >= 0 && GRFModeUpValue <= configs.size(),
+              "Invalid value for selecting a higher GRF mode");
 }
 
-unsigned GRFMode::setModeByRegPressure(unsigned maxRP,
-                                       unsigned largestInputReg) {
+unsigned GRFMode::setModeByRegPressure(unsigned maxRP, unsigned largestInputReg,
+                                       bool forceGRFModeUp) {
   unsigned size = configs.size(), i = 0;
-  bool spillAllowed = 0;
-  spillAllowed = options->getuInt32Option(vISA_SpillAllowed) > 256;
+  bool spillAllowed = getSpillThreshold() > 0;
   // find appropiate GRF based on reg pressure
   for (; i < size; i++) {
     if (configs[i].VRTEnable && configs[i].numGRF >= lowerBoundGRF &&
@@ -2184,10 +2192,30 @@ unsigned GRFMode::setModeByRegPressure(unsigned maxRP,
           // those blocked for kernel input. This helps cases
           // where an 8 GRF variable shows up in entry BB.
           (largestInputReg + 8) <= configs[i].numGRF) {
-        if (spillAllowed && currentMode > 0)
-          return configs[--currentMode].numGRF;
-        else
-          return configs[currentMode].numGRF;
+        if (forceGRFModeUp && GRFModeUpValue > 0) {
+          // Check if user is force a higher GRF mode
+          unsigned newGRFMode = currentMode + GRFModeUpValue;
+          unsigned maxGRFMode = getMaxGRFMode();
+          currentMode = newGRFMode < maxGRFMode ? newGRFMode : maxGRFMode;
+        }
+
+        if (spillAllowed && !hasSmallerGRFSameThreads() && currentMode > 0 &&
+            configs[currentMode - 1].VRTEnable) {
+          unsigned lowerGRFNum = configs[currentMode - 1].numGRF;
+          // Select a lower GRF number in PreRA in case the register
+          // pressure computed is a bit higher (e.g. 4%) than the lower GRF
+          // config. If spills are detected, RA will still bump up the GRF
+          // number to avoid them.
+          // For example, if reg pressure is 165, we select 160GRF since
+          // we have spill threshold enabled and the diff between 165 and 160
+          // is less than 4%.
+          if ((lowerGRFNum * 1.04 >= maxRP ||
+               configs[currentMode].numGRF == getMaxGRF()) &&
+              lowerGRFNum >= (largestInputReg + 8) &&
+              lowerGRFNum >= lowerBoundGRF)
+            return configs[--currentMode].numGRF;
+        }
+        return configs[currentMode].numGRF;
       }
     }
   }
@@ -2203,4 +2231,28 @@ bool GRFMode::hasLargerGRFSameThreads() const {
     return false;
 
   return configs[currentMode].numThreads == configs[largerGrfIdx].numThreads;
+}
+
+// Check if next smaller GRF has the same number of threads per EU
+bool GRFMode::hasSmallerGRFSameThreads() const {
+  int smallerGrfIdx = currentMode - 1;
+  if (smallerGrfIdx < 0 || !configs[smallerGrfIdx].VRTEnable)
+    return false;
+  return configs[currentMode].numThreads == configs[smallerGrfIdx].numThreads;
+}
+
+// Get spill threshold for current GRF mode
+unsigned GRFMode::getSpillThreshold() const {
+  if (platform < Xe3)
+    return 0;
+  // FIXME: currently spill thresholds for <128GRF are
+  // causing some performance regressions. We need more
+  // study to define proper thresholds for this range.
+  if (configs[currentMode].numGRF < 128)
+    return 0;
+  if (configs[currentMode].numGRF == 256 &&
+      options->getuInt32Option(vISA_SpillAllowed256GRF) > 0)
+    return options->getuInt32Option(vISA_SpillAllowed256GRF);
+
+  return options->getuInt32Option(vISA_SpillAllowed);
 }

@@ -1,6 +1,6 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (C) 2018-2022 Intel Corporation
+Copyright (C) 2018-2025 Intel Corporation
 
 SPDX-License-Identifier: MIT
 
@@ -15,7 +15,6 @@ SPDX-License-Identifier: MIT
 #include "llvmWrapper/IR/LLVMContext.h"
 #include "common/LLVMWarningsPop.hpp"
 #include "Compiler/CISACodeGen/ShaderCodeGen.hpp"
-#include "Compiler/CISACodeGen/OpenCLKernelCodeGen.hpp"
 #include "Compiler/CodeGenPublic.h"
 #include "Probe/Assertion.h"
 #include <llvm/IR/LLVMRemarkStreamer.h>
@@ -36,13 +35,14 @@ namespace IGC
         bool allowLargeGRF;
         bool allowLoadSinking;
         bool forceIndirectCallsInSyncRT;
+        bool allowRaytracingSpillCompaction;
         unsigned nextState;
     };
 
     static const RetryState RetryTable[] = {
-       // adrCl  licm   codSk AdrSk  Slice  PrivM  VISAP  URBWr  Coals  GRF    loadSk, SyncRT
-        { false, true,  true, false, false, true,  true,  true,  true,  false, false,  false, 1 },
-        { true,  false, true, true,  true,  false, false, false, false, true,  true,   true, 500 }
+       // adrCl  licm   codSk AdrSk  Slice  PrivM  VISAP  URBWr  Coals  GRF    loadSk, SyncRT, compactspills
+        { false, true,  true, false, false, true,  true,  true,  true,  false, false,  false,  true,         1 },
+        { true,  false, true, true,  true,  false, false, false, false, true,  true,   true,   false,        500 }
     };
 
     static constexpr size_t RetryTableSize = sizeof(RetryTable) / sizeof(RetryState);
@@ -160,6 +160,16 @@ namespace IGC
         unsigned id = GetRetryId();
         IGC_ASSERT(id < RetryTableSize);
         return RetryTable[id].forceIndirectCallsInSyncRT;
+    }
+
+    bool RetryManager::AllowRaytracingSpillCompaction() const
+    {
+        if (IGC_IS_FLAG_ENABLED(AllowSpillCompactionOnRetry)) // allow spill compaction on retry
+            return true;
+
+        unsigned id = GetRetryId();
+        IGC_ASSERT(id < RetryTableSize);
+        return RetryTable[id].allowRaytracingSpillCompaction;
     }
 
     bool RetryManager::AllowLoadSinking(Function* F) const
@@ -430,10 +440,6 @@ namespace IGC
         PRINT_CTX_MEMBER(m_enableSampleMultiversioning);
         PRINT_CTX_MEMBER(m_enableSimdVariantCompilation);
         PRINT_CTX_MEMBER(m_enableSubroutine);
-        PRINT_CTX_MEMBER(m_floatDenormMode16);
-        PRINT_CTX_MEMBER(m_floatDenormMode32);
-        PRINT_CTX_MEMBER(m_floatDenormMode64);
-        PRINT_CTX_MEMBER(m_floatDenormModeBFTF);
         PRINT_CTX_MEMBER(m_ForceEarlyZMathCheck);
         PRINT_CTX_MEMBER(m_hasDPDivSqrtEmu);
         PRINT_CTX_MEMBER(m_hasDPEmu);
@@ -817,6 +823,9 @@ namespace IGC
 
     void CodeGenContext::EmitWarning(const char* warningstr, const llvm::Value* context)
     {
+        if (IGC_IS_FLAG_ENABLED(DisableWarnings))
+            return;
+
         this->oclWarningMessage << "\nwarning: ";
         EmitMessage(this->oclWarningMessage, warningstr, context);
         this->oclWarningMessage << "\n";
@@ -983,7 +992,7 @@ namespace IGC
             IGC_ASSERT_MESSAGE(0, "Incorrect shader type");
         }
 
-        IGC_ASSERT_MESSAGE(!hasSyncRTCalls() || (simdMode <= platform.getPreferredRayQuerySIMDSize()),
+        IGC_ASSERT_MESSAGE(!hasSyncRTCalls() || (simdMode <= platform.getPreferredRayQuerySIMDSize(type)),
             "Unsupported SIMD mode for RayQuery");
 
         return simdMode;

@@ -395,8 +395,8 @@ public:
   VISA_BUILDER_API virtual int
   AppendVISALscUntypedLoad(LSC_OP subOpcode, LSC_SFID sfid, VISA_PredOpnd *pred,
                            VISA_Exec_Size execSize, VISA_EMask_Ctrl emask,
-                           LSC_CACHE_OPTS cacheOpts, LSC_ADDR addr,
-                           LSC_DATA_SHAPE data,
+                           LSC_CACHE_OPTS cacheOpts, bool ov,
+                           LSC_ADDR addr, LSC_DATA_SHAPE data,
                            VISA_VectorOpnd *surface, unsigned surfaceIndex,
                            VISA_RawOpnd *dstData, VISA_RawOpnd *src0Addr) = 0;
   /// append an *untyped* LSC store operation
@@ -428,7 +428,7 @@ public:
   VISA_BUILDER_API virtual int
   AppendVISALscUntypedInst(LSC_OP subOpcode, LSC_SFID sfid, VISA_PredOpnd *pred,
                            VISA_Exec_Size execSize, VISA_EMask_Ctrl emask,
-                           LSC_CACHE_OPTS cacheOpts, LSC_ADDR addr,
+                           LSC_CACHE_OPTS cacheOpts, bool ov, LSC_ADDR addr,
                            LSC_DATA_SHAPE data,
                            VISA_VectorOpnd *surface, unsigned surfaceIndex,
                            VISA_RawOpnd *dst, VISA_RawOpnd *src0,
@@ -1152,7 +1152,8 @@ public:
       VISA_VectorOpnd *renderTargetIndex, vISA_RT_CONTROLS cntrls,
       VISA_StateOpndHandle *surface, VISA_RawOpnd *r1HeaderOpnd,
       VISA_VectorOpnd *sampleIndex, VISA_VectorOpnd *cPSCounter,
-      uint8_t numMsgSpecificOpnds, VISA_RawOpnd **opndArray) = 0;
+      uint8_t numMsgSpecificOpnds, VISA_RawOpnd **opndArray
+      ) = 0;
 
   VISA_BUILDER_API virtual int AppendVISA3dURBWrite(
       VISA_PredOpnd *pred, VISA_EMask_Ctrl emask, VISA_Exec_Size executionSize,
@@ -1321,6 +1322,7 @@ public:
   VISA_BUILDER_API virtual int Compile(const char *isaasmFileName,
                                        bool emit_visa_only = false) = 0;
 
+  VISA_BUILDER_API virtual int GetuInt32Option(vISAOptions option) = 0;
   VISA_BUILDER_API virtual void SetOption(vISAOptions option, bool val) = 0;
   VISA_BUILDER_API virtual void SetOption(vISAOptions option, uint32_t val) = 0;
   VISA_BUILDER_API virtual void SetOption(vISAOptions option,

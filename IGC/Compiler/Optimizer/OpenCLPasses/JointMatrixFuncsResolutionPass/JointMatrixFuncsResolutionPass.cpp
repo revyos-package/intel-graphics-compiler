@@ -8,7 +8,6 @@ SPDX-License-Identifier: MIT
 
 #include "JointMatrixFuncsResolutionPass.h"
 
-#include "IGC/common/StringMacros.hpp"
 #include "Compiler/Optimizer/OCLBIUtils.h"
 #include "Compiler/IGCPassSupport.h"
 #include "Compiler/CodeGenPublic.h"
@@ -20,7 +19,6 @@ SPDX-License-Identifier: MIT
 #include <llvm/IR/Function.h>
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/IRBuilder.h>
-#include <llvm/ADT/Sequence.h>
 #include <llvm/ADT/STLExtras.h>
 #include <llvm/ADT/PostOrderIterator.h>
 #include "llvm/IR/DebugInfo.h"
@@ -30,9 +28,9 @@ SPDX-License-Identifier: MIT
 #include "llvmWrapper/Transforms/Utils/Cloning.h"
 #include <llvmWrapper/ADT/Optional.h>
 #include "llvmWrapper/IR/Value.h"
+#include "llvmWrapper/IR/Type.h"
 #include <llvmWrapper/Analysis/ValueTracking.h>
 #include "llvmWrapper/IR/DerivedTypes.h"
-#include "llvmWrapper/IR/Module.h"
 #include "llvmWrapper/Support/Alignment.h"
 #include "common/LLVMWarningsPop.hpp"
 
@@ -97,22 +95,33 @@ JointMatrixFuncsResolutionPass::JointMatrixFuncsResolutionPass() : ModulePass(ID
 // Static helper functions for type traversal
 static bool isMatrixType(const Type *type)
 {
-    // TODO: isOpaquePointerTy check here and below in other places will skip resolving of matrix types, when opaque pointers are enabled.
-    // As soon as target extension types are available in LLVM16, replace this check with target extension type check.
-    if (!type->isPointerTy() || IGCLLVM::isOpaquePointerTy(type))
+    // isOpaquePointerTy check here and below in other places will skip resolving of matrix types,
+    // when opaque pointers are enabled, but target extension types are not.
+    StringRef name = "";
+
+    if (IGCLLVM::isTargetExtTy(type))
+    {
+      name = IGCLLVM::getTargetExtName(type);
+    }
+    else
+    {
+      if (!type->isPointerTy() || IGCLLVM::isOpaquePointerTy(type))
         return false;
 
-    Type *eltType = IGCLLVM::getNonOpaquePtrEltTy(type);
-    if (!eltType || !eltType->isStructTy())
+      Type* eltType = IGCLLVM::getNonOpaquePtrEltTy(type);
+      if (!eltType || !eltType->isStructTy())
         return false;
 
-    if (cast<StructType>(eltType)->isLiteral())
+      if (cast<StructType>(eltType)->isLiteral())
         return false;
 
-    StringRef name = eltType->getStructName();
-    if (name.startswith("intel.joint_matrix") || name.startswith("spirv.JointMatrixINTEL._")
-        || name.startswith("spirv.CooperativeMatrixKHR._"))
-        return true;
+      name = eltType->getStructName();
+    }
+
+    if (name.startswith("intel.joint_matrix") ||
+        name.startswith("spirv.JointMatrixINTEL") ||
+        name.startswith("spirv.CooperativeMatrixKHR"))
+      return true;
 
     return false;
 }
@@ -144,7 +153,10 @@ static void PreOrderTypeTraversal(Type *t, std::unordered_set<Type *> &set)
         return PreOrderTypeTraversal(IGCLLVM::getNonOpaquePtrEltTy(PT), set);
     }
 
-    return;
+#if LLVM_VERSION_MAJOR >= 16
+    if (isa<TargetExtType>(t))
+      set.insert(t);
+#endif
 }
 
 static Type* getContainedMatrixType(Type *root)
@@ -726,6 +738,12 @@ static bool isSupprtedLargeSlice(const JointMatrixTypeDescription *desc, bool us
     return false;
 }
 
+bool JointMatrixFuncsResolutionPass::ValidateIntegerBitWidth(
+    unsigned int bitWidth) {
+  bool result = bitWidth == 8 || bitWidth == 16 || bitWidth == 32;
+  return result;
+}
+
 // TODO: Currently this function doesn't take into account large slices, when reporting
 // supported parameters. This should be fixed.
 bool JointMatrixFuncsResolutionPass::ValidateLoadStore
@@ -1011,12 +1029,9 @@ bool JointMatrixFuncsResolutionPass::parseMatrixTypeNameLegacy(const Type *opaqu
     offset += 1; /* Skip type specifier, [f|i] */
     outDescription->bitWidth = parseNumber(name, &offset);
 
-    bool supportedBitWidth =
-        (outDescription->bitWidth == 8 ||
-         outDescription->bitWidth == 16 ||
-         outDescription->bitWidth == 32);
-    IGC_ASSERT_MESSAGE(supportedBitWidth,
-                       "Unexpected matrix element size.");
+    bool isBitWidthSupported =
+        ValidateIntegerBitWidth(outDescription->bitWidth);
+    IGC_ASSERT_MESSAGE(isBitWidthSupported, "Unexpected matrix element size.");
 
     return true;
 }
@@ -1035,103 +1050,291 @@ bool JointMatrixFuncsResolutionPass::parseMatrixTypeNameLegacy(const Type *opaqu
  * type, scope, rows, cols, use
  * */
 bool JointMatrixFuncsResolutionPass::ParseMatrixTypeName(Type *opaqueType, JointMatrixTypeDescription *outDescription) {
-    const PointerType *ptrType = cast<PointerType>(opaqueType);
-    StringRef name = IGCLLVM::getNonOpaquePtrEltTy(ptrType)->getStructName();
-    StringRef fullName = name;
+    StringRef name = GetMatrixTypeName(opaqueType);
 
     if (name.startswith("intel.joint_matrix")) {
         return parseMatrixTypeNameLegacy(opaqueType, outDescription);
     }
 
-    bool IsJointMatrix = name.consume_front("spirv.JointMatrixINTEL._");
-    if (!IsJointMatrix && !name.consume_front("spirv.CooperativeMatrixKHR._")) {
+    auto isTET = IGCLLVM::isTargetExtTy(opaqueType);
+
+    StringRef jointMatrixPrefix = isTET ? "spirv.JointMatrixINTEL" : "spirv.JointMatrixINTEL._";
+    StringRef coopMatrixPrefix = isTET ? "spirv.CooperativeMatrixKHR" : "spirv.CooperativeMatrixKHR._";
+    bool IsJointMatrix = name.consume_front(jointMatrixPrefix);
+
+    if (!IsJointMatrix && !name.consume_front(coopMatrixPrefix)) {
         std::string msg = "Unexpected Matrix type name: '"
-                        + fullName.str() + "', unknown prefix.";
+                        + name.str() + "', unknown prefix.";
         LLVM_DEBUG(dbgs() << msg << "\n");
         m_Ctx->EmitError(msg.c_str(), nullptr);
         return false;
     }
 
-    if (name.consume_front("int_")) {
-        outDescription->bitWidth = 32;
-        outDescription->isFloating = false;
-    } else if (name.consume_front("short_")) {
-        outDescription->bitWidth = 16;
-        outDescription->isFloating = false;
-    } else if (name.consume_front("char_")) {
-        outDescription->bitWidth = 8;
-        outDescription->isFloating = false;
-    } else if (name.consume_front("float_")) {
-        outDescription->bitWidth = 32;
-        outDescription->isFloating = true;
-    } else if (name.consume_front("half_")) {
-        outDescription->bitWidth = 16;
-        outDescription->isFloating = true;
-    } else {
-        std::string msg = "Unexpected Matrix type name: '"
-                        + fullName.str() + "', unknown element type.";
+    if (isTET)
+    {
+#if LLVM_VERSION_MAJOR >= 16
+      return ParseMatrixTypeNameExtTypeDetails(opaqueType, IsJointMatrix, outDescription);
+#else
+      return false;
+#endif
+    }
+
+    return ParseMatrixTypeNameNonExtTypeDetails(opaqueType, name, IsJointMatrix, outDescription);
+}
+
+StringRef JointMatrixFuncsResolutionPass::GetMatrixTypeName(Type* opaqueType)
+{
+  if (IGCLLVM::isTargetExtTy(opaqueType))
+  {
+    return IGCLLVM::getTargetExtName(opaqueType);
+  }
+
+  const PointerType* ptrType = cast<PointerType>(opaqueType);
+  return IGCLLVM::getNonOpaquePtrEltTy(ptrType)->getStructName();
+}
+
+#if LLVM_VERSION_MAJOR >= 16
+bool IGC::JointMatrixFuncsResolutionPass::ParseMatrixTypeNameExtTypeDetails(Type* opaqueType, bool IsJointMatrix, IGC::JointMatrixTypeDescription* outDescription)
+{
+    auto* targetTy = dyn_cast<TargetExtType>(opaqueType);
+
+    if (!targetTy)
+    {
+      std::string msg = "Unexpected Matrix type. Expected TargetExt";
+      LLVM_DEBUG(dbgs() << msg << "\n");
+      m_Ctx->EmitError(msg.c_str(), nullptr);
+      return false;
+    }
+
+    // Example of LLVM IR of target type extension with "float" type_param
+    // -------------------------------------[....] single type_param
+    // target("spirv.CooperativeMatrixKHR", float, 3, 16, 16, 2)
+    int typeParamExpectedCount = 1;
+    if (targetTy->type_params().size() != typeParamExpectedCount)
+    {
+      std::string msg = "Unexpected Matrix type parameter(s) count. Expected count: "
+        + std::to_string(typeParamExpectedCount) +
+        ". Full Name: '" + GetMatrixTypeName(opaqueType).str() + "'.";
+
+      LLVM_DEBUG(dbgs() << msg << "\n");
+      m_Ctx->EmitError(msg.c_str(), nullptr);
+      return false;
+    }
+
+    llvm::Type* typeParam = *(targetTy->type_param_begin());
+
+    if (typeParam->isIntegerTy()) {
+      outDescription->bitWidth = typeParam->getIntegerBitWidth();
+
+      if (!ValidateIntegerBitWidth(outDescription->bitWidth)) {
+        std::string msg = "Unexpected Matrix integer size: '" +
+                          std::to_string(outDescription->bitWidth) + "'.";
         LLVM_DEBUG(dbgs() << msg << "\n");
         m_Ctx->EmitError(msg.c_str(), nullptr);
         return false;
+      }
+
+      outDescription->isFloating = false;
+    }
+    else if (typeParam->isFloatTy()) {
+      outDescription->bitWidth = 32;
+      outDescription->isFloating = true;
+    }
+    else if (typeParam->isHalfTy()) {
+      outDescription->bitWidth = 16;
+      outDescription->isFloating = true;
+    }
+    else {
+      std::string msg = "Unexpected Matrix type name: '"
+        + GetMatrixTypeName(opaqueType).str() + "', unknown element type.";
+      LLVM_DEBUG(dbgs() << msg << "\n");
+      m_Ctx->EmitError(msg.c_str(), nullptr);
+      return false;
     }
 
-    unsigned offset = 0;
-    unsigned scope = 0;
-    /* Use parameter might not be present in older version of SPIR-V. In such
-     * case it should be reconstructed from the layout. Handling of this
-     * special case should be removed once we stop to support legacy SPIR-V
-     * specification.*/
+    // As of now int_param called "scope" is not used
+    unsigned rows = 0;
+    unsigned cols = 0;
     unsigned use = UseMax;
-    if (!IsJointMatrix) {
-      scope = parseNumber(name, &offset);
-      offset += 1; /* Skip delimiter, '_'. */
-      outDescription->rows = parseNumber(name, &offset);
-      offset += 1; /* Skip delimiter, '_'. */
-      outDescription->columns = parseNumber(name, &offset);
-      offset += 1; /* Skip delimiter, '_' */
-      use = parseNumber(name, &offset);
-    } else {
-      outDescription->rows = parseNumber(name, &offset);
-      offset += 1; /* Skip delimiter, '_'. */
-      outDescription->columns = parseNumber(name, &offset);
-      offset += 1; /* Skip delimiter, '_' */
-      unsigned legacyLayout = parseNumber(name, &offset);
-      offset += 1; /* Skip delimiter, '_' */
-      scope = parseNumber(name, &offset);
 
-      if (offset < name.size()) {
-          offset += 1; /* Skip delimiter, '_' */
-          use = parseNumber(name, &offset);
-      } else {
-          /* If use parameter is not present deduce the correct use from legacy
-           * layout: */
-          if (legacyLayout == LayoutPackedA) {
-              use = UseMatrixA;
-          } else if (legacyLayout == LayoutPackedB) {
-              use = UseMatrixB;
-          } else {
-              use = UseAccumulator;
-          }
+    if (!IsJointMatrix)
+    {
+        // Example of LLVM IR of target type extension
+        // with 4 params and its format description
+        //                               type, [scope, rows, cols, use]
+        // -------------------------------------------[............] int_params
+        // target("spirv.CooperativeMatrixKHR", float, 3, 16, 16, 2)
+        if (targetTy->int_params().size() == 4)
+        {
+          rows = targetTy->int_params()[1];
+          cols = targetTy->int_params()[2];
+          use = targetTy->int_params()[3];
+        }
+        else
+        {
+          std::string msg = "Unexpected Matrix type format parameters count. Expected count: 4. "
+            "Full Name: '" + GetMatrixTypeName(opaqueType).str() + "'.";
+          LLVM_DEBUG(dbgs() << msg << "\n");
+          m_Ctx->EmitError(msg.c_str(), nullptr);
+          return false;
+        }
+    }
+    else
+    {
+      // Example of LLVM IR of target type extension
+      // with 4 params and its format description
+      //                               type, [rows, cols, layout, scope]
+      // ------------------------------------[..........] int_params
+      // target("spirv.JointMatrixINTEL", i8, 3, 8, 8, 2)
+      if (targetTy->int_params().size() == 4)
+      {
+        // Basing on original comments "use" param may not always be present
+        rows = targetTy->int_params()[0];
+        cols = targetTy->int_params()[1];
+        unsigned legacyLayout = targetTy->int_params()[2];
+
+        // If use parameter is not present deduce the correct use from legacy layout
+        use = GetUseFromLegacyLayout(legacyLayout);
+      }
+      // Example of LLVM IR of target type extension
+      // with 5 params and its format description
+      //                               type, [rows, cols, layout, scope, use]
+      // -------------------------------------[.............] int_params
+      // target("spirv.JointMatrixINTEL", i32, 3, 8, 8, 2, 0)
+      else if (targetTy->int_params().size() == 5)
+      {
+        rows = targetTy->int_params()[0];
+        cols = targetTy->int_params()[1];
+        // not used
+        // unsigned layout = targetTy->int_params()[2];
+        use = targetTy->int_params()[4];
+      }
+      else {
+        std::string msg = "Unexpected Matrix type format parameters count. Expected count: 4 or 5. "
+          "Full Name: '" + GetMatrixTypeName(opaqueType).str() + "'.";
+        LLVM_DEBUG(dbgs() << msg << "\n");
+        m_Ctx->EmitError(msg.c_str(), nullptr);
+        return false;
       }
     }
 
-    /* currently unused: */
-    (void)scope;
+    outDescription->rows = rows;
+    outDescription->columns = cols;
 
-    if (use == UseMatrixA) {
-        outDescription->layout = LayoutPackedA;
-    } else if (use == UseMatrixB) {
-        outDescription->layout = LayoutPackedB;
-    } else if (use == UseAccumulator) {
-        outDescription->layout = LayoutRowMajor;
-    } else {
-        std::string msg = "Unexpected Matrix type name: '"
-                        + fullName.str() + "', unknown use type.";
-        LLVM_DEBUG(dbgs() << msg << "\n");
-        m_Ctx->EmitError(msg.c_str(), nullptr);
-        return false;
+    if (!SetLayoutFromUse(use, outDescription))
+      return false;
+
+  return true;
+}
+#endif
+
+bool JointMatrixFuncsResolutionPass::ParseMatrixTypeNameNonExtTypeDetails(Type* opaqueType,
+  StringRef name,
+  bool IsJointMatrix,
+  JointMatrixTypeDescription* outDescription)
+{
+  if (name.consume_front("int_")) {
+    outDescription->bitWidth = 32;
+    outDescription->isFloating = false;
+  }
+  else if (name.consume_front("short_")) {
+    outDescription->bitWidth = 16;
+    outDescription->isFloating = false;
+  }
+  else if (name.consume_front("char_")) {
+    outDescription->bitWidth = 8;
+    outDescription->isFloating = false;
+  }
+  else if (name.consume_front("float_")) {
+    outDescription->bitWidth = 32;
+    outDescription->isFloating = true;
+  }
+  else if (name.consume_front("half_")) {
+    outDescription->bitWidth = 16;
+    outDescription->isFloating = true;
+  }
+  else {
+    std::string msg = "Unexpected Matrix type name: '"
+      + GetMatrixTypeName(opaqueType).str() + "', unknown element type.";
+    LLVM_DEBUG(dbgs() << msg << "\n");
+    m_Ctx->EmitError(msg.c_str(), nullptr);
+    return false;
+  }
+
+  unsigned offset = 0;
+  unsigned scope = 0;
+  /* Use parameter might not be present in older version of SPIR-V. In such
+   * case it should be reconstructed from the layout. Handling of this
+   * special case should be removed once we stop to support legacy SPIR-V
+   * specification.*/
+  unsigned use = UseMax;
+  if (!IsJointMatrix) {
+    scope = parseNumber(name, &offset);
+    offset += 1; /* Skip delimiter, '_'. */
+    outDescription->rows = parseNumber(name, &offset);
+    offset += 1; /* Skip delimiter, '_'. */
+    outDescription->columns = parseNumber(name, &offset);
+    offset += 1; /* Skip delimiter, '_' */
+    use = parseNumber(name, &offset);
+  }
+  else {
+    outDescription->rows = parseNumber(name, &offset);
+    offset += 1; /* Skip delimiter, '_'. */
+    outDescription->columns = parseNumber(name, &offset);
+    offset += 1; /* Skip delimiter, '_' */
+    unsigned legacyLayout = parseNumber(name, &offset);
+    offset += 1; /* Skip delimiter, '_' */
+    scope = parseNumber(name, &offset);
+
+    if (offset < name.size()) {
+      offset += 1; /* Skip delimiter, '_' */
+      use = parseNumber(name, &offset);
     }
-    return true;
+    else {
+      /* If use parameter is not present deduce the correct use from legacy
+      * layout: */
+      use = GetUseFromLegacyLayout(legacyLayout);
+    }
+  }
+
+  /* currently unused: */
+  (void)scope;
+
+  if (!SetLayoutFromUse(use, outDescription))
+    return false;
+
+  return true;
+}
+
+unsigned JointMatrixFuncsResolutionPass::GetUseFromLegacyLayout(unsigned int legacyLayout)
+{
+  if (legacyLayout == LayoutPackedA)
+    return UseMatrixA;
+  if (legacyLayout == LayoutPackedB)
+    return UseMatrixB;
+  return UseAccumulator;
+}
+
+bool JointMatrixFuncsResolutionPass::SetLayoutFromUse(unsigned int use, IGC::JointMatrixTypeDescription* outDescription)
+{
+  if (use == UseMatrixA) {
+    outDescription->layout = LayoutPackedA;
+  }
+  else if (use == UseMatrixB) {
+    outDescription->layout = LayoutPackedB;
+  }
+  else if (use == UseAccumulator) {
+    outDescription->layout = LayoutRowMajor;
+  }
+  else {
+    std::string msg = "Unexpected Matrix 'use' value: '"
+      + std::to_string(use) + "'. Unknown use type.";
+    LLVM_DEBUG(dbgs() << msg << "\n");
+    m_Ctx->EmitError(msg.c_str(), nullptr);
+    return false;
+  }
+
+  return true;
 }
 
 // As both float and tf32 types are represented as float, the TF32 type info
@@ -1174,13 +1377,79 @@ static bool isAccumulator32x32(const JointMatrixTypeDescription &desc) {
     return (desc.layout == LayoutRowMajor && desc.rows == 32 && desc.columns == 32);
 }
 
-Type *JointMatrixFuncsResolutionPass::ResolveType(Type *opaqueType, JointMatrixTypeDescription *outDesc)
+#if LLVM_VERSION_MAJOR >= 16
+// When we alloca target extension type, later it is "ptr".
+// We need to figure out the type of "ptr" by traversing up.
+// Example:
+// %0 = alloca target("spirv.CooperativeMatrixKHR", i16, 3, 8, 16, 0)
+// %ptr = call spir_func ptr
+// @_Z19__spirv_AccessChainPU3AS4PU3AS143__spirv_CooperativeMatrixKHR(ptr %0,
+// i64 4)
+Type *JointMatrixFuncsResolutionPass::TryFindTargetExtensionTypeOfOpaquePtr(
+    Value *V) {
+  if (!V)
+    return nullptr;
+
+  for (auto &use : V->uses()) {
+    if (auto *ai = dyn_cast<AllocaInst>(use)) {
+      auto aiTy = ai->getAllocatedType();
+      if (IGCLLVM::isTargetExtTy(aiTy))
+        return aiTy;
+    } else if (auto *ci = dyn_cast<CallInst>(use)) {
+      auto funcReturnType = ci->getFunction()->getReturnType();
+      if (IGCLLVM::isTargetExtTy(funcReturnType))
+        return funcReturnType;
+    } else if (auto *spaceCast = dyn_cast<AddrSpaceCastInst>(use)) {
+      return TryFindTargetExtensionTypeOfOpaquePtr(
+          spaceCast->getPointerOperand());
+    }
+  }
+
+  return nullptr;
+}
+// When resolving e.g prefetch we need to figure out type of ptr
+// We can do it by traversing up.
+// It is similar to approach TryFindTargetExtensionTypeOfOpaquePtr
+Type *JointMatrixFuncsResolutionPass::TryFindTypeOfOpaquePtr(Value *V) {
+  if (!V)
+    return nullptr;
+
+  for (auto &use : V->uses()) {
+    if (auto *ai = dyn_cast<AllocaInst>(use)) {
+      auto aiTy = ai->getAllocatedType();
+      return aiTy;
+    } else if (auto *ci = dyn_cast<CallInst>(use)) {
+      auto funcReturnType = ci->getFunction()->getReturnType();
+      return funcReturnType;
+    } else if (auto *spaceCast = dyn_cast<AddrSpaceCastInst>(use)) {
+      return TryFindTypeOfOpaquePtr(spaceCast->getPointerOperand());
+    } else if (auto *gep = dyn_cast<GetElementPtrInst>(use)) {
+      return gep->getResultElementType();
+    } else if (auto *bitcast = dyn_cast<BitCastInst>(use)) {
+      if (!IGCLLVM::isOpaquePointerTy(bitcast->getSrcTy()))
+        return bitcast->getSrcTy();
+
+      return TryFindTypeOfOpaquePtr(bitcast->getOperand(0));
+    }
+  }
+
+  return nullptr;
+}
+#endif
+
+Type *JointMatrixFuncsResolutionPass::ResolveType(Type *inputType, JointMatrixTypeDescription *outDesc)
 {
-    IGC_ASSERT_EXIT_MESSAGE(opaqueType && opaqueType->isPointerTy(),
+    IGC_ASSERT_EXIT_MESSAGE(inputType && (inputType->isPointerTy() || IGCLLVM::isTargetExtTy(inputType)),
         "Unexpected type in matrix function resolution.");
 
+#if LLVM_VERSION_MAJOR >= 16
+    IGC_ASSERT_EXIT_MESSAGE(
+        !IGCLLVM::isOpaquePointerTy(inputType),
+        "Unexpected opaque pointer. Expected TargetExtensionType instead.");
+#endif
+
     JointMatrixTypeDescription desc;
-    bool parseResult = ParseMatrixTypeName(opaqueType, &desc);
+    bool parseResult = ParseMatrixTypeName(inputType, &desc);
     IGC_ASSERT_EXIT_MESSAGE(parseResult, "Failed to parse matrix type.");
     /* Treat row major matrices with types not supported by accumulators as
      * PackedA matrices. Both are in row major format. */
@@ -1188,7 +1457,7 @@ Type *JointMatrixFuncsResolutionPass::ResolveType(Type *opaqueType, JointMatrixT
         desc.layout = LayoutPackedA;
     }
 
-    LLVMContext &ctx = opaqueType->getContext();
+    LLVMContext &ctx = inputType->getContext();
     Type *resolvedType = nullptr;
 
     Type *baseType = Type::getInt32Ty(ctx);
@@ -1230,7 +1499,7 @@ Type *JointMatrixFuncsResolutionPass::ResolveType(Type *opaqueType, JointMatrixT
 
     IGC_ASSERT_EXIT_MESSAGE(resolvedType != nullptr, "Failed to resolve matrix type.");
 
-    CacheResolvedTypes(opaqueType, resolvedType);
+    CacheResolvedTypes(inputType, resolvedType);
     return resolvedType;
 }
 
@@ -1281,32 +1550,52 @@ Instruction *JointMatrixFuncsResolutionPass::ResolvePrefetch(CallInst *CI)
     desc.columns = (unsigned)constIntValue(numColsVal);
 
     // Pointer type resolution
+    Type *ptrElemType = nullptr;
+
+#if LLVM_VERSION_MAJOR >= 16
+    if (IGCLLVM::isOpaquePointerTy(ptrVal->getType()))
+      ptrElemType = TryFindTypeOfOpaquePtr(ptrVal);
+    else
+#endif
     {
-        PointerType *ptrType = cast<PointerType>(ptrVal->getType());
-        Type *ptrElemType = IGCLLVM::getNonOpaquePtrEltTy(ptrType);
+      // To be removed after switch to LLVM 16 + full opaque pointers enablement
+      PointerType *ptrType = cast<PointerType>(ptrVal->getType());
+      ptrElemType = IGCLLVM::getNonOpaquePtrEltTy(ptrType);
+    }
 
-        if (StructType *structTy = dyn_cast<StructType>(ptrElemType)) {
-            if (structTy->getNumElements() == 1) {
-                ptrElemType = structTy->getElementType(0);
-                // we assume that only custom floating point types are wrapped into structs
-                desc.isFloating = true;
-            }
-        }
+    IGC_ASSERT_MESSAGE(ptrElemType, "Pointer type not found");
 
-        if (ptrElemType->isHalfTy()) {
-            desc.bitWidth = 16;
-            desc.isFloating = true;
-        } else if (ptrElemType->isFloatTy()) {
-            desc.bitWidth = 32;
-            desc.isFloating = true;
-        } else if (ptrElemType->isDoubleTy()) {
-            desc.bitWidth = 64;
-            desc.isFloating = true;
-        } else if (ptrElemType->isIntegerTy()) {
-            desc.bitWidth = cast<IntegerType>(ptrElemType)->getBitWidth();
-        } else {
-            m_Ctx->EmitError("Failed to resolve matrix prefetch pointer type", ptrVal);
-        }
+    if (StructType *structTy = dyn_cast<StructType>(ptrElemType)) {
+      if (structTy->getNumElements() == 1) {
+        ptrElemType = structTy->getElementType(0);
+        // we assume that only custom floating point types are wrapped into
+        // structs
+        desc.isFloating = true;
+      }
+    }
+
+    if (ptrElemType->isHalfTy()) {
+      desc.bitWidth = 16;
+      desc.isFloating = true;
+    } else if (ptrElemType->isFloatTy()) {
+      desc.bitWidth = 32;
+      desc.isFloating = true;
+    } else if (ptrElemType->isDoubleTy()) {
+      desc.bitWidth = 64;
+      desc.isFloating = true;
+    } else if (ptrElemType->isIntegerTy()) {
+      desc.bitWidth = cast<IntegerType>(ptrElemType)->getBitWidth();
+
+      if (!ValidateIntegerBitWidth(desc.bitWidth)) {
+        std::string msg = "Unexpected Matrix integer size: '" +
+                          std::to_string(desc.bitWidth) + "'.";
+        LLVM_DEBUG(dbgs() << msg << "\n");
+        m_Ctx->EmitError(msg.c_str(), ptrVal);
+        return nullptr;
+      }
+    } else {
+      m_Ctx->EmitError("Failed to resolve matrix prefetch pointer type",
+                       ptrVal);
     }
 
     LLVMContext &ctx = CI->getContext();
@@ -2065,13 +2354,32 @@ bool JointMatrixFuncsResolutionPass::preprocessAccessChain(Function *F) {
             continue;
         }
 
+#if LLVM_VERSION_MAJOR < 16
         if(IGCLLVM::isOpaquePointerTy(CI->getArgOperand(0)->getType()))
             continue;
+#endif
 
         LLVM_DEBUG(dbgs() << " - PREPROCESS ACCESS CHAIN: " << *CI << "\n");
 
-        Type *chainBaseTy =
-            IGCLLVM::getNonOpaquePtrEltTy(CI->getArgOperand(0)->getType());
+        Type *chainBaseTy = nullptr;
+        auto operand0 = CI->getArgOperand(0);
+
+#if LLVM_VERSION_MAJOR >= 16
+        if (IGCLLVM::isOpaquePointerTy(operand0->getType())) {
+          chainBaseTy = TryFindTargetExtensionTypeOfOpaquePtr(operand0);
+          IGC_ASSERT_MESSAGE(chainBaseTy,
+                             "__spirv_AccessChain call 1st argument must be "
+                             "pointer to target extension type.");
+        } else
+#endif
+        {
+          // to be removed after we switch to LLVM 16 with opaque pointers by
+          // default
+          chainBaseTy = IGCLLVM::getNonOpaquePtrEltTy(operand0->getType());
+          IGC_ASSERT_MESSAGE(
+              chainBaseTy, "__spirv_AccessChain call 1st argument is invalid");
+        }
+
         IGC_ASSERT_MESSAGE(isMatrixType(chainBaseTy),
                            "__spirv_AccessChain call 1st argument must be cooperative matrix");
         Value *ptrToMatrix = CI->getArgOperand(0);
@@ -2171,12 +2479,12 @@ void JointMatrixFuncsResolutionPass::InsertPlaceholder(Value *v) {
 
     LLVM_DEBUG(dbgs() << "   -- INSERT PLACEHOLDER FOR: " << *v << "\n");
     Type *type = v->getType();
-    if (type->isPointerTy()) {
-        type = ResolveTypes(v->getType());
-    }
-    if (type->isVoidTy()) {
-        return;
-    }
+
+    if (type->isVoidTy())
+      return;
+
+    if (type->isPointerTy() || IGCLLVM::isTargetExtTy(type))
+      type = ResolveTypes(type);
 
     Instruction *predecesor = nullptr;
     if (Instruction *inst = dyn_cast<Instruction>(v)) {
@@ -2353,6 +2661,14 @@ Type *JointMatrixFuncsResolutionPass::ResolveTypes(Type *t)
             return ResolveType(t, nullptr);
         return ResolvePointerType(PT);
     }
+
+#if LLVM_VERSION_MAJOR >= 16
+    if (isa<TargetExtType>(t))
+    {
+      if (isMatrixType(t))
+        return ResolveType(t, nullptr);
+    }
+#endif
 
     return t;
 }
@@ -2544,8 +2860,10 @@ void JointMatrixFuncsResolutionPass::visitCallInst(CallInst& CI)
 
     StringRef funcName = func->getName();
 
+#if LLVM_VERSION_MAJOR < 16
     if(IGCLLVM::isOpaquePointerTy(CI.getType()) || isAnyOperand(CI, IGCLLVM::isOpaquePointerTy))
         return;
+#endif
 
     /* Resolve calls to JointMatrix BIs that haven't been resolved yet. In
      * future when returning and passing matrices by argument is

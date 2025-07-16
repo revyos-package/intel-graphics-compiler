@@ -1,6 +1,6 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (C) 2018-2021 Intel Corporation
+Copyright (C) 2018-2025 Intel Corporation
 
 SPDX-License-Identifier: MIT
 
@@ -21,6 +21,7 @@ SPDX-License-Identifier: MIT
 #include "AdaptorCommon/RayTracing/RayTracingAddressSpaceAliasAnalysis.h"
 #include "AdaptorCommon/AddImplicitArgs.hpp"
 #include "AdaptorCommon/ProcessFuncAttributes.h"
+#include "AdaptorOCL/MoveStaticAllocas.h"
 #include "Compiler/CISACodeGen/CodeSinking.hpp"
 #include "Compiler/CISACodeGen/helper.h"
 #include "Compiler/Optimizer/OpenCLPasses/PrivateMemory/PrivateMemoryUsageAnalysis.hpp"
@@ -103,7 +104,7 @@ static void setupRegionBTIs(CodeGenContext* pContext)
             rtInfo.SWStackSurfaceStateOffset = BaseOffset++;
         }
 
-        if (IGC_IS_FLAG_DISABLED(DisableStatefulRTSyncStackAccess4RTShader) && pContext->m_DriverInfo.allowStatefulStackForSyncRaytracing())
+        if (IGC_IS_FLAG_DISABLED(DisableStatefulRTSyncStackAccess4RTShader))
         {
             rtInfo.RTSyncStackAddrspace = getAddrspace();
             rtInfo.RTSyncStackSurfaceStateOffset = BaseOffset++;
@@ -145,17 +146,21 @@ void RayTracingInlineLowering(CodeGenContext* pContext)
     if (IGC_IS_FLAG_ENABLED(OverrideTMax))
         mpm.add(createOverrideTMaxPass(IGC_GET_FLAG_VALUE(OverrideTMax)));
 
-    if (pContext->platform.isDynamicRayQueryDynamicRayManagementMechanismEnabled() && !pContext->getModuleMetaData()->compOpt.DisableDynamicRQManagement)
+    if (pContext->platform.enableRayQueryThrottling(pContext->getModuleMetaData()->compOpt.EnableDynamicRQManagement))
     {
-        mpm.add(CreateDynamicRayManagementPass());
+        if (!pContext->m_DriverInfo.UseNewTraceRayInlineLoweringInNonRaytracingShaders())
+            mpm.add(CreateDynamicRayManagementPass());
     }
-
-    mpm.add(createTraceRayInlinePrepPass());
-    if (IGC_IS_FLAG_ENABLED(EnableRQHideLatency)) {
+    if (!pContext->m_DriverInfo.UseNewTraceRayInlineLoweringInNonRaytracingShaders())
+        mpm.add(createTraceRayInlinePrepPass());
+    if (IGC_IS_FLAG_ENABLED(EnableRQHideLatency) && !pContext->m_DriverInfo.UseNewTraceRayInlineLoweringInNonRaytracingShaders()) {
         mpm.add(createTraceRayInlineLatencySchedulerPass());
         mpm.add(createCFGSimplificationPass());
     }
-    mpm.add(CreateTraceRayInlineLoweringPass());
+    if (!pContext->m_DriverInfo.UseNewTraceRayInlineLoweringInNonRaytracingShaders())
+        mpm.add(CreateTraceRayInlineLoweringPass());
+    else
+        mpm.add(createInlineRaytracing());
     mpm.add(CreateRTGlobalsPointerLoweringPass());
 
 #ifdef _DEBUG

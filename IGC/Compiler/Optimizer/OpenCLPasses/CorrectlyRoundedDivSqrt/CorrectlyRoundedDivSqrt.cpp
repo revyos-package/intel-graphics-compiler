@@ -7,15 +7,12 @@ SPDX-License-Identifier: MIT
 ============================= end_copyright_notice ===========================*/
 
 #include "Compiler/Optimizer/OpenCLPasses/CorrectlyRoundedDivSqrt/CorrectlyRoundedDivSqrt.hpp"
-#include "Compiler/MetaDataApi/IGCMetaDataHelper.h"
 #include "Compiler/IGCPassSupport.h"
-#include "GenISAIntrinsics/GenIntrinsicInst.h"
 
 #include "llvmWrapper/IR/DerivedTypes.h"
 #include "common/LLVMWarningsPush.hpp"
 #include <llvm/IR/Function.h>
 #include <llvm/IR/Instructions.h>
-#include <llvm/IR/InstIterator.h>
 #include <llvm/IR/IRBuilder.h>
 #include "common/LLVMWarningsPop.hpp"
 
@@ -88,7 +85,6 @@ bool CorrectlyRoundedDivSqrt::processDeclaration(Function& F)
         F.setName(newName);
         return true;
     }
-#if defined(IGC_SCALAR_USE_KHRONOS_SPIRV_TRANSLATOR)
     else if (name.startswith("_Z16__spirv_ocl_sqrt"))
     {
         std::string newName = name.str();
@@ -97,16 +93,6 @@ bool CorrectlyRoundedDivSqrt::processDeclaration(Function& F)
         F.setName(newName);
         return true;
     }
-#else
-    else if (name.startswith("__builtin_spirv_OpenCL_sqrt_") &&
-        !name.startswith("__builtin_spirv_OpenCL_sqrt_cr"))
-    {
-        std::string newName = name.str();
-        newName.insert(28, "cr_");
-        F.setName(newName);
-        return true;
-    }
-#endif
 
     // not sqrt function
     return false;

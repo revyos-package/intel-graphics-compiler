@@ -58,9 +58,9 @@ class VISAKernelImpl : public VISAFunction {
 public:
   VISAKernelImpl(enum VISA_BUILD_TYPE type, CISA_IR_Builder *cisaBuilder,
                  const char *name, unsigned int funcId)
-      : m_mem(4096), m_CISABuilder(cisaBuilder),
-        m_options(cisaBuilder->getOptions()), m_functionId(funcId),
-        m_fastPathOpndPool() {
+      : m_functionId(funcId), m_CISABuilder(cisaBuilder),
+        m_fastPathOpndPool(), m_options(cisaBuilder->getOptions())
+  {
     mBuildOption = m_CISABuilder->getBuilderOption();
     m_magic_number = COMMON_ISA_MAGIC_NUM;
     m_major_version = m_CISABuilder->getMajorVersion();
@@ -811,10 +811,9 @@ public:
       VISA_PredOpnd *pred, VISA_EMask_Ctrl emask, VISA_Exec_Size executionSize,
       VISA_SVM_Block_Num numBlocks, VISA_StateOpndHandle *surface,
       VISA_RawOpnd *address, VISA_RawOpnd *dst) override;
-
   VISA_BUILDER_API int AppendVISALscUntypedLoad(
       LSC_OP op, LSC_SFID sfid, VISA_PredOpnd *pred, VISA_Exec_Size execSize,
-      VISA_EMask_Ctrl emask, LSC_CACHE_OPTS cacheOpts, LSC_ADDR addr,
+      VISA_EMask_Ctrl emask, LSC_CACHE_OPTS cacheOpts, bool ov, LSC_ADDR addr,
       LSC_DATA_SHAPE data, VISA_VectorOpnd *surface, unsigned surfaceIndex,
       VISA_RawOpnd *dstData, VISA_RawOpnd *src0Addr) override;
   VISA_BUILDER_API int AppendVISALscUntypedStore(
@@ -830,7 +829,7 @@ public:
       VISA_RawOpnd *src2AtomOpnd2) override;
   VISA_BUILDER_API int AppendVISALscUntypedInst(
       LSC_OP op, LSC_SFID sfid, VISA_PredOpnd *pred, VISA_Exec_Size execSize,
-      VISA_EMask_Ctrl emask, LSC_CACHE_OPTS cacheOpts, LSC_ADDR addr,
+      VISA_EMask_Ctrl emask, LSC_CACHE_OPTS cacheOpts, bool ov, LSC_ADDR addr,
       LSC_DATA_SHAPE data, VISA_VectorOpnd *surface, unsigned surfaceIndex,
       VISA_RawOpnd *dst, VISA_RawOpnd *src0, VISA_RawOpnd *src1,
       VISA_RawOpnd *src2) override;
@@ -1008,7 +1007,8 @@ public:
       VISA_VectorOpnd *renderTargetIndex, vISA_RT_CONTROLS cntrls,
       VISA_StateOpndHandle *surface, VISA_RawOpnd *r1HeaderOpnd,
       VISA_VectorOpnd *sampleIndex, VISA_VectorOpnd *cPSCounter,
-      uint8_t numMsgSpecificOpnds, VISA_RawOpnd **opndArray) override;
+      uint8_t numMsgSpecificOpnds, VISA_RawOpnd **opndArray
+  ) override;
 
   VISA_BUILDER_API int AppendVISA3dURBWrite(
       VISA_PredOpnd *pred, VISA_EMask_Ctrl emask, VISA_Exec_Size executionSize,
@@ -1308,6 +1308,10 @@ private:
 
   void createBindlessSampler();
 
+  // if vISA_DumpPerfStats is enabled, finalize the perf stats values before
+  // dumping
+  void finalizePerfStats(uint64_t binaryHash);
+
 private:
   // This member holds symbolic index of function when invoked via
   // API path. Builder client can use this id when invoking this
@@ -1330,7 +1334,7 @@ private:
   std::vector<std::string> m_string_pool;
   enum VISA_BUILD_TYPE m_type;
 
-  vISA::Mem_Manager m_mem;
+  vISA::Mem_Manager m_mem = 4096;
   std::string m_name;
   std::string m_asmName;
   std::string m_sanitizedName;

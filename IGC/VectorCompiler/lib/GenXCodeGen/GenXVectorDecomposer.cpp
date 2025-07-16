@@ -1,6 +1,6 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (C) 2017-2022 Intel Corporation
+Copyright (C) 2017-2025 Intel Corporation
 
 SPDX-License-Identifier: MIT
 
@@ -208,8 +208,7 @@ bool VectorDecomposer::determineDecomposition(Instruction *Inst) {
         setNotDecomposing(Inst, "use of function argument or constant");
     } else {
       // Any other def. This stops decomposition.
-      if ((isa<CallInst>(Inst) &&
-           !GenXIntrinsic::isAnyNonTrivialIntrinsic(Inst)) ||
+      if ((isa<CallInst>(Inst) && !vc::isAnyNonTrivialIntrinsic(Inst)) ||
           isa<ExtractValueInst>(Inst))
         setNotDecomposing(Inst, "return value from call");
       else
@@ -246,8 +245,7 @@ bool VectorDecomposer::determineDecomposition(Instruction *Inst) {
       // in the Seen set.)
       if (isa<InsertValueInst>(user) || isa<ReturnInst>(user))
         setNotDecomposing(user, "use as return value");
-      else if (isa<CallInst>(user) &&
-               !GenXIntrinsic::isAnyNonTrivialIntrinsic(user))
+      else if (isa<CallInst>(user) && !vc::isAnyNonTrivialIntrinsic(user))
         setNotDecomposing(user, "use as call argument");
       else
         setNotDecomposing(user, "other non-decomposable use");
@@ -488,17 +486,23 @@ void VectorDecomposer::decompose() {
   for (auto wi = Web.begin(), we = Web.end(); wi != we; ++wi) {
     Instruction *Inst = *wi;
     if (auto Phi = dyn_cast<PHINode>(Inst)) {
-      auto Parts = &PhiParts[Phi];
-      // decomposeTree removes the use, so we repeatedly process the first use
-      // until they have all gone.
-      while (!Phi->use_empty())
-        decomposeTree(&*Phi->use_begin(), Parts);
+      for (auto &U : Phi->uses())
+        DecomposeStack.emplace(std::make_pair(&U, &PhiParts[Phi]));
     } else {
       IGC_ASSERT(GenXIntrinsic::isWrRegion(Inst) &&
                  isa<Constant>(Inst->getOperand(0)));
-      decomposeTree(&Inst->getOperandUse(0), nullptr);
+      DecomposeStack.emplace(std::make_pair(&Inst->getOperandUse(0), nullptr));
     }
   }
+
+  while (!DecomposeStack.empty()) {
+    auto [U, Parts] = DecomposeStack.top();
+    DecomposeStack.pop();
+    decomposeTree(U, Parts);
+  }
+
+  DecomposeParts.clear();
+
   // Erase original phi nodes. (The other original instructions in the web have
   // been erased already.)
   for (auto pi = PhiParts.begin(), pe = PhiParts.end(); pi != pe; ++pi)
@@ -521,7 +525,6 @@ void VectorDecomposer::decompose() {
  * This is a tree of wrregion and bitcast instructions, with phi node uses
  * and rdregions at the leaves.
  *
- * This function traverses the tree using self recursion.
  */
 void VectorDecomposer::decomposeTree(Use *U,
                                      const SmallVectorImpl<Value *> *PartsIn) {
@@ -659,10 +662,17 @@ void VectorDecomposer::decomposeWrRegion(Instruction *WrRegion,
     (*Parts)[PartIndex] = NewInst;
     NewInsts.push_back(NewInst);
   }
-  // Decompose its uses. decomposeTree removes the use, so we repeatedly process
-  // the first use until they have all gone.
-  while (!WrRegion->use_empty())
-    decomposeTree(&*WrRegion->use_begin(), Parts);
+
+  // Saving its uses for future decomposing,
+  // DecomposeParts list holds decomposed parts of input,
+  // DecomposeStack stack holds decomposeTree arguments.
+  if (!WrRegion->use_empty()) {
+    DecomposeParts.emplace_back(Parts->begin(), Parts->end());
+    auto &P = DecomposeParts.back();
+    for (auto &U : WrRegion->uses())
+      DecomposeStack.emplace(std::make_pair(&U, &P));
+  }
+
   // Now the original wrregion has no uses, and we can remove it.
   eraseInst(WrRegion);
 }
@@ -693,10 +703,15 @@ void VectorDecomposer::decomposeBitCast(Instruction *Inst,
       (*Parts)[PartIndex] = NewInst;
     }
   }
-  // Decompose its uses. decomposeTree removes the use, so we repeatedly process
-  // the first use until they have all gone.
-  while (!Inst->use_empty())
-    decomposeTree(&*Inst->use_begin(), Parts);
+  // Saving its uses for future decomposing,
+  // DecomposeParts list holds decomposed parts of input,
+  // DecomposeStack stack holds decomposeTree arguments.
+  if (!Inst->use_empty()) {
+    DecomposeParts.emplace_back(Parts->begin(), Parts->end());
+    auto &P = DecomposeParts.back();
+    for (auto &U : Inst->uses())
+      DecomposeStack.emplace(std::make_pair(&U, &P));
+  }
   // Now the original wrregion has no uses, and we can remove it.
   eraseInst(Inst);
 }
@@ -940,7 +955,7 @@ bool SelectDecomposer::determineDecomposition(Instruction *Inst) {
 
   // Extra checks to avoid aggressive splitting.
   auto BB = Inst->getParent();
-  auto check = [=](Instruction *I) {
+  auto check = [this, BB](Instruction *I) {
     if (!I->hasOneUse() || I->getParent() != BB) {
       setNotDecomposing();
       return false;
@@ -962,7 +977,7 @@ bool SelectDecomposer::determineDecomposition(Instruction *Inst) {
 
   // If there is a region read with a non-unit stride,
   // then adjust the splitting width appropriately.
-  auto adjustWidth = [=, &Width](Value *V) {
+  auto adjustWidth = [this, &Width](Value *V) {
     // If this region read only supports up to 16, then do not split into
     // simd 32. Otherwise it makes difficult to bale in this region read.
     if (Width == 32 && GenXIntrinsic::isRdRegion(V)) {

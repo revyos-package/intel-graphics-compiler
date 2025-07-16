@@ -1,5 +1,5 @@
 ; UNSUPPORTED: system-windows
-; REQUIRES: pvc-supported, regkeys
+; REQUIRES: regkeys
 
 ; RUN: igc_opt -S -dce -platformpvc -rev-id B -has-emulated-64-bit-insts -igc-emit-visa --regkey=DumpVISAASMToConsole=1 -simd-mode 16 < %s | FileCheck %s
 
@@ -42,16 +42,16 @@ declare <8 x float> @llvm.genx.GenISA.sub.group.dpas.v8f32.v8f32.v8i16.v8i32(<8 
 !3 = !{!"implicit_arg_desc", !4, !5, !6, !7, !9, !11, !13, !15}
 !4 = !{i32 0}
 !5 = !{i32 1}
-!6 = !{i32 12}
-!7 = !{i32 14, !8}
+!6 = !{i32 13}
+!7 = !{i32 15, !8}
 !8 = !{!"explicit_arg_num", i32 0}
-!9 = !{i32 14, !10}
+!9 = !{i32 15, !10}
 !10 = !{!"explicit_arg_num", i32 1}
-!11 = !{i32 14, !12}
+!11 = !{i32 15, !12}
 !12 = !{!"explicit_arg_num", i32 2}
-!13 = !{i32 14, !14}
+!13 = !{i32 15, !14}
 !14 = !{!"explicit_arg_num", i32 4}
-!15 = !{i32 14, !16}
+!15 = !{i32 15, !16}
 !16 = !{!"explicit_arg_num", i32 5}
 !17 = !{!"sub_group_size", i32 16}
 !18 = !{!"max_reg_pressure", i32 185}
@@ -159,7 +159,7 @@ declare <8 x float> @llvm.genx.GenISA.sub.group.dpas.v8f32.v8f32.v8i16.v8i32(<8 
 !121 = !{!"ForceLinearWalkOnLinearUAV", i1 false}
 !122 = !{!"DisableLscSamplerRouting", i1 false}
 !123 = !{!"UseBarrierControlFlowOptimization", i1 false}
-!124 = !{!"disableDynamicRQManagement", i1 false}
+!124 = !{!"EnableDynamicRQManagement", i1 false}
 !125 = !{!"Quad8InputThreshold", i32 0}
 !126 = !{!"FuncMD", !127, !128}
 !127 = !{!"FuncMDMap[0]", void (half addrspace(1)*, half addrspace(1)*, half addrspace(1)*, float, i8 addrspace(1)*, float addrspace(1)*, <8 x i32>, <8 x i32>, i8*, i32, i32, i32, i32, i32)* @_attn_fwd}
@@ -362,7 +362,7 @@ declare <8 x float> @llvm.genx.GenISA.sub.group.dpas.v8f32.v8f32.v8i16.v8i32(<8 
 !324 = !{!"WaDisableVRS", i1 false}
 !325 = !{!"RelaxMemoryVisibilityFromPSOrdering", i1 false}
 !326 = !{!"WaEnableVMaskUnderNonUnifromCF", i1 false}
-!327 = !{!"csInfo", !328, !329, !330, !331, !332, !33, !34, !333, !334, !335, !336, !337, !338, !339, !340, !341, !342, !343, !344, !345, !66, !346, !347, !348, !349, !350, !351, !352}
+!327 = !{!"csInfo", !328, !329, !330, !331, !332, !33, !34, !333, !334, !335, !336, !337, !338, !339, !340, !341, !342, !343, !344, !345, !66, !346, !347, !348, !349, !351, !352}
 !328 = !{!"maxWorkGroupSize", i32 0}
 !329 = !{!"waveSize", i32 0}
 !330 = !{!"ComputeShaderSecondCompile"}
@@ -385,7 +385,6 @@ declare <8 x float> @llvm.genx.GenISA.sub.group.dpas.v8f32.v8f32.v8i16.v8i32(<8 
 !347 = !{!"walkOrderEnabled", i1 false}
 !348 = !{!"walkOrderOverride", i32 0}
 !349 = !{!"ResForHfPacking"}
-!350 = !{!"hasWaveMatrix", i1 false}
 !351 = !{!"constantFoldSimdSize", i1 false}
 !352 = !{!"isNodeShader", i1 false}
 !353 = !{!"msInfo", !354, !355, !356, !357, !358, !359, !360, !361, !362, !363, !364, !312, !310, !365}

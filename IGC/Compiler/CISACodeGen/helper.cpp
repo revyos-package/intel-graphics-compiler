@@ -11,7 +11,6 @@ SPDX-License-Identifier: MIT
 #include "Compiler/CISACodeGen/CISACodeGen.h"
 #include "Compiler/CISACodeGen/OpenCLKernelCodeGen.hpp"
 #include "Compiler/Optimizer/OpenCLPasses/KernelArgs/KernelArgs.hpp"
-#include "Compiler/MetaDataUtilsWrapper.h"
 #include "common/LLVMWarningsPush.hpp"
 #include "llvm/Config/llvm-config.h"
 #include "llvmWrapper/IR/DerivedTypes.h"
@@ -27,7 +26,6 @@ SPDX-License-Identifier: MIT
 #include "GenISAIntrinsics/GenIntrinsicInst.h"
 #include "Compiler/CISACodeGen/ShaderCodeGen.hpp"
 #include "common/secure_mem.h"
-#include <stack>
 #include "Probe/Assertion.h"
 #include "helper.h"
 
@@ -1262,6 +1260,9 @@ namespace IGC
             case GenISAIntrinsic::GenISA_LSCLoadWithSideEffects:
             case GenISAIntrinsic::GenISA_LSCLoadBlock:
             case GenISAIntrinsic::GenISA_LSCLoadCmask:
+            case GenISAIntrinsic::GenISA_LSCStore:
+            case GenISAIntrinsic::GenISA_LSCStoreBlock:
+            case GenISAIntrinsic::GenISA_LSCStoreCmask:
                 pBuffer = intr->getOperand(0);
                 break;
             case GenISAIntrinsic::GenISA_intatomicrawA64:
@@ -1692,19 +1693,42 @@ namespace IGC
     {
         const CallInst* callInst = dyn_cast<CallInst>(I);
 
-        // Return true if:
-        // 1. callInst->getCalledFunction() == nullptr, this means indirect function call
-        // OR
-        // 2. Called function is not an Intrinsic.
-        bool isUserFunction = (callInst != nullptr) &&
-            ((callInst->getCalledFunction() == nullptr) || !callInst->getCalledFunction()->isIntrinsic());
+        // not a call instruction
+        if (callInst == nullptr)
+            return false;
 
-        return isUserFunction;
+        // is an indirect call
+        if (callInst->getCalledFunction() == nullptr)
+            return true;
+
+        // is intrinsic or declaration
+        if (callInst->getCalledFunction()->isIntrinsic() || callInst->getCalledFunction()->isDeclaration())
+            return false;
+
+        // is a call instruction, not an intrinsic and not a declaration - user function call
+        return true;
     }
 
-    bool isDiscardInstruction(const llvm::Instruction* I)
+    bool isHidingComplexControlFlow(const llvm::Instruction* I)
     {
-        return isa<GenIntrinsicInst>(I) && cast<GenIntrinsicInst>(I)->getIntrinsicID() == GenISAIntrinsic::GenISA_discard;
+        if (!isa<GenIntrinsicInst>(I))
+            return false;
+
+        if (isa<ContinuationHLIntrinsic>(I))
+            return true;
+
+        switch (cast<GenIntrinsicInst>(I)->getIntrinsicID())
+        {
+        case GenISAIntrinsic::GenISA_discard:
+        case GenISAIntrinsic::GenISA_ReportHitHL:
+        case GenISAIntrinsic::GenISA_AcceptHitAndEndSearchHL:
+        case GenISAIntrinsic::GenISA_IgnoreHitHL:
+            return true;
+            break;
+        default:
+            return false;
+            break;
+        }
     }
 
     bool isURBWriteIntrinsic(const llvm::Instruction* I)
@@ -3391,7 +3415,7 @@ std::vector<std::pair<unsigned int, std::string>> GetPrintfStrings(Module &M)
     {
         MDNode* argMDNode = printfMDNode->getOperand(i);
         ConstantInt* indexOpndVal =
-            mdconst::dyn_extract<ConstantInt>(argMDNode->getOperand(0));
+            mdconst::extract<ConstantInt>(argMDNode->getOperand(0));
         MDString* stringOpndVal =
             dyn_cast<MDString>(argMDNode->getOperand(1));
 
@@ -3501,7 +3525,8 @@ bool SeparateSpillAndScratch(const CodeGenContext* ctx)
     else
         separate = ctx->getModuleMetaData()->enableSeparateSpillPvtScratchSpace;
 
-    return (ctx->platform.hasScratchSurface() && separate);
+    return (ctx->platform.hasScratchSurface() && separate
+        );
 }
 
 bool UsedWithoutImmInMemInst( Value* varOffset )
@@ -3535,4 +3560,51 @@ bool UsedWithoutImmInMemInst( Value* varOffset )
 
     return false;
 }
+
+// Payload header is 8xi32 kernel argument packing 3xi32 global offset.
+// This function controls if payload header can be replaced with direct
+// use of global offset.
+bool AllowShortImplicitPayloadHeader(const CodeGenContext* ctx)
+{
+    const IGC::TriboolFlag value = static_cast<TriboolFlag>(IGC_GET_FLAG_VALUE(ShortImplicitPayloadHeader));
+
+    if (value != TriboolFlag::Default)
+        return value == TriboolFlag::Enabled;
+
+    if (!ctx->platform.supportsZEBin())
+        return false;
+
+    if (ctx->type == ShaderType::OPENCL_SHADER)
+    {
+        auto* OCLCtx = static_cast<const OpenCLProgramContext*>(ctx);
+        if (OCLCtx->m_InternalOptions.PromoteStatelessToBindless && OCLCtx->m_InternalOptions.UseBindlessLegacyMode)
+            return false;
+    }
+
+    if (ctx->platform.getPlatformInfo().eProductFamily == IGFX_PVC)
+        return false;
+
+    return ctx->platform.isCoreChildOf(IGFX_XE_HP_CORE);
+}
+
+bool AllowRemovingUnusedImplicitArguments(const CodeGenContext* ctx)
+{
+    const IGC::TriboolFlag value = static_cast<TriboolFlag>(IGC_GET_FLAG_VALUE(RemoveUnusedIdImplicitArguments));
+
+    if (value != TriboolFlag::Default)
+        return value == TriboolFlag::Enabled;
+
+    if (!ctx->platform.supportsZEBin())
+        return false;
+
+    if (ctx->type == ShaderType::OPENCL_SHADER)
+    {
+        auto* OCLCtx = static_cast<const OpenCLProgramContext*>(ctx);
+        if (OCLCtx->m_InternalOptions.PromoteStatelessToBindless && OCLCtx->m_InternalOptions.UseBindlessLegacyMode)
+            return false;
+    }
+
+    return ctx->platform.isCoreChildOf(IGFX_XE_HP_CORE);
+}
+
 } // namespace IGC

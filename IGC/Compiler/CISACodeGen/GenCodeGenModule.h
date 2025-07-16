@@ -8,7 +8,6 @@ SPDX-License-Identifier: MIT
 
 #pragma once
 #include "Compiler/MetaDataApi/MetaDataApi.h"
-#include "Compiler/CISACodeGen/helper.h"
 #include "common/LLVMWarningsPush.hpp"
 #include "llvm/IR/ValueHandle.h"
 #include "llvm/Pass.h"
@@ -105,11 +104,11 @@ namespace IGC {
             {
                 return *minor;
             }
-            bool operator==(const iterator& rhs)
+            bool operator==(const iterator& rhs) const
             {
                 return (major == rhs.major && minor == rhs.minor);
             }
-            bool operator!=(const iterator& rhs)
+            bool operator!=(const iterator& rhs) const
             {
                 return !(*this == rhs);
             }

@@ -836,8 +836,8 @@ static bool isReadWritePreDefinedVar(uint32_t index, uint32_t byteOffset) {
     // tm0.4
     return true;
   } else if (internalIndex == PreDefinedVarsInternal::SR0 &&
-             (byteOffset == 8 || byteOffset == 12)) {
-    // sr0.2, sr0.3
+             (byteOffset == 4 || byteOffset == 8)) {
+    // sr0.1, sr0.2
     return true;
   } else {
     return false;
@@ -1064,8 +1064,13 @@ void vISAVerifier::verifyInstructionMove(const CISA_INST *inst) {
     } else if (src0Type == ISA_TYPE_UD) {
       REPORT_INSTRUCTION(options, false,
                          "FCVT with UD(actually TF32) src0 is not supported");
-    }
-    else {
+    } else if (dstType == ISA_TYPE_B) {
+      REPORT_INSTRUCTION(options, src0Type == ISA_TYPE_HF,
+                         "FCVT with B(actually HF8) dst must have HF src");
+    } else if (src0Type == ISA_TYPE_B) {
+      REPORT_INSTRUCTION(options, dstType == ISA_TYPE_HF,
+                         "FCVT with B(actually HF8) src must have HF dst");
+    } else {
       REPORT_INSTRUCTION(options, false,
                          "FCVT must have either UB(actually BF8) dst or src");
     }
@@ -1073,7 +1078,7 @@ void vISAVerifier::verifyInstructionMove(const CISA_INST *inst) {
     // Check if NoMask is required
     switch (dstType) {
     case ISA_TYPE_UB:
-    {
+    case ISA_TYPE_B: {
       REPORT_INSTRUCTION(options, isNoMask(inst->getExecMask()),
                          "FCVT must use noMask for HF to FP8 conversion");
     }
@@ -1082,6 +1087,8 @@ void vISAVerifier::verifyInstructionMove(const CISA_INST *inst) {
     }
 
     bool supportSat = false;
+    if (irBuilder->getPlatform() >= Xe3)
+        supportSat = true;
     VISA_Modifier dstModifier = dst.getOperandModifier();
     VISA_Modifier srcModifier = src0.getOperandModifier();
     REPORT_INSTRUCTION(
@@ -2042,7 +2049,7 @@ void vISAVerifier::verifyInstructionCompare(const CISA_INST *inst) {
   ///     opnd0              opnd1  opnd2 opnd3
   /// cmp.rel_op (exec_size) dst    src1  src2
 
-  ISA_Opcode opcode = (ISA_Opcode)inst->opcode;
+  [[maybe_unused]] ISA_Opcode opcode = (ISA_Opcode)inst->opcode;
   vISA_ASSERT(ISA_CMP == opcode, "illegal opcode for compare instruction");
 
   for (unsigned i = 0; i < inst->opnd_num; i++) {
@@ -2072,7 +2079,7 @@ void vISAVerifier::verifyInstructionCompare(const CISA_INST *inst) {
 }
 
 void vISAVerifier::verifyInstructionAddress(const CISA_INST *inst) {
-  ISA_Opcode opcode = (ISA_Opcode)inst->opcode;
+  [[maybe_unused]] ISA_Opcode opcode = (ISA_Opcode)inst->opcode;
   vISA_ASSERT(ISA_ADDR_ADD == opcode,
               "Illegal opcode for address instruction.");
 
@@ -2465,7 +2472,7 @@ void vISAVerifier::verifyInstructionSampler(const CISA_INST *inst) {
       /// mmf mode
       const vector_opnd &mmf = getVectorOperand(inst, i++);
       if (mmf.getOperandClass() == OPERAND_IMMEDIATE) {
-        unsigned val = mmf.opnd_val.const_opnd._val.ival;
+        [[maybe_unused]] unsigned val = mmf.opnd_val.const_opnd._val.ival;
         vISA_ASSERT(val <= VA_MIN_ENABLE,
                     "MINMAX MMF Mode operand out of range.");
       }
@@ -2514,7 +2521,7 @@ void vISAVerifier::verifyInstructionSampler(const CISA_INST *inst) {
       /// mmf mode
       const vector_opnd &mmf = getVectorOperand(inst, i++);
       if (mmf.getOperandClass() == OPERAND_IMMEDIATE) {
-        unsigned val = mmf.opnd_val.const_opnd._val.ival;
+        [[maybe_unused]] unsigned val = mmf.opnd_val.const_opnd._val.ival;
         vISA_ASSERT(val <= VA_MIN_ENABLE,
                     "MINMAXFILTER MMF Mode operand out of range.");
       }
@@ -4163,6 +4170,10 @@ struct LscInstVerifier {
   void verifyUntypedBasic() {
     verifyCachingOpts();
 
+    // skip ov
+    if (hasOV(sfid, opInfo.op))
+      getNext<unsigned>();
+
        //
     auto addrType = getNextEnumU8<LSC_ADDR_TYPE>();
     uint16_t immediateScale = getNext<uint16_t>();
@@ -4350,8 +4361,6 @@ void vISAVerifier::verifyInstructionLsc(const CISA_INST *inst) {
 void vISAVerifier::verifyInstructionSrnd(const CISA_INST *inst) {
   const vector_opnd &dst = getVectorOperand(inst, 0);
   VISA_Type dstType = getVectorOperandType(header, dst);
-  VISA_Modifier dstModifier = dst.getOperandModifier();
-  bool allowSat = false;
 
   REPORT_INSTRUCTION(options, isNoMask(inst->getExecMask()),
                      "srnd must use noMask");
@@ -4360,10 +4369,6 @@ void vISAVerifier::verifyInstructionSrnd(const CISA_INST *inst) {
   REPORT_INSTRUCTION(
       options, dst.getOperandClass() == OPERAND_GENERAL,
       "Destination of this CISA instruction should be general operand.");
-
-  REPORT_INSTRUCTION(
-      options, allowSat || dstModifier == MODIFIER_NONE,
-      "Destination modifier for this CISA instruction is not allowed.");
 
   // src
   const vector_opnd &src0 = getVectorOperand(inst, 1);
@@ -4479,13 +4484,11 @@ void vISAVerifier::verifyKernelHeader() {
   // Verify inputs.
   // v3.3+, kernel may have explicit arguments followed by implicit ones.
   // This information is only used by the CM runtime, not by Finalizer.
-  unsigned implicitIndex = header->getInputCount();
   uint32_t versionNum =
       getVersionAsInt(header->getMajorVersion(), header->getMinorVersion());
   if (versionNum >= getVersionAsInt(3, 3)) {
     for (unsigned i = 0; i < header->getInputCount(); i++) {
       if (header->getInput(i)->getImplicitKind() != 0) {
-        implicitIndex = i;
         break;
       }
     }

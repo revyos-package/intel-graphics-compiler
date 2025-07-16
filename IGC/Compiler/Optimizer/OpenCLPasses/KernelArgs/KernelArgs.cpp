@@ -16,7 +16,6 @@ SPDX-License-Identifier: MIT
 #include <llvm/IR/DerivedTypes.h>
 #include <llvm/IR/Function.h>
 #include <llvm/IR/Metadata.h>
-#include <llvm/IR/Module.h>
 #include "common/LLVMWarningsPop.hpp"
 #include "Probe/Assertion.h"
 
@@ -253,8 +252,8 @@ KernelArg::ArgType KernelArg::calcArgType(const ImplicitArg& arg) const
         return KernelArg::ArgType::IMPLICIT_R0;
     case ImplicitArg::PAYLOAD_HEADER:
         return KernelArg::ArgType::IMPLICIT_PAYLOAD_HEADER;
-    case ImplicitArg::PAYLOAD_HEADER_SHORT:
-        return KernelArg::ArgType::IMPLICIT_PAYLOAD_HEADER_SHORT;
+    case ImplicitArg::GLOBAL_OFFSET:
+        return KernelArg::ArgType::IMPLICIT_GLOBAL_OFFSET;
     case ImplicitArg::PRIVATE_BASE:
         return KernelArg::ArgType::IMPLICIT_PRIVATE_BASE;
     case ImplicitArg::CONSTANT_BASE:
@@ -700,73 +699,6 @@ bool KernelArg::isArgPtrType()
 }
 
 
-iOpenCL::DATA_PARAMETER_TOKEN KernelArg::getDataParamToken() const
-{
-    auto iter = argTypeTokenMap.find(m_argType);
-    if (iter == argTypeTokenMap.end())
-    {
-        return iOpenCL::DATA_PARAMETER_TOKEN_UNKNOWN;
-    }
-
-    return iter->second;
-}
-
-
-std::map<KernelArg::ArgType, iOpenCL::DATA_PARAMETER_TOKEN> initArgTypeTokenMap()
-{
-    std::map<KernelArg::ArgType, iOpenCL::DATA_PARAMETER_TOKEN> map
-    {
-       { KernelArg::ArgType::IMPLICIT_LOCAL_IDS, iOpenCL::DATA_PARAMETER_LOCAL_ID },
-       { KernelArg::ArgType::RT_STACK_ID, iOpenCL::DATA_PARAMETER_RT_STACK_ID },
-       { KernelArg::ArgType::IMPLICIT_WORK_DIM, iOpenCL::DATA_PARAMETER_WORK_DIMENSIONS },
-       { KernelArg::ArgType::IMPLICIT_NUM_GROUPS, iOpenCL::DATA_PARAMETER_NUM_WORK_GROUPS },
-       { KernelArg::ArgType::IMPLICIT_GLOBAL_SIZE, iOpenCL::DATA_PARAMETER_GLOBAL_WORK_SIZE },
-       { KernelArg::ArgType::IMPLICIT_LOCAL_SIZE, iOpenCL::DATA_PARAMETER_LOCAL_WORK_SIZE },
-       { KernelArg::ArgType::IMPLICIT_STAGE_IN_GRID_ORIGIN, iOpenCL::DATA_PARAMETER_STAGE_IN_GRID_ORIGIN },
-       { KernelArg::ArgType::IMPLICIT_STAGE_IN_GRID_SIZE, iOpenCL::DATA_PARAMETER_STAGE_IN_GRID_SIZE },
-       { KernelArg::ArgType::IMPLICIT_ENQUEUED_LOCAL_WORK_SIZE, iOpenCL::DATA_PARAMETER_ENQUEUED_LOCAL_WORK_SIZE },
-
-       { KernelArg::ArgType::IMPLICIT_IMAGE_HEIGHT, iOpenCL::DATA_PARAMETER_IMAGE_HEIGHT },
-       { KernelArg::ArgType::IMPLICIT_IMAGE_WIDTH, iOpenCL::DATA_PARAMETER_IMAGE_WIDTH },
-       { KernelArg::ArgType::IMPLICIT_IMAGE_DEPTH, iOpenCL::DATA_PARAMETER_IMAGE_DEPTH },
-       { KernelArg::ArgType::IMPLICIT_IMAGE_NUM_MIP_LEVELS, iOpenCL::DATA_PARAMETER_IMAGE_NUM_MIP_LEVELS },
-       { KernelArg::ArgType::IMPLICIT_IMAGE_CHANNEL_DATA_TYPE, iOpenCL::DATA_PARAMETER_IMAGE_CHANNEL_DATA_TYPE },
-       { KernelArg::ArgType::IMPLICIT_IMAGE_CHANNEL_ORDER, iOpenCL::DATA_PARAMETER_IMAGE_CHANNEL_ORDER },
-       { KernelArg::ArgType::IMPLICIT_IMAGE_SRGB_CHANNEL_ORDER, iOpenCL::DATA_PARAMETER_IMAGE_SRGB_CHANNEL_ORDER },
-       { KernelArg::ArgType::IMPLICIT_IMAGE_ARRAY_SIZE, iOpenCL::DATA_PARAMETER_IMAGE_ARRAY_SIZE },
-       { KernelArg::ArgType::IMPLICIT_IMAGE_NUM_SAMPLES, iOpenCL::DATA_PARAMETER_IMAGE_NUM_SAMPLES },
-       { KernelArg::ArgType::IMPLICIT_SAMPLER_ADDRESS, iOpenCL::DATA_PARAMETER_SAMPLER_ADDRESS_MODE },
-       { KernelArg::ArgType::IMPLICIT_SAMPLER_NORMALIZED, iOpenCL::DATA_PARAMETER_SAMPLER_NORMALIZED_COORDS },
-       { KernelArg::ArgType::IMPLICIT_SAMPLER_SNAP_WA, iOpenCL::DATA_PARAMETER_SAMPLER_COORDINATE_SNAP_WA_REQUIRED },
-       { KernelArg::ArgType::IMPLICIT_FLAT_IMAGE_BASEOFFSET, iOpenCL::DATA_PARAMETER_FLAT_IMAGE_BASEOFFSET },
-       { KernelArg::ArgType::IMPLICIT_FLAT_IMAGE_HEIGHT, iOpenCL::DATA_PARAMETER_FLAT_IMAGE_HEIGHT },
-       { KernelArg::ArgType::IMPLICIT_FLAT_IMAGE_WIDTH, iOpenCL::DATA_PARAMETER_FLAT_IMAGE_WIDTH },
-       { KernelArg::ArgType::IMPLICIT_FLAT_IMAGE_PITCH, iOpenCL::DATA_PARAMETER_FLAT_IMAGE_PITCH },
-
-       { KernelArg::ArgType::IMPLICIT_VME_MB_BLOCK_TYPE, iOpenCL::DATA_PARAMETER_VME_MB_BLOCK_TYPE },
-       { KernelArg::ArgType::IMPLICIT_VME_SUBPIXEL_MODE, iOpenCL::DATA_PARAMETER_VME_SUBPIXEL_MODE },
-       { KernelArg::ArgType::IMPLICIT_VME_SAD_ADJUST_MODE, iOpenCL::DATA_PARAMETER_VME_SAD_ADJUST_MODE },
-       { KernelArg::ArgType::IMPLICIT_VME_SEARCH_PATH_TYPE, iOpenCL::DATA_PARAMETER_VME_SEARCH_PATH_TYPE },
-
-       { KernelArg::ArgType::IMPLICIT_DEVICE_ENQUEUE_DEFAULT_DEVICE_QUEUE, iOpenCL::DATA_PARAMETER_VME_SEARCH_PATH_TYPE },
-       { KernelArg::ArgType::IMPLICIT_DEVICE_ENQUEUE_EVENT_POOL, iOpenCL::DATA_PARAMETER_PARENT_EVENT },
-
-       { KernelArg::ArgType::IMPLICIT_DEVICE_ENQUEUE_MAX_WORKGROUP_SIZE, iOpenCL::DATA_PARAMETER_MAX_WORKGROUP_SIZE },
-       { KernelArg::ArgType::IMPLICIT_DEVICE_ENQUEUE_PARENT_EVENT, iOpenCL::DATA_PARAMETER_PARENT_EVENT },
-       { KernelArg::ArgType::IMPLICIT_DEVICE_ENQUEUE_PREFERED_WORKGROUP_MULTIPLE, iOpenCL::DATA_PARAMETER_PREFERRED_WORKGROUP_MULTIPLE },
-       { KernelArg::ArgType::IMPLICIT_DEVICE_ENQUEUE_DATA_PARAMETER_OBJECT_ID, iOpenCL::DATA_PARAMETER_OBJECT_ID },
-       { KernelArg::ArgType::IMPLICIT_DEVICE_ENQUEUE_DISPATCHER_SIMD_SIZE, iOpenCL::DATA_PARAMETER_CHILD_BLOCK_SIMD_SIZE },
-
-       { KernelArg::ArgType::IMPLICIT_LOCAL_MEMORY_STATELESS_WINDOW_START_ADDRESS, iOpenCL::DATA_PARAMETER_LOCAL_MEMORY_STATELESS_WINDOW_START_ADDRESS },
-       { KernelArg::ArgType::IMPLICIT_LOCAL_MEMORY_STATELESS_WINDOW_SIZE, iOpenCL::DATA_PARAMETER_LOCAL_MEMORY_STATELESS_WINDOW_SIZE },
-       { KernelArg::ArgType::IMPLICIT_PRIVATE_MEMORY_STATELESS_SIZE, iOpenCL::DATA_PARAMETER_PRIVATE_MEMORY_STATELESS_SIZE },
-       { KernelArg::ArgType::IMPLICIT_BUFFER_OFFSET, iOpenCL::DATA_PARAMETER_BUFFER_OFFSET },
-       { KernelArg::ArgType::IMPLICIT_ARG_BUFFER, iOpenCL::DATA_PARAMETER_IMPL_ARG_BUFFER },
-    };
-    return map;
-}
-const std::map<KernelArg::ArgType, iOpenCL::DATA_PARAMETER_TOKEN> KernelArg::argTypeTokenMap = initArgTypeTokenMap();
-
 bool KernelArgsOrder::VerifyOrder(std::array<KernelArg::ArgType, static_cast<int32_t>(KernelArg::ArgType::End)>& order, KernelArg::ArgType sent)
 {
     bool validOrder = false;
@@ -809,7 +741,8 @@ KernelArgsOrder::KernelArgsOrder(InputType layout)
 
             KernelArg::ArgType::RUNTIME_VALUE,
             KernelArg::ArgType::IMPLICIT_PAYLOAD_HEADER,
-            KernelArg::ArgType::IMPLICIT_PAYLOAD_HEADER_SHORT,
+            KernelArg::ArgType::IMPLICIT_GLOBAL_OFFSET,
+            KernelArg::ArgType::IMPLICIT_ENQUEUED_LOCAL_WORK_SIZE,
 
             KernelArg::ArgType::PTR_LOCAL,
             KernelArg::ArgType::PTR_GLOBAL,
@@ -831,7 +764,6 @@ KernelArgsOrder::KernelArgsOrder(InputType layout)
             KernelArg::ArgType::IMPLICIT_LOCAL_SIZE,
             KernelArg::ArgType::IMPLICIT_STAGE_IN_GRID_ORIGIN,
             KernelArg::ArgType::IMPLICIT_STAGE_IN_GRID_SIZE,
-            KernelArg::ArgType::IMPLICIT_ENQUEUED_LOCAL_WORK_SIZE,
             KernelArg::ArgType::IMPLICIT_BINDLESS_OFFSET,
 
             KernelArg::ArgType::IMPLICIT_IMAGE_HEIGHT,
@@ -936,7 +868,8 @@ KernelArgsOrder::KernelArgsOrder(InputType layout)
 
             KernelArg::ArgType::RUNTIME_VALUE,
             KernelArg::ArgType::IMPLICIT_PAYLOAD_HEADER,
-            KernelArg::ArgType::IMPLICIT_PAYLOAD_HEADER_SHORT,
+            KernelArg::ArgType::IMPLICIT_GLOBAL_OFFSET,
+            KernelArg::ArgType::IMPLICIT_ENQUEUED_LOCAL_WORK_SIZE,
             KernelArg::ArgType::PTR_LOCAL,
             KernelArg::ArgType::PTR_GLOBAL,
             KernelArg::ArgType::PTR_CONSTANT,
@@ -956,7 +889,6 @@ KernelArgsOrder::KernelArgsOrder(InputType layout)
             KernelArg::ArgType::IMPLICIT_LOCAL_SIZE,
             KernelArg::ArgType::IMPLICIT_STAGE_IN_GRID_ORIGIN,
             KernelArg::ArgType::IMPLICIT_STAGE_IN_GRID_SIZE,
-            KernelArg::ArgType::IMPLICIT_ENQUEUED_LOCAL_WORK_SIZE,
             KernelArg::ArgType::IMPLICIT_BINDLESS_OFFSET,
 
             KernelArg::ArgType::IMPLICIT_ARG_BUFFER,
@@ -1097,7 +1029,7 @@ const KernelArg& KernelArgs::const_iterator::operator*()
     return *m_minor;
 }
 
-bool KernelArgs::const_iterator::operator!=(const const_iterator& iterator)
+bool KernelArgs::const_iterator::operator!=(const const_iterator& iterator) const
 {
     if (m_empty)
         return (m_major != iterator.m_major);
@@ -1105,7 +1037,7 @@ bool KernelArgs::const_iterator::operator!=(const const_iterator& iterator)
         return (m_major != iterator.m_major) || (m_minor != iterator.m_minor);
 }
 
-bool KernelArgs::const_iterator::operator==(const const_iterator& iterator)
+bool KernelArgs::const_iterator::operator==(const const_iterator& iterator) const
 {
     if (m_empty)
         return (m_major == iterator.m_major);

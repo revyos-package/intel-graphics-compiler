@@ -834,7 +834,7 @@ void Optimizer::s0SubAfterRA() {
   kernel.fg.resetLocalDataFlowData();
   kernel.fg.localDataFlowAnalysis();
 
-  SRSubPassBeforeRA s0Sub(builder, kernel);
+  SRSubPassAfterRA s0Sub(builder, kernel);
   s0Sub.run();
 }
 
@@ -1738,6 +1738,10 @@ static bool canHoist(FlowGraph &fg, G4_BB *bb, INST_LIST_RITER revIter) {
           defSrc0->asSrcRegRegion()->hasModifier()))) {
       // we currently don't handle conversion to BF from other type than float
       // As F->BF does not support srcMod, cannot hoist if definst has mod.
+      return false;
+    }
+    // don't hoist if defInst could become a movi (localCopyProp is later pass)
+    if (fg.builder->canPromoteToMovi(defInst)) {
       return false;
     }
 
@@ -2707,7 +2711,7 @@ void Optimizer::localCopyPropagation() {
 
           // Compute the composed region if exists.
           auto getComposedRegion =
-              [=](unsigned dStride, unsigned ex1, const RegionDesc *rd1,
+              [this](unsigned dStride, unsigned ex1, const RegionDesc *rd1,
                   unsigned ex2, const RegionDesc *rd2) -> const RegionDesc * {
             // Easy cases.
             if (rd1->isScalar())
@@ -3444,6 +3448,29 @@ bool Optimizer::foldCmpToCondMod(G4_BB *bb, INST_LIST_ITER &iter) {
   if (getUnsignedTy(T1) != getUnsignedTy(T2)) {
     return false;
   }
+  if (!isSupportedCondModForLogicOp && T1 != T2) {
+    // If dst signedness of inst is not same as cmp src0, then only z/nz
+    // conditions can be evaluated correctly.
+    //
+    // If inst is a type-conversion mov then it's incorrect to use cmp src0
+    // type as mov dst type.
+    //
+    // mov A:d   B:f    // f->d mov
+    // cmp.gt P1 A:ud   0x0
+    //
+    // When folding cmp in the mov, we must preserve mov's dst type :d.
+    // Otherwise type-conversion semantics change which can lead to wrong
+    // result if f->d yields negative result.
+    //
+    // But if cmp used cmp.z/nz then folding is legal.
+    bool isDstSigned = IS_SIGNED_INT(T1);
+    bool isDstUnsigned = IS_SIGNED_INT(T1);
+    bool isSrcSigned = IS_SIGNED_INT(T2);
+    bool isSrcUnsigned = IS_SIGNED_INT(T2);
+    if (!(isDstSigned && isSrcSigned) && !(isDstUnsigned && isSrcUnsigned))
+      return false;
+  }
+
   // Skip if the dst needs saturating but it's used as different sign.
   if (inst->getSaturate() && T1 != T2) {
     return false;
@@ -4235,24 +4262,19 @@ void MSGTable::reusePreviousHeader(G4_INST *dest, G4_INST *source,
  */
 void MSGTable::insertHeaderMovInst(G4_INST *source_send, IR_Builder &builder,
                                    G4_BB *bb) {
-  G4_INST *inst = NULL;
   INST_LIST_ITER pos;
 
   switch (first) {
   case HEADER_FULL_REGISTER:
-    inst = m;
     pos = m_it;
     break;
   case HEADER_X:
-    inst = mDot0;
     pos = mDot0_it;
     break;
   case HEADER_Y:
-    inst = mDot1;
     pos = mDot1_it;
     break;
   case HEADER_SIZE:
-    inst = mDot2;
     pos = mDot2_it;
     break;
   default:
@@ -5386,8 +5408,6 @@ void Optimizer::cleanMessageHeader() {
     msgList.clear();
     auto MSGTableMem = MSGTableAlloc.Allocate();
     MSGTable *newItem = new (MSGTableMem) MSGTable();
-    // FIXME: memset is suspicious here given MSGTable is not POD.
-    memset(newItem, 0, sizeof(MSGTable));
     newItem->first = HEADER_UNDEF;
 
     msgList.push_front(newItem);
@@ -5416,7 +5436,6 @@ void Optimizer::cleanMessageHeader() {
         if (inst->isSend()) {
           auto MSGTableMem = MSGTableAlloc.Allocate();
           MSGTable *item = new (MSGTableMem) MSGTable();
-          memset(item, 0, sizeof(MSGTable));
           item->first = HEADER_UNDEF;
           msgList.push_front(item);
         }
@@ -5726,6 +5745,9 @@ void Optimizer::preRA_HWWorkaround() {
   cloneSampleInst();
 
   insertIEEEExceptionTrap();
+
+  if (builder.supportNativeSIMD32())
+    fixDirectAddrBoundOnDst();
 }
 
 //
@@ -5745,6 +5767,8 @@ void Optimizer::postRA_HWWorkaround() {
   if (builder.hasFusedEUNoMaskWA()) {
     applyNoMaskWA();
   }
+  if (builder.supportNativeSIMD32())
+    fixDirectAddrBoundOnDst();
 }
 
 // should only be called post-RA, return true if this operand has overlapping
@@ -6625,7 +6649,8 @@ void Optimizer::renameRegister() {
           newSrcRd = builder.getRegionScalar();
         } else {
           unsigned tExecSize = (execSize > 8) ? 8 : execSize;
-          if (RegionDesc::isLegal(tExecSize * dstHS, execSize, dstHS)) {
+          if (RegionDesc::isLegal(tExecSize * dstHS, execSize, dstHS) &&
+              (execSize * dstHS <= 32)) { // VS at most 32
             newSrcRd = builder.createRegionDesc((uint16_t)tExecSize * dstHS,
                                                 execSize, dstHS);
           } else {
@@ -7970,7 +7995,7 @@ void Optimizer::staticProfiling() {
 }
 
 static void markBreakpoint(G4_BB *bb, INST_LIST_ITER it, IR_Builder *builder) {
-  G4_INST *inst = *it;
+  [[maybe_unused]] G4_INST *inst = *it;
   vISA_ASSERT(inst->isIntrinsic() &&
                   inst->asIntrinsicInst()->getIntrinsicId() ==
                       Intrinsic::Breakpoint,

@@ -25,7 +25,6 @@ See LICENSE.TXT for details.
 #include "llvm/IR/CFG.h"
 #include "llvm/IR/Verifier.h"
 #include "llvm/ADT/PostOrderIterator.h"
-#include "llvmWrapper/IR/Function.h"
 #include "llvmWrapper/IR/Value.h"
 #include "llvmWrapper/IR/DerivedTypes.h"
 #include <llvmWrapper/Analysis/TargetLibraryInfo.h>
@@ -831,6 +830,7 @@ namespace IGC {
         IGC_INITIALIZE_PASS_DEPENDENCY(LoopInfoWrapperPass)
         IGC_INITIALIZE_PASS_DEPENDENCY(AAResultsWrapperPass)
         IGC_INITIALIZE_PASS_DEPENDENCY(CodeGenContextWrapper)
+        IGC_INITIALIZE_PASS_DEPENDENCY(VectorShuffleAnalysis)
         IGC_INITIALIZE_PASS_DEPENDENCY(IGCLivenessAnalysis)
         IGC_INITIALIZE_PASS_DEPENDENCY(IGCFunctionExternalRegPressureAnalysis)
         IGC_INITIALIZE_PASS_END(CodeLoopSinking, PASS_FLAG1, PASS_DESCRIPTION1, PASS_CFG_ONLY1, PASS_ANALYSIS1)

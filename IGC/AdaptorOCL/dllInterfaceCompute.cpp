@@ -53,14 +53,7 @@ SPDX-License-Identifier: MIT
 #include <iStdLib/MemCopy.h>
 
 #if defined(IGC_SPIRV_ENABLED)
-#include "common/LLVMWarningsPush.hpp"
-#include "AdaptorOCL/SPIRV/SPIRVconsum.h"
-#include "common/LLVMWarningsPop.hpp"
-#include "AdaptorOCL/SPIRV/libSPIRV/SPIRVModule.h"
-#include "AdaptorOCL/SPIRV/libSPIRV/SPIRVValue.h"
-#if defined(IGC_SCALAR_USE_KHRONOS_SPIRV_TRANSLATOR)
 #include "LLVMSPIRVLib.h"
-#endif
 #endif
 
 #ifdef IGC_SPIRV_TOOLS_ENABLED
@@ -353,6 +346,21 @@ void GenerateCompilerOptionsMD(
     NamedMD->addOperand(llvm::MDNode::get(C, ValueVec));
 }
 
+// Ensure unnamed global variables are assigned names immediately after translating from SPIRV to LLVM.
+// This must occur before removing kernels that do not require recompilation.
+// Naming global variables after kernels removal can result in inconsistent naming compared to the first compilation,
+// potentially causing crashes in the ProgramScopeConstantAnalysis pass.
+void AssignNamesToUnnamedGlobalVariables(llvm::Module& M)
+{
+    for (auto& G : M.getGlobalList())
+    {
+        if (!G.hasName())
+        {
+            G.setName("gVar");
+        }
+    }
+}
+
 // Dump shader (binary or text), to output directory.
 // Create directory if it doesn't exist.
 // Works for all OSes.
@@ -381,7 +389,7 @@ void DumpShaderFile(
         << ext;
     std::string fullFilePathStr = dstDir + fileName.str();
 
-    if (doesRegexMatch(fileName.str(), IGC_GET_REGKEYSTRING(ShaderDumpFilter)))
+    if (doesRegexMatch(fileName.str(), IGC_GET_REGKEYSTRING(ShaderDumpRegexFilter)))
     {
         FILE* pFile = NULL;
         fopen_s(&pFile, fullFilePathStr.c_str(), "wb");
@@ -450,6 +458,27 @@ bool CheckForImageUsage(const std::string & SPIRVBinary) {
     return it != textReport.Capabilities.end();
 }
 
+void GenerateSPIRVExtensionsMD(llvm::LLVMContext& C, llvm::Module& M, const std::string& SPIRVBinary)
+{
+    std::istringstream repIS(SPIRVBinary);
+    std::optional<SPIRV::SPIRVModuleReport> report = IGCLLVM::makeOptional(SPIRV::getSpirvReport(repIS));
+
+    if (!report.has_value())
+        return;
+
+    if (report->Extensions.empty())
+        return;
+
+    std::vector<llvm::Metadata*> ExtensionsVec;
+    for (const auto& E : report->Extensions)
+    {
+        ExtensionsVec.push_back(llvm::MDString::get(C, E));
+    }
+
+    llvm::NamedMDNode* SPIRVExtensionsMD = M.getOrInsertNamedMetadata("igc.spirv.extensions");
+    SPIRVExtensionsMD->addOperand(llvm::MDNode::get(C, ExtensionsVec));
+}
+
 // Translate SPIR-V binary to LLVM Module
 bool TranslateSPIRVToLLVM(
     const STB_TranslateInputArgs& InputArgs,
@@ -466,7 +495,6 @@ bool TranslateSPIRVToLLVM(
         InputArgs.pSpecConstantsValues,
         InputArgs.SpecConstantsSize);
 
-#if defined(IGC_SCALAR_USE_KHRONOS_SPIRV_TRANSLATOR)
     // Set SPIRV-LLVM-Translator translation options
     SPIRV::TranslatorOpts Opts;
     Opts.enableGenArgNameMD();
@@ -497,20 +525,22 @@ bool TranslateSPIRVToLLVM(
 
     // Actual translation from SPIR-V to LLVM
     success = llvm::readSpirv(Context, Opts, IS, LLVMModule, stringErrMsg);
-#else // IGC Legacy SPIRV Translator
-    success = igc_spv::ReadSPIRV(Context, IS, LLVMModule, stringErrMsg, &specIDToSpecValueMap);
-#endif
 
-    // Handle OpenCL Compiler Options
     if (success)
     {
+        AssignNamesToUnnamedGlobalVariables(*LLVMModule);
+
+        // Handle OpenCL Compiler Options
         GenerateCompilerOptionsMD(
             Context,
             *LLVMModule,
             llvm::StringRef(InputArgs.pOptions, InputArgs.OptionsSize));
 
-      if (IGC_IS_FLAG_ENABLED(ShaderDumpTranslationOnly))
-          LLVMModule->dump();
+        // Parse SPIRV extensions and encode them as 'igc.spirv.extensions' metadata
+        GenerateSPIRVExtensionsMD(Context, *LLVMModule, SPIRVBinary.str());
+
+        if (IGC_IS_FLAG_ENABLED(ShaderDumpTranslationOnly))
+            LLVMModule->dump();
     }
 
     return success;
@@ -533,7 +563,7 @@ bool ProcessElfInput(
     CLElfLib::RAIIElf X(pElfReader); // When going out of scope this object calls the Delete() function automatically
 
     // If input buffer is an ELF file, then process separately
-    const CLElfLib::SElf64Header* pHeader = pElfReader->GetElfHeader();
+    const CLElfLib::SElfHeader* pHeader = pElfReader->GetElfHeader();
     if (pHeader != NULL)
     {
         // Create an empty module to store the output
@@ -545,7 +575,7 @@ bool ProcessElfInput(
             // Dumping SPIRV files with temporary hashes
             for (unsigned i = 1; i < pHeader->NumSectionHeaderEntries; i++)
             {
-                const CLElfLib::SElf64SectionHeader* pSectionHeader = pElfReader->GetSectionHeader(i);
+                const CLElfLib::SElfSectionHeader* pSectionHeader = pElfReader->GetSectionHeader(i);
                 IGC_ASSERT(pSectionHeader != NULL);
                 if (pSectionHeader->Type != CLElfLib::SH_TYPE_SPIRV)
                 {
@@ -577,16 +607,20 @@ bool ProcessElfInput(
                 DumpShaderFile(pOutputFolder, pSPIRVBitcode, size, hash, suffix + ".spv");
 
 #if defined(IGC_SPIRV_TOOLS_ENABLED)
-                spv_text spirvAsm = nullptr;
-                // Similarly replace any spvasm dump from GetSpecConstantsInfo
-                std::string prevSpvAsmPath = pOutputFolder;
-                prevSpvAsmPath += "OCL_asm" + spvHashString + ".spvasm";
-                llvm::sys::fs::remove(prevSpvAsmPath);
-                if (DisassembleSPIRV(pSPIRVBitcode, size, &spirvAsm) == SPV_SUCCESS)
+                if (IGC_IS_FLAG_ENABLED(SpvAsmDumpEnable))
                 {
-                    DumpShaderFile(pOutputFolder, spirvAsm->str, spirvAsm->length, hash, suffix + ".spvasm");
+                    spv_text spirvAsm = nullptr;
+                    // Similarly replace any spvasm dump from GetSpecConstantsInfo
+                    std::string prevSpvAsmPath = pOutputFolder;
+                    prevSpvAsmPath += "OCL_asm" + spvHashString + ".spvasm";
+                    llvm::sys::fs::remove(prevSpvAsmPath);
+                    if (DisassembleSPIRV(pSPIRVBitcode, size, &spirvAsm) == SPV_SUCCESS)
+                    {
+                        DumpShaderFile(pOutputFolder, spirvAsm->str, spirvAsm->length, hash, suffix + ".spvasm");
+                    }
+                    spvTextDestroy(spirvAsm);
                 }
-                spvTextDestroy(spirvAsm);
+
 #endif // defined(IGC_SPIRV_TOOLS_ENABLED)
             }
         }
@@ -602,7 +636,7 @@ bool ProcessElfInput(
         // Iterate over all the input modules.
         for (unsigned i = 1; i < pHeader->NumSectionHeaderEntries; i++)
         {
-            const CLElfLib::SElf64SectionHeader* pSectionHeader = pElfReader->GetSectionHeader(i);
+            const CLElfLib::SElfSectionHeader* pSectionHeader = pElfReader->GetSectionHeader(i);
             IGC_ASSERT(pSectionHeader != NULL);
 
             char* pData = NULL;
@@ -863,15 +897,6 @@ bool ProcessElfInput(
             {
                 if (hasVISALinking)
                 {
-                    if (!Context.enableZEBinary()) {
-                        SetErrorMessage(
-                            "vISA linking can be used only with ZeBinary "
-                            "compiler output format. It seems that it is "
-                            "currently disabled for your platform.",
-                            OutputArgs);
-                        return false;
-                    }
-
                     ShaderHash hash = ShaderHashOCL(
                         reinterpret_cast<const UINT*>(InputArgs.pInput),
                         InputArgs.InputSize / 4);
@@ -1063,7 +1088,6 @@ bool ReadSpecConstantsFromSPIRV(
     std::istream& IS,
     std::vector<std::pair<uint32_t, uint32_t>>& OutSCInfo)
 {
-#if defined(IGC_SCALAR_USE_KHRONOS_SPIRV_TRANSLATOR)
     // Parse SPIRV Module and add all decorated specialization constants to OutSCInfo vector
     // as a pair of <spec-const-id, spec-const-size-in-bytes>. It's crucial for OCL Runtime to
     // properly validate clSetProgramSpecializationConstant API call.
@@ -1079,38 +1103,6 @@ bool ReadSpecConstantsFromSPIRV(
   }
 
   return result;
-#endif
-#else // IGC Legacy SPIRV Translator
-    using namespace igc_spv;
-
-    std::unique_ptr<SPIRVModule> BM(SPIRVModule::createSPIRVModule());
-    IS >> *BM;
-
-    auto SPV = BM->parseSpecConstants();
-
-    for (auto& SC : SPV)
-    {
-        SPIRVType* type = SC->getType();
-        uint32_t spec_size = type->isTypeBool() ? 1 : type->getBitWidth() / 8;
-
-        if (SC->hasDecorate(DecorationSpecId))
-        {
-            SPIRVWord spec_id = *SC->getDecorate(DecorationSpecId).begin();
-            Op OP = SC->getOpCode();
-            if (OP == OpSpecConstant ||
-                OP == OpSpecConstantFalse ||
-                OP == OpSpecConstantTrue)
-            {
-                OutSCInfo.push_back(std::make_pair(spec_id, spec_size));
-            }
-            else
-            {
-                IGC_ASSERT_MESSAGE(0, "Wrong instruction opcode, shouldn't be here!");
-                return false;
-            }
-        }
-    }
-    return true;
 #endif
 }
 #endif
@@ -1316,12 +1308,15 @@ bool TranslateBuildSPMD(
         {
             DumpShaderFile(pOutputFolder, pInputArgs->pInput, pInputArgs->InputSize, hash, ".spv", &inputf);
 #if defined(IGC_SPIRV_TOOLS_ENABLED)
-            spv_text spirvAsm = nullptr;
-            if (DisassembleSPIRV(pInputArgs->pInput, pInputArgs->InputSize, &spirvAsm) == SPV_SUCCESS)
+            if (IGC_IS_FLAG_ENABLED(SpvAsmDumpEnable))
             {
-                DumpShaderFile(pOutputFolder, spirvAsm->str, spirvAsm->length, hash, ".spvasm");
+                spv_text spirvAsm = nullptr;
+                if (DisassembleSPIRV(pInputArgs->pInput, pInputArgs->InputSize, &spirvAsm) == SPV_SUCCESS)
+                {
+                    DumpShaderFile(pOutputFolder, spirvAsm->str, spirvAsm->length, hash, ".spvasm");
+                }
+                spvTextDestroy(spirvAsm);
             }
-            spvTextDestroy(spirvAsm);
 #endif // defined(IGC_SPIRV_TOOLS_ENABLED)
         }
 
@@ -1416,15 +1411,16 @@ bool TranslateBuildSPMD(
 
     // Set default denorm.
     // Note that those values have been set to FLOAT_DENORM_FLUSH_TO_ZERO
+    CompOptions* compOpt = &oclContext.getModuleMetaData()->compOpt;
     if (IGFX_GEN8_CORE <= oclContext.platform.GetPlatformFamily())
     {
-        oclContext.m_floatDenormMode16 = FLOAT_DENORM_RETAIN;
-        oclContext.m_floatDenormMode32 = FLOAT_DENORM_RETAIN;
-        oclContext.m_floatDenormMode64 = FLOAT_DENORM_RETAIN;
+        compOpt->FloatDenormMode16 = FLOAT_DENORM_RETAIN;
+        compOpt->FloatDenormMode32 = FLOAT_DENORM_RETAIN;
+        compOpt->FloatDenormMode64 = FLOAT_DENORM_RETAIN;
     }
     if (oclContext.platform.hasBFTFDenormMode())
     {
-        oclContext.m_floatDenormModeBFTF = FLOAT_DENORM_RETAIN;
+        compOpt->FloatDenormModeBFTF = FLOAT_DENORM_RETAIN;
     }
 
     unsigned PtrSzInBits = pKernelModule->getDataLayout().getPointerSizeInBits();
@@ -1500,12 +1496,12 @@ bool TranslateBuildSPMD(
                 ModuleMetaData* modMD = oclContext.getModuleMetaData();
                 if (modMD->compOpt.DenormsAreZero)
                 {
-                    oclContext.m_floatDenormMode16 = FLOAT_DENORM_FLUSH_TO_ZERO;
-                    oclContext.m_floatDenormMode32 = FLOAT_DENORM_FLUSH_TO_ZERO;
+                    modMD->compOpt.FloatDenormMode16 = FLOAT_DENORM_FLUSH_TO_ZERO;
+                    modMD->compOpt.FloatDenormMode32 = FLOAT_DENORM_FLUSH_TO_ZERO;
                 }
                 if (modMD->compOpt.BFTFDenormsAreZero)
                 {
-                    oclContext.m_floatDenormModeBFTF = FLOAT_DENORM_FLUSH_TO_ZERO;
+                    modMD->compOpt.FloatDenormModeBFTF = FLOAT_DENORM_FLUSH_TO_ZERO;
                 }
                 if (IGC_GET_FLAG_VALUE(ForceFastestSIMD))
                 {
@@ -1561,6 +1557,20 @@ bool TranslateBuildSPMD(
                 // Remove annotations for kernels that do not require recompilation
                 RebuildGlobalAnnotations(oclContext, pKernelModule);
 
+                // Set default denorm since metadata was cleared.
+                // Note that those values have been set to FLOAT_DENORM_FLUSH_TO_ZERO
+                compOpt = &oclContext.getModuleMetaData()->compOpt;
+                if (IGFX_GEN8_CORE <= oclContext.platform.GetPlatformFamily())
+                {
+                    compOpt->FloatDenormMode16 = FLOAT_DENORM_RETAIN;
+                    compOpt->FloatDenormMode32 = FLOAT_DENORM_RETAIN;
+                    compOpt->FloatDenormMode64 = FLOAT_DENORM_RETAIN;
+                }
+                if (oclContext.platform.hasBFTFDenormMode())
+                {
+                    compOpt->FloatDenormModeBFTF = FLOAT_DENORM_RETAIN;
+                }
+
                 for (auto it = pKernelModule->getFunctionList().begin(), ie = pKernelModule->getFunctionList().end(); it != ie;)
                 {
                     Function* pFunc = &*(it++);
@@ -1610,42 +1620,28 @@ bool TranslateBuildSPMD(
     oclContext.metrics.FinalizeStats();
     oclContext.metrics.OutputMetrics();
 
-    if (!oclContext.enableZEBinary())
+    llvm::SmallVector<char, 64> buf;
+    llvm::raw_svector_ostream llvm_os(buf);
+    const bool excludeIRFromZEBinary = IGC_IS_FLAG_ENABLED(ExcludeIRFromZEBinary) || oclContext.getModuleMetaData()->compOpt.ExcludeIRFromZEBinary;
+    const char* spv_data = nullptr;
+    uint32_t spv_size = 0;
+    if (inputDataFormatTemp == TB_DATA_FORMAT_SPIR_V && !excludeIRFromZEBinary)
     {
-        Util::BinaryStream programBinary;
-        // Patch token based binary format
-        oclContext.m_programOutput.CreateKernelBinaries();
-        oclContext.m_programOutput.GetProgramBinary(programBinary, pointerSizeInBytes);
-        binarySize = static_cast<int>(programBinary.Size());
-        binaryOutput = new char[binarySize];
-        memcpy_s(binaryOutput, binarySize, programBinary.GetLinearPointer(), binarySize);
+        spv_data = pInputArgs->pInput;
+        spv_size = pInputArgs->InputSize;
     }
-    else
-    {
-        // ze binary format
-        llvm::SmallVector<char, 64> buf;
-        llvm::raw_svector_ostream llvm_os(buf);
-        const bool excludeIRFromZEBinary = IGC_IS_FLAG_ENABLED(ExcludeIRFromZEBinary) || oclContext.getModuleMetaData()->compOpt.ExcludeIRFromZEBinary;
-        const char* spv_data = nullptr;
-        uint32_t spv_size = 0;
-        if (inputDataFormatTemp == TB_DATA_FORMAT_SPIR_V && !excludeIRFromZEBinary)
-        {
-            spv_data = pInputArgs->pInput;
-            spv_size = pInputArgs->InputSize;
-        }
 
-        // IGC metrics
-        size_t metricDataSize = oclContext.metrics.getMetricDataSize();
-        auto metricData = reinterpret_cast<const char*>(oclContext.metrics.getMetricData());
+    // IGC metrics
+    size_t metricDataSize = oclContext.metrics.getMetricDataSize();
+    auto metricData = reinterpret_cast<const char*>(oclContext.metrics.getMetricData());
 
-        oclContext.m_programOutput.GetZEBinary(llvm_os, pointerSizeInBytes,
-            spv_data, spv_size, metricData, metricDataSize, pInputArgs->pOptions, pInputArgs->OptionsSize);
+    oclContext.m_programOutput.GetZEBinary(llvm_os, pointerSizeInBytes,
+        spv_data, spv_size, metricData, metricDataSize, pInputArgs->pOptions, pInputArgs->OptionsSize);
 
-        // FIXME: try to avoid memory copy here
-        binarySize = buf.size();
-        binaryOutput = new char[binarySize];
-        memcpy_s(binaryOutput, binarySize, buf.data(), buf.size());
-    }
+    // FIXME: try to avoid memory copy here
+    binarySize = buf.size();
+    binaryOutput = new char[binarySize];
+    memcpy_s(binaryOutput, binarySize, buf.data(), buf.size());
 
     if (IGC_IS_FLAG_ENABLED(ShaderDumpEnable))
         dumpOCLProgramBinary(oclContext, binaryOutput, binarySize);
@@ -1826,6 +1822,7 @@ bool CIGCTranslationBlock::Initialize(const STB_CreateArgs* pCreateArgs)
 
 static constexpr STB_TranslationCode g_cICBETranslationCodes[] =
 {
+// clang-format off
     { { TB_DATA_FORMAT_ELF,           TB_DATA_FORMAT_LLVM_BINARY   } },
     { { TB_DATA_FORMAT_LLVM_TEXT,     TB_DATA_FORMAT_DEVICE_BINARY } },
     { { TB_DATA_FORMAT_LLVM_BINARY,   TB_DATA_FORMAT_DEVICE_BINARY } },
@@ -1837,6 +1834,7 @@ static constexpr STB_TranslationCode g_cICBETranslationCodes[] =
     { { TB_DATA_FORMAT_LLVM_TEXT,     TB_DATA_FORMAT_NON_COHERENT_DEVICE_BINARY } },
     { { TB_DATA_FORMAT_LLVM_BINARY,   TB_DATA_FORMAT_NON_COHERENT_DEVICE_BINARY } },
     { { TB_DATA_FORMAT_SPIR_V,        TB_DATA_FORMAT_NON_COHERENT_DEVICE_BINARY } }
+// clang-format on
 };
 
 TRANSLATION_BLOCK_API void Register(STB_RegisterArgs* pRegisterArgs)

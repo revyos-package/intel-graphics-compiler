@@ -9,7 +9,6 @@ SPDX-License-Identifier: MIT
 #include "Compiler/CISACodeGen/PatternMatchPass.hpp"
 #include "Compiler/CISACodeGen/EmitVISAPass.hpp"
 #include "Compiler/CISACodeGen/DeSSA.hpp"
-#include "Compiler/MetaDataApi/IGCMetaDataHelper.h"
 #include "common/igc_regkeys.hpp"
 #include "common/LLVMWarningsPush.hpp"
 #include <llvm/IR/InlineAsm.h>
@@ -222,9 +221,9 @@ namespace IGC
     bool CodeGenPatternMatch::FlushesDenormsOnOutput(Instruction& I)
     {
         bool flushesDenorms = false;
-        if ((m_ctx->m_floatDenormMode16 == IGC::FLOAT_DENORM_FLUSH_TO_ZERO && I.getType()->isHalfTy()) ||
-            (m_ctx->m_floatDenormMode32 == IGC::FLOAT_DENORM_FLUSH_TO_ZERO && I.getType()->isFloatTy()) ||
-            (m_ctx->m_floatDenormMode64 == IGC::FLOAT_DENORM_FLUSH_TO_ZERO && I.getType()->isDoubleTy()))
+        if ((m_ctx->getModuleMetaData()->compOpt.FloatDenormMode16 == IGC::FLOAT_DENORM_FLUSH_TO_ZERO && I.getType()->isHalfTy()) ||
+            (m_ctx->getModuleMetaData()->compOpt.FloatDenormMode32 == IGC::FLOAT_DENORM_FLUSH_TO_ZERO && I.getType()->isFloatTy()) ||
+            (m_ctx->getModuleMetaData()->compOpt.FloatDenormMode64 == IGC::FLOAT_DENORM_FLUSH_TO_ZERO && I.getType()->isDoubleTy()))
         {
             switch (GetOpCode(&I))
             {
@@ -295,9 +294,9 @@ namespace IGC
     bool CodeGenPatternMatch::FlushesDenormsOnInput(Instruction& I)
     {
         bool flushesDenorms = false;
-        if ((m_ctx->m_floatDenormMode16 == IGC::FLOAT_DENORM_FLUSH_TO_ZERO && I.getType()->isHalfTy()) ||
-            (m_ctx->m_floatDenormMode32 == IGC::FLOAT_DENORM_FLUSH_TO_ZERO && I.getType()->isFloatTy()) ||
-            (m_ctx->m_floatDenormMode64 == IGC::FLOAT_DENORM_FLUSH_TO_ZERO && I.getType()->isDoubleTy()))
+        if ((m_ctx->getModuleMetaData()->compOpt.FloatDenormMode16 == IGC::FLOAT_DENORM_FLUSH_TO_ZERO && I.getType()->isHalfTy()) ||
+            (m_ctx->getModuleMetaData()->compOpt.FloatDenormMode32 == IGC::FLOAT_DENORM_FLUSH_TO_ZERO && I.getType()->isFloatTy()) ||
+            (m_ctx->getModuleMetaData()->compOpt.FloatDenormMode64 == IGC::FLOAT_DENORM_FLUSH_TO_ZERO && I.getType()->isDoubleTy()))
         {
             switch (GetOpCode(&I))
             {
@@ -421,10 +420,7 @@ namespace IGC
 
     bool CodeGenPatternMatch::supportsLSCImmediateGlobalBaseOffset()
     {
-        bool res = IGC_GET_FLAG_VALUE(LscImmOffsMatch) > 1 ||
-            (m_Platform.matchImmOffsetsLSC() &&
-                (m_ctx->m_DriverInfo.supportsLSCImmediateGlobalBaseOffsetForA64() ||
-                    m_ctx->m_DriverInfo.supportsLSCImmediateGlobalBaseOffsetForA32()));
+        bool res = IGC_GET_FLAG_VALUE(LscImmOffsMatch) > 1 || m_Platform.matchImmOffsetsLSC();
         return res;
     }
 
@@ -965,6 +961,46 @@ namespace IGC
         return true;
     }
 
+    bool CodeGenPatternMatch::MatchShrSatModifier(llvm::SelectInst& I)
+    {
+        struct ShrSatPattern : public Pattern
+        {
+            SSource sources[2];
+            Instruction* inst;
+            virtual void Emit(EmitPass* pass, const DstModifier& modifier)
+            {
+                DstModifier mod = modifier;
+                mod.sat = true;
+                pass->EmitSimpleAlu(GetOpCode(inst), sources, mod, true /*isUnsigned*/);
+            }
+        };
+
+        Value* LHS = nullptr, * RHS = nullptr;
+        if (isMax(&I, LHS, RHS))
+        {
+            if (isa<ConstantInt>(LHS) || isa<ConstantInt>(RHS))
+            {
+                ConstantInt* c = isa<ConstantInt>(LHS) ? cast<ConstantInt>(LHS) : cast<ConstantInt>(RHS);
+                if (c->getZExtValue() == 0)
+                {
+                    Value* v = isa<ConstantInt>(LHS) ? RHS : LHS;
+                    if (isa<LShrOperator>(v) || isa<AShrOperator>(v))
+                    {
+                        Instruction* inst = cast<Instruction>(v);
+                        ShrSatPattern* pattern = new (m_allocator) ShrSatPattern();
+                        pattern->inst = inst;
+                        pattern->sources[0] = GetSource(inst->getOperand(0), false, false, IsSourceOfSample(&I));
+                        pattern->sources[1] = GetSource(inst->getOperand(1), false, false, IsSourceOfSample(&I));
+                        AddPattern(pattern);
+
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
     void CodeGenPatternMatch::visitFPToSIInst(llvm::FPToSIInst& I) {
         bool match = MatchFPToIntegerWithSaturation(I) || MatchModifier(I);
         IGC_ASSERT_MESSAGE(match, "Pattern match Failed");
@@ -1001,7 +1037,13 @@ namespace IGC
         bool match = 0;
         if (I.getOpcode() == Instruction::SExt)
         {
-            match = MatchCmpSext(I) ||
+            match = MatchUnpack4i8(I) ||
+                MatchCmpSext(I) ||
+                MatchModifier(I);
+        }
+        else if (I.getOpcode() == Instruction::ZExt)
+        {
+            match = MatchUnpack4i8(I) ||
                 MatchModifier(I);
         }
         else if (I.getOpcode() == Instruction::SIToFP)
@@ -1160,6 +1202,7 @@ namespace IGC
     {
         bool match = MatchFloatingPointSatModifier(I) ||
             MatchIntegerTruncSatModifier(I) ||
+            MatchShrSatModifier(I) ||
             MatchAbsNeg(I) ||
             MatchFPToIntegerWithSaturation(I) ||
             MatchMinMax(I) ||
@@ -1203,8 +1246,12 @@ namespace IGC
             break;
         case Instruction::UDiv:
         case Instruction::SDiv:
+            match = MatchAvg(I) ||
+                MatchModifier(I);
+            break;
         case Instruction::AShr:
             match = MatchAvg(I) ||
+                MatchBinaryUnpack4i8(I) ||
                 MatchModifier(I);
             break;
         case Instruction::FMul:
@@ -1214,11 +1261,17 @@ namespace IGC
         case Instruction::URem:
         case Instruction::SRem:
         case Instruction::FRem:
-        case Instruction::Shl:
             match = MatchModifier(I);
             break;
+        case Instruction::Shl:
+            match =
+                MatchBinaryUnpack4i8(I) ||
+                MatchModifier(I);
+            break;
         case Instruction::LShr:
-            match = MatchModifier(I, false);
+            match =
+                MatchBinaryUnpack4i8(I) ||
+                MatchModifier(I, false);
             break;
         case Instruction::FDiv:
             match = MatchRsqrt(I) ||
@@ -1319,6 +1372,13 @@ namespace IGC
             case GenISAIntrinsic::GenISA_atomiccounterinc:
             case GenISAIntrinsic::GenISA_atomiccounterpredec:
             case GenISAIntrinsic::GenISA_ldptr:
+                if (supportsLSCImmediateGlobalBaseOffset()) {
+                    match = MatchImmOffsetLSC(I);
+                    if (match)
+                        return;
+                }
+                match = MatchSingleInstruction(I);
+                break;
             case GenISAIntrinsic::GenISA_ldrawvector_indexed:
             case GenISAIntrinsic::GenISA_ldraw_indexed:
             case GenISAIntrinsic::GenISA_storerawvector_indexed:
@@ -1662,8 +1722,9 @@ namespace IGC
                 }
             }
         }
-
-        MatchSingleInstruction(I);
+        bool match = false;
+        match = MatchRepack4i8(I) || MatchPack4i8(I) || MatchSingleInstruction(I);
+        IGC_ASSERT_MESSAGE(match, "Unsupported BitCast instruction");
     }
 
     void CodeGenPatternMatch::visitIntToPtrInst(IntToPtrInst& I) {
@@ -2282,6 +2343,14 @@ namespace IGC
         BitCastInst* bitCastInst1 = llvm::dyn_cast<llvm::BitCastInst>(I.getOperand(1));
         BitCastInst* bitCastInst = NULL;
 
+        for (auto UI = I.user_begin(); UI != I.user_end(); ++UI)
+        {
+            if (isa<GenIntrinsicInst>(*UI, GenISAIntrinsic::GenISA_fsat))
+            {
+                return false;
+            }
+        }
+
         if (!bitCastInst0 && !bitCastInst1)
         {
             return false;
@@ -2363,14 +2432,26 @@ namespace IGC
             SSource sources[3];
             virtual void Emit(EmitPass* pass, const DstModifier& modifier)
             {
-                pass->Mad(sources, modifier);
+                if (IGC_IS_FLAG_ENABLED(EnableVectorEmitter) &&
+                        sources[0].value->getType()->isVectorTy() &&
+                        sources[1].value->getType()->isVectorTy() &&
+                        sources[2].value->getType()->isVectorTy())
+                    pass->VectorMad(sources, modifier);
+                else
+                    pass->Mad(sources, modifier);
             }
         };
 
         auto isFpMad = [](const Instruction& I)
         {
-            return I.getType()->isFloatingPointTy();
+            auto vecType = llvm::dyn_cast<FixedVectorType>(I.getType());
+            if (!vecType) return I.getType()->isFloatingPointTy();
+
+            bool isFPType = vecType->getElementType()->isFloatingPointTy() &&
+                IGC_IS_FLAG_ENABLED(VectorizerAllowFMADMatching);
+            return isFPType;
         };
+
 
         if (isFpMad(I) && (m_ctx->getModuleMetaData()->isPrecise || m_ctx->getModuleMetaData()->compOpt.disableMathRefactoring))
         {
@@ -2671,9 +2752,9 @@ namespace IGC
                 } else if (isa<StoreInst>(m_inst)) {
                     pass->emitStore(cast<StoreInst>(m_inst), m_varOff, m_immOff);
                 } else if (isa<LdRawIntrinsic>(m_inst)) {
-                    pass->emitLoadRawIndexed(cast<LdRawIntrinsic>(m_inst), m_varOff, m_immOff);
+                    pass->emitLoadRawIndexed(cast<LdRawIntrinsic>(m_inst), m_varOff, nullptr, m_immOff);
                 } else if (isa<StoreRawIntrinsic>(m_inst)) {
-                    pass->emitStoreRawIndexed(cast<StoreRawIntrinsic>(m_inst), m_varOff, m_immOff);
+                    pass->emitStoreRawIndexed(cast<StoreRawIntrinsic>(m_inst), m_varOff, nullptr, m_immOff);
                 } else {
                     IGC_ASSERT_MESSAGE(false, "unmatched imm off pattern");
                 }
@@ -2746,14 +2827,6 @@ namespace IGC
         bool isA64AddressingModel = addInstType->isPointerTy() &&
             IGC::isA64Ptr(cast<PointerType>(addInstType), m_ctx);
 
-        bool isSupportedCase =
-            (isA64AddressingModel && m_ctx->m_DriverInfo.supportsLSCImmediateGlobalBaseOffsetForA64()) ||
-            (!isA64AddressingModel && m_ctx->m_DriverInfo.supportsLSCImmediateGlobalBaseOffsetForA32()) ||
-            IGC_GET_FLAG_VALUE(LscImmOffsMatch) > 1;
-        if (!isSupportedCase)
-        {
-            return false;
-        }
         llvm::Instruction* intToPtrInst = nullptr;
         if (addSubInst->getOpcode() == llvm::Instruction::IntToPtr) {
             intToPtrInst = addSubInst;
@@ -2783,11 +2856,19 @@ namespace IGC
             llvm::Value* varOffset = isConstant0 ?
                 addSubInst->getOperand(1) : addSubInst->getOperand(0);
 
+            if(!isA64AddressingModel && m_ctx->type != ShaderType::OPENCL_SHADER && IGC_GET_FLAG_VALUE(LscImmOffsMatch) < 2)
+                return false;
+
             // HW does an early bounds check on varOffset for A32 messages. Thus, if varOffset
             // is negative, then the bounds check fails early even though the immediate offset
             // would bring the final calculation to a positive number.
-            if (!isA64AddressingModel && !UsedWithoutImmInMemInst(varOffset) && !valueIsPositive(varOffset, m_DL) && IGC_GET_FLAG_VALUE(LscImmOffsMatch) < 3)
-                return false;
+            bool disableA32ImmediateGlobalBaseOffset =
+                !isA64AddressingModel &&
+                !UsedWithoutImmInMemInst(varOffset) &&
+                !valueIsPositive(varOffset, m_DL) &&
+                IGC_GET_FLAG_VALUE(LscImmOffsMatch) < 3;
+
+            if(disableA32ImmediateGlobalBaseOffset) return false;
 
             MarkAsSource(varOffset, IsSourceOfSample(&I));
 
@@ -3140,6 +3221,356 @@ namespace IGC
         }
 
         return match;
+    }
+
+    // Matches the following sequence:
+    //  %src0v4i8 = bitcast i32 %x to <4 x i8>
+    //  %elem1 = extractelement <4 x i8> %src0v4i8, i32 1
+    //  %dst = {s|z}ext i8 %elem1 to i32
+    bool CodeGenPatternMatch::MatchUnpack4i8(Instruction& I)
+    {
+        struct UnpackPattern : public Pattern
+        {
+            SSource source;
+            uint32_t index;
+            bool isUnsigned;
+            virtual void Emit(EmitPass* pass, const DstModifier& modifier)
+            {
+                pass->EmitUnpack4i8(source, index, isUnsigned, modifier);
+            }
+        };
+        if (I.getType()->isIntegerTy(32) &&
+            (isa<ZExtInst>(&I) || isa<SExtInst>(&I)))
+        {
+            auto extract = dyn_cast<ExtractElementInst>(I.getOperand(0));
+            if (extract &&
+                isa<ConstantInt>(extract->getIndexOperand()) &&
+                isa<BitCastInst>(extract->getVectorOperand()) &&
+                cast<BitCastInst>(extract->getVectorOperand())->getType()->isIntOrIntVectorTy(8) &&
+                cast<BitCastInst>(extract->getVectorOperand())->getOperand(0)->getType()->isIntegerTy(32))
+            {
+                UnpackPattern* pattern = new (m_allocator) UnpackPattern();
+                auto bitcast = cast<BitCastInst>(extract->getVectorOperand());
+                uint32_t index = int_cast<uint32_t>(cast<ConstantInt>(extract->getIndexOperand())->getZExtValue());
+                pattern->source = GetSource(bitcast->getOperand(0), false, false, IsSourceOfSample(&I));
+                pattern->index = index;
+                pattern->isUnsigned = isa<ZExtInst>(&I);
+                AddPattern(pattern);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Matches the following sequence:
+    //  %x8 = trunc i32 %x to i8
+    //  %y8 = trunc i32 %y to i8
+    //  %z8 = trunc i32 %z to i8
+    //  %w8 = trunc i32 %w to i8
+    //  %vec0 = insertelement <4 x i8> undef, i8 %x8, i64 0
+    //  %vec1 = insertelement <4 x i8> %vec0, i8 %y8, i64 1
+    //  %vec2 = insertelement <4 x i8> %vec1, i8 %z8, i64 2
+    //  %vec3 = insertelement <4 x i8> %vec2, i8 %w8, i64 3
+    //  %dst = bitcast <4 x i8> %vec3 to i32
+    bool CodeGenPatternMatch::MatchPack4i8(BitCastInst& I)
+    {
+        struct PackPattern : public Pattern
+        {
+            std::array<SSource, 4> sources;
+            std::array<bool, 4> isSat;
+            virtual void Emit(EmitPass* pass, const DstModifier& modifier)
+            {
+                pass->EmitPack4i8(sources, isSat, modifier);
+            }
+        };
+
+        if (I.getType()->isIntegerTy(32) &&
+            I.getOperand(0)->getType()->isIntOrIntVectorTy(8) &&
+            isa<InsertElementInst>(I.getOperand(0)))
+        {
+            Value* sources[4] = {};
+            bool isSat[4] = {};
+            auto ie = cast<InsertElementInst>(I.getOperand(0));
+            uint32_t elemsFound = 0;
+            while (ie)
+            {
+                auto idxVal = dyn_cast<ConstantInt>(ie->getOperand(2));
+                auto idx = idxVal ? idxVal->getZExtValue() : 0;
+                if (idxVal && sources[idx] == nullptr)
+                {
+                    sources[idx] = ie->getOperand(1);
+                    ++elemsFound;
+                }
+                ie = dyn_cast<InsertElementInst>(ie->getOperand(0));
+            }
+            if (elemsFound == 4)
+            {
+                elemsFound = 0;
+                for (uint32_t i = 0; i < 4; ++i)
+                {
+                    auto trunc = dyn_cast<TruncInst>(sources[i]);
+                    if (trunc)
+                    {
+                        sources[i] = trunc->getOperand(0);
+                        ++elemsFound;
+                    }
+                }
+            }
+            if (elemsFound == 4)
+            {
+                // Check if the sources can be promoted to the "sat" qualifier
+                for (uint32_t i = 0; i < 4; ++i)
+                {
+                    // Lambda checks if one of the source values is a constant
+                    // value equal to `imm` and returns the other source value.
+                    auto GetOtherSource = [&](const auto& src, uint32_t imm)->Value*
+                    {
+                        if (isa<ConstantInt>(src[0]) || isa<ConstantInt>(src[1]))
+                        {
+                            ConstantInt* c = isa<ConstantInt>(src[0]) ? cast<ConstantInt>(src[0]) : cast<ConstantInt>(src[1]);
+                            if (c->getZExtValue() == imm)
+                            {
+                                return isa<ConstantInt>(src[0]) ? src[1] : src[0];
+                            }
+                        }
+                        return nullptr;
+                    };
+                    Value* minSources[2];
+                    if (isMin(sources[i], minSources[0], minSources[1]))
+                    {
+                        if (Value* minVal = GetOtherSource(minSources, 127))
+                        {
+                            Value* maxSources[2];
+                            if (isMax(minVal, maxSources[0], maxSources[1]) &&
+                                GetOtherSource(maxSources, 0))
+                            {
+                                sources[i] = minVal;
+                                isSat[i] = true;
+                            }
+                        }
+                    }
+                }
+            }
+            if (elemsFound == 4)
+            {
+                PackPattern* pattern = new (m_allocator) PackPattern();
+                for (uint32_t i = 0; i < 4; ++i)
+                {
+                    pattern->sources[i] = GetSource(sources[i], false, false, IsSourceOfSample(&I));
+                    pattern->isSat[i] = isSat[i];
+                }
+                AddPattern(pattern);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Matches repacking of packed <4 x i8> values, for example:
+    //   %src0v4i8 = bitcast i32 %x to <4 x i8>
+    //   %src1v4i8 = bitcast i32 %y to <4 x i8>
+    //   %elem1 = extractelement <4 x i8> %src0v4i8, i32 1
+    //   %dst0 = insertelement <4 x i8> %src0v4i8, i8 %elem1, i32 1
+    //   %elem2 = extractelement <4 x i8> %src1v4i8, i32 0
+    //   %dst1 = insertelement <4 x i8> %dst0, i8 %elem2, i32 2
+    //   %elem3 = extractelement <4 x i8> %src1v4i8, i32 1
+    //   %dst2 = insertelement <4 x i8> %dst1, i8 %elem3, i32 3
+    //   %dst3 = bitcast <4 x i8> %dst2 to i32
+    bool CodeGenPatternMatch::MatchRepack4i8(BitCastInst& I)
+    {
+        struct RepackPattern : public Pattern
+        {
+            std::array<SSource, 4> sources;
+            std::array<uint32_t, 4> mappings;
+            virtual void Emit(EmitPass* pass, const DstModifier& modifier)
+            {
+                pass->EmitRepack4i8(sources, mappings, modifier);
+            }
+        };
+
+        if (I.getType()->isIntegerTy(32) &&
+            I.getOperand(0)->getType()->isIntOrIntVectorTy(8) &&
+            isa<InsertElementInst>(I.getOperand(0)))
+        {
+            Value* sources[4] = {};
+            uint32_t mappings[4] = {};
+            auto ie = cast<InsertElementInst>(I.getOperand(0));
+            Value* baseVec = nullptr;
+            uint32_t elemsFound = 0;
+            while (ie)
+            {
+                auto idxVal = dyn_cast<ConstantInt>(ie->getOperand(2));
+                if (!idxVal)
+                {
+                    return false;
+                }
+                auto idx = idxVal->getZExtValue();
+                if (idxVal && sources[idx] == nullptr)
+                {
+                    sources[idx] = ie->getOperand(1);
+                    ++elemsFound;
+                }
+                baseVec = ie->getOperand(0);
+                ie = dyn_cast<InsertElementInst>(baseVec);
+            }
+
+            for (uint32_t i = 0; i < 4; ++i)
+            {
+                if (sources[i])
+                {
+                    auto ee = dyn_cast<ExtractElementInst>(sources[i]);
+                    if (!ee ||
+                        !isa<ConstantInt>(ee->getOperand(1)) ||
+                        !isa<BitCastInst>(ee->getOperand(0)) ||
+                        !(cast<BitCastInst>(ee->getOperand(0)))->getOperand(0)->getType()->isIntegerTy(32))
+                    {
+                        return false;
+                    }
+                    auto bitcast = cast<BitCastInst>(ee->getOperand(0));
+                    mappings[i] = int_cast<uint32_t>(cast<ConstantInt>(ee->getOperand(1))->getZExtValue());
+                    sources[i] = bitcast->getOperand(0);
+                }
+                else
+                {
+                    if (!isa<UndefValue>(baseVec) &&
+                        (!isa<BitCastInst>(baseVec) || !(cast<BitCastInst>(baseVec))->getOperand(0)->getType()->isIntegerTy(32)))
+                    {
+                        return false;
+                    }
+                    mappings[i] = i;
+                    auto bitcast = dyn_cast<BitCastInst>(baseVec);
+                    sources[i] = bitcast ? bitcast->getOperand(0) : baseVec;
+                }
+            }
+            RepackPattern* pattern = new (m_allocator) RepackPattern();
+            for (uint32_t i = 0; i < 4; ++i)
+            {
+                pattern->sources[i] = GetSource(sources[i], false, false, IsSourceOfSample(&I));
+                pattern->sources[i].type = ISA_TYPE_UB;
+                pattern->mappings[i] = mappings[i];
+            }
+            AddPattern(pattern);
+            return true;
+        }
+        return false;
+    }
+
+    // Matches binary operations on packed <4 x i8> values.
+    // For example, the following patterns are matched:
+    //
+    // Shl+Asr pattern:
+    //   %x0 = shl i32 %x, 24
+    //   %dst = ashr i32 %x0, 28
+    //
+    // Unpack + shl pattern:
+    //   %src0v4i8 = bitcast i32 %x to <4 x i8>
+    //   %elem1 = extractelement <4 x i8> %src0v4i8, i32 1
+    //   %elem132 = sext i8 %elem1 to i32
+    //   %dst = shl i32 %elem132, 4
+    bool CodeGenPatternMatch::MatchBinaryUnpack4i8(Instruction& I)
+    {
+        struct BinaryUnpackPattern : public Pattern
+        {
+            SSource sources[2];
+            Instruction* inst;
+            virtual void Emit(EmitPass* pass, const DstModifier& modifier)
+            {
+                pass->BinaryUnary(inst, sources, modifier);
+            }
+        };
+
+        Instruction* instToEmit = &I;
+        if (I.getType()->isIntegerTy(32))
+        {
+            std::tuple<bool, bool, Value*, uint32_t> sources[2];
+            bool foundUnpack = false;
+            // Shl+Asr pattern:
+            //   %x0 = shl i32 %x, 24
+            //   %dst = ashr i32 %x0, 28
+            if ((isa<LShrOperator>(&I) || isa<AShrOperator>(&I)) &&
+                isa<ConstantInt>(cast<Instruction>(&I)->getOperand(1)))
+            {
+                auto shr = cast<Instruction>(&I);
+                auto shl = dyn_cast<ShlOperator>(shr->getOperand(0));
+                if (shl &&
+                    isa<ConstantInt>(shl->getOperand(1)) &&
+                    cast<ConstantInt>(shl->getOperand(1))->getZExtValue() == 24)
+                {
+                    sources[0] = std::make_tuple(
+                        true,
+                        isa<LShrOperator>(&I),
+                        shl->getOperand(0),
+                        0);
+                    auto shift = cast<ConstantInt>(shr->getOperand(1))->getZExtValue();
+                    bool isShl = shift < 24;
+                    if (isShl)
+                    {
+                        instToEmit = cast<Instruction>(shl);
+                        shift = 24 - shift;
+                    }
+                    else
+                    {
+                        shift = shift - 24;
+                    }
+
+                    sources[1] = std::make_tuple(
+                        false,
+                        false,
+                        ConstantInt::get(shr->getOperand(1)->getType(), shift),
+                        0);
+                    foundUnpack = true;
+                }
+            }
+            else
+            {
+                for (uint32_t i = 0; i < 2; ++i)
+                {
+                    Value* op = I.getOperand(i);
+                    sources[i] = std::make_tuple(false, false, op, 0);
+                    if (isa<ZExtInst>(op) || isa<SExtInst>(op))
+                    {
+                        auto ext = cast<Instruction>(op);
+                        if (auto extract = dyn_cast<ExtractElementInst>(ext->getOperand(0)))
+                        {
+                            if (isa<ConstantInt>(extract->getIndexOperand()) &&
+                                isa<BitCastInst>(extract->getVectorOperand()) &&
+                                cast<BitCastInst>(extract->getVectorOperand())->getType()->isIntOrIntVectorTy(8) &&
+                                cast<BitCastInst>(extract->getVectorOperand())->getOperand(0)->getType()->isIntegerTy(32))
+                            {
+                                sources[i] = std::make_tuple(
+                                    true,
+                                    isa<ZExtInst>(op),
+                                    cast<BitCastInst>(extract->getVectorOperand())->getOperand(0),
+                                    int_cast<uint32_t>(cast<ConstantInt>(extract->getIndexOperand())->getZExtValue()));
+                                foundUnpack = true;
+                            }
+                        }
+                    }
+                }
+            }
+            if (foundUnpack)
+            {
+                BinaryUnpackPattern* pattern = new (m_allocator) BinaryUnpackPattern();
+                pattern->inst = instToEmit;
+                for (uint32_t i = 0; i < 2; ++i)
+                {
+                    auto [isUnpack, isUnsigned, source, subreg] = sources[i];
+                    pattern->sources[i] = GetSource(source, false, false, IsSourceOfSample(&I));
+                    if (isUnpack)
+                    {
+                        pattern->sources[i].region_set = true;
+                        pattern->sources[i].elementOffset = subreg;
+                        pattern->sources[i].region[0] = 4;
+                        pattern->sources[i].region[1] = 1;
+                        pattern->sources[i].region[2] = 0;
+                        pattern->sources[i].type = isUnsigned ? ISA_TYPE_UB : ISA_TYPE_B;
+                    }
+                }
+                AddPattern(pattern);
+                return true;
+            }
+        }
+        return false;
     }
 
     // Match the pattern of 32 x 32 = 64, a full 32-bit multiplication.
@@ -3575,8 +4006,8 @@ namespace IGC
         IGC_ASSERT(isa<Instruction>(I.getOperand(0)) || isa<Argument>(I.getOperand(0)));
         // Current implementation assumes that mix mode is disabled if
         // half float or 32-bit float denorms must be flushed.
-        if (m_ctx->m_floatDenormMode16 == IGC::FLOAT_DENORM_FLUSH_TO_ZERO ||
-            m_ctx->m_floatDenormMode32 == IGC::FLOAT_DENORM_FLUSH_TO_ZERO)
+        if (m_ctx->getModuleMetaData()->compOpt.FloatDenormMode16 == IGC::FLOAT_DENORM_FLUSH_TO_ZERO ||
+            m_ctx->getModuleMetaData()->compOpt.FloatDenormMode32 == IGC::FLOAT_DENORM_FLUSH_TO_ZERO)
         {
             IGC_ASSERT(!m_Platform.supportMixMode() || m_ctx->getModuleMetaData()->disableMixMode);
         }
@@ -3793,6 +4224,9 @@ namespace IGC
 
     bool CodeGenPatternMatch::MatchSelectModifier(llvm::SelectInst& I)
     {
+        if (I.getType()->isAggregateType())
+            return MatchSingleInstruction(I);
+
         struct SelectPattern : Pattern
         {
             SSource sources[3];
@@ -5811,16 +6245,37 @@ namespace IGC
         {
             if (llvm::CmpInst * cmp = llvm::dyn_cast<llvm::CmpInst>(max->getOperand(0)))
             {
+                auto SkipAsr = [max](uint32_t idx)
+                {
+                    ConstantInt* c1 = dyn_cast<ConstantInt>(max->getOperand(1));
+                    ConstantInt* c2 = dyn_cast<ConstantInt>(max->getOperand(2));
+                    Instruction* op = dyn_cast<Instruction>(max->getOperand(idx));
+                    if (((c1 && c1->isZeroValue()) || (c2 && c2->isZeroValue())) &&
+                        (op && op->getOpcode() == Instruction::AShr))
+                    {
+                        return op->getOperand(0);
+                    }
+                    return max->getOperand(idx);
+                };
                 if (isGreaterOrLowerPredicate(cmp->getPredicate()))
                 {
                     if ((cmp->getOperand(0) == max->getOperand(1) && cmp->getOperand(1) == max->getOperand(2)) ||
                         (cmp->getOperand(0) == max->getOperand(2) && cmp->getOperand(1) == max->getOperand(1)))
                     {
+                        isMin = isLowerPredicate(cmp->getPredicate()) ^ (cmp->getOperand(0) == max->getOperand(2));
+                        found = true;
+                    }
+                    else if ((cmp->getOperand(0) == SkipAsr(1) && cmp->getOperand(1) == SkipAsr(2)) ||
+                        (cmp->getOperand(0) == SkipAsr(2) && cmp->getOperand(1) == SkipAsr(1)))
+                    {
+                        isMin = isLowerPredicate(cmp->getPredicate()) ^ (cmp->getOperand(0) == SkipAsr(2));
+                        found = true;
+                    }
+                    if (found)
+                    {
                         source0 = max->getOperand(1);
                         source1 = max->getOperand(2);
-                        isMin = isLowerPredicate(cmp->getPredicate()) ^ (cmp->getOperand(0) == max->getOperand(2));
                         isUnsigned = IsUnsignedCmp(cmp->getPredicate());
-                        found = true;
                     }
                 }
             }
@@ -5828,7 +6283,7 @@ namespace IGC
         return found;
     }
 
-    inline bool isMax(llvm::Value* max, llvm::Value*& source0, llvm::Value*& source1)
+    bool isMax(llvm::Value* max, llvm::Value*& source0, llvm::Value*& source1)
     {
         bool isMin, isUnsigned;
         llvm::Value* maxSource0;
@@ -5845,7 +6300,7 @@ namespace IGC
         return false;
     }
 
-    inline bool isMin(llvm::Value* min, llvm::Value*& source0, llvm::Value*& source1)
+    bool isMin(llvm::Value* min, llvm::Value*& source0, llvm::Value*& source1)
     {
         bool isMin, isUnsigned;
         llvm::Value* maxSource0;

@@ -95,6 +95,7 @@ public:
     void Sub(const SSource[2], const DstModifier& mofidier);
     void Xor(const SSource[2], const DstModifier& modifier);
     void FDiv(const SSource[2], const DstModifier& modifier);
+    void VectorMad(const SSource sources[3], const DstModifier& modifier);
     void Pow(const SSource sources[2], const DstModifier& modifier);
     void Avg(const SSource sources[2], const DstModifier& modifier);
     void Rsqrt(const SSource& source, const DstModifier& modifier);
@@ -103,6 +104,8 @@ public:
     void Mul(const SSource[2], const DstModifier& modifier);
     void Div(const SSource[2], const DstModifier& modifier);
     void Inv(const SSource[2], const DstModifier& modifier);
+    void Exp2(const SSource[2], const DstModifier& modifier);
+    void MaxNum(const SSource sources[2], const DstModifier &modifier);
     void Add(const SSource[2], const DstModifier& modifier);
     void FPTrunc(const SSource[2], const DstModifier& modifier);
     void Powi(const SSource[2], const DstModifier& modifier);
@@ -130,7 +133,7 @@ public:
     void EmitAluIntrinsic(llvm::CallInst* I, const SSource source[2], const DstModifier& modifier);
     void EmitSimpleAlu(llvm::Instruction* inst, const SSource source[2], const DstModifier& modifier);
     void EmitSimpleAlu(llvm::Instruction* inst, CVariable* dst, CVariable* src0, CVariable* src1);
-    void EmitSimpleAlu(EOPCODE opCode, const SSource source[2], const DstModifier& modifier);
+    void EmitSimpleAlu(EOPCODE opCode, const SSource source[2], const DstModifier& modifier, bool isUnsigned = false);
     void EmitSimpleAlu(EOPCODE opCode, CVariable* dst, CVariable* src0, CVariable* src1);
     void EmitMinMax(bool isMin, bool isUnsigned, const SSource source[2], const DstModifier& modifier);
     void EmitUAdd(llvm::BinaryOperator* inst, const DstModifier& modifier);
@@ -141,6 +144,9 @@ public:
     void EmitGenIntrinsicMessage(llvm::GenIntrinsicInst* inst);
     void EmitSIToFPZExt(const SSource& source, const DstModifier& dstMod);
     void EmitIntegerTruncWithSat(bool isSignedDst, bool isSignedSrc, const SSource& source, const DstModifier& dstMod);
+    void EmitPack4i8(const std::array<SSource, 4>& sources, const std::array<bool, 4> isSat, const DstModifier& dstMod);
+    void EmitUnpack4i8(const SSource& source, uint32_t index, bool isUnsigned, const DstModifier& dstMod);
+    void EmitRepack4i8(const std::array<SSource, 4>& sources, const std::array<uint32_t, 4>& mappings, const DstModifier& dstMod);
     void EmitAddPair(llvm::GenIntrinsicInst* GII, const SSource Sources[4], const DstModifier& DstMod);
     void EmitSubPair(llvm::GenIntrinsicInst* GII, const SSource Sources[4], const DstModifier& DstMod);
     void EmitMulPair(llvm::GenIntrinsicInst* GII, const SSource Sources[4], const DstModifier& DstMod);
@@ -157,6 +163,7 @@ public:
     void EmitExtractValueFromStruct(llvm::ExtractValueInst* EI);
     void EmitInsertValueToLayoutStruct(llvm::InsertValueInst* IVI);
     void EmitExtractValueFromLayoutStruct(llvm::ExtractValueInst* EVI);
+    void EmitSelectStruct(llvm::SelectInst* SI);
     void emitVectorCopyToAOS(uint32_t AOSBytes,
         CVariable* Dst, CVariable* Src, uint32_t nElts,
         uint32_t DstSubRegOffset = 0, uint32_t SrcSubRegOffset = 0) {
@@ -197,16 +204,26 @@ public:
     void emitStore(llvm::StoreInst *inst, llvm::Value *varOffset,
                    llvm::ConstantInt *immOffset, ConstantInt *immScale = nullptr
     );
+    void emitPredicatedStore(llvm::Instruction *inst);
     void emitStore3DInner(llvm::Value* pllValToStore, llvm::Value* pllDstPtr, llvm::Value* pllElmIdx);
 
     void emitLoad(llvm::LoadInst *inst, llvm::Value *varOffset,
                   llvm::ConstantInt *immOffset, ConstantInt *immScale = nullptr
     ); // single load, no pattern
+    void emitPredicatedLoad(llvm::Instruction *inst);
     void emitLoad3DInner(llvm::LdRawIntrinsic* inst, ResourceDescriptor& resource, llvm::Value* elemIdxV);
 
     // when resource is dynamically indexed, load/store must use special intrinsics
-    void emitLoadRawIndexed(llvm::LdRawIntrinsic* inst, llvm::Value* varOffset, llvm::ConstantInt* immOffset);
-    void emitStoreRawIndexed(llvm::StoreRawIntrinsic* inst, llvm::Value* varOffset, llvm::ConstantInt* immOffset);
+    void emitLoadRawIndexed(
+        llvm::LdRawIntrinsic* inst,
+        llvm::Value* varOffset,
+        llvm::ConstantInt* immScale,
+        llvm::ConstantInt* immOffset);
+    void emitStoreRawIndexed(
+        llvm::StoreRawIntrinsic* inst,
+        llvm::Value* varOffset,
+        llvm::ConstantInt* immScale,
+        llvm::ConstantInt* immOffset);
     void emitGetBufferPtr(llvm::GenIntrinsicInst* inst);
     // \todo, remove this function after we lower all GEP to IntToPtr before CodeGen.
     // Only remaining GEPs are for scratch in GFX path
@@ -444,6 +461,8 @@ public:
     void emitftoi(llvm::GenIntrinsicInst* inst);
     void emitCtlz(const SSource& source);
 
+    void emitBfn(llvm::GenIntrinsicInst* inst);
+
 
     // VME
     void emitVMESendIME(llvm::GenIntrinsicInst* inst);
@@ -505,13 +524,14 @@ public:
                             llvm::BasicBlock *BB, LSC_CACHE_OPTS cacheOpts,
                             alignment_t align, bool dontForceDMask,
                             LSC_DOC_ADDR_SPACE addrSpace
+                           ,llvm::Value *predicate = nullptr
       );
     void emitUniformVectorCopy(CVariable* Dst, CVariable* Src, uint32_t nElts,
         uint32_t DstSubRegOffset = 0, uint32_t SrcSubRegOffset = 0,
-        bool allowLargerSIMDSize = false);
+        bool allowLargerSIMDSize = false, CVariable* predicate = nullptr);
     void emitVectorCopy(CVariable* Dst, CVariable* Src, uint32_t nElts,
         uint32_t DstSubRegOffset = 0, uint32_t SrcSubRegOffset = 0,
-        bool allowLargerSIMDSize = false);
+        bool allowLargerSIMDSize = false, CVariable* predicate = nullptr);
     void emitConstantVector(CVariable* Dst, uint64_t value = 0);
     void emitCopyAll(CVariable* Dst, CVariable* Src, llvm::Type* Ty);
 
@@ -788,7 +808,7 @@ public:
     CVariable* ReAlignUniformVariable(CVariable* pVar, e_alignment align);
     CVariable* BroadcastAndTruncPointer(CVariable* pVar);
     CVariable* IndexableResourceIndex(CVariable* indexVar, uint btiIndex);
-    ResourceDescriptor GetResourceVariable(llvm::Value* resourcePtr);
+    ResourceDescriptor GetResourceVariable(llvm::Value* resourcePtr, bool Check = false);
     SamplerDescriptor GetSamplerVariable(llvm::Value* samplerPtr);
     CVariable* ComputeSampleIntOffset(llvm::Instruction* sample, uint sourceIndex);
     void emitPlnInterpolation(CVariable* bary, CVariable* inputvar);
@@ -844,8 +864,8 @@ public:
         CVariable*& flag,
         uint ResourceLoopMarker);
     template<typename Func>
-    void ResourceLoop(ResourceDescriptor &resource, SamplerDescriptor& sampler,
-        Func Fn, uint ResourceLoopMarker = 0)
+    void ResourceLoop(ResourceDescriptor& resource, SamplerDescriptor& sampler,
+        const Func& Fn, uint ResourceLoopMarker = 0)
     {
         uint label = 0;
         CVariable* flag = nullptr;
@@ -1172,6 +1192,8 @@ private:
 
     bool shouldForceEarlyRecompile(IGCMD::MetaDataUtils* pMdUtils, llvm::Function* F);
 
+    bool shouldDropToSIMD16(IGCMD::MetaDataUtils* pMdUtils, llvm::Function* F);
+
     bool isHalfGRFReturn(CVariable* dst, SIMDMode simdMode);
 
     void emitFeedbackEnable();
@@ -1191,7 +1213,9 @@ private:
                                  int ImmScale, uint32_t NumElts,
                                  uint32_t EltBytes,
                                  LSC_DOC_ADDR_SPACE AddrSpace,
-                                 LSC_ADDR_SIZE AddrSize
+                                 LSC_ADDR_SIZE AddrSize,
+                                 CVariable *inputPredicate = nullptr,
+                                 CVariable *mergeVal = nullptr
     );
     void emitLSCVectorLoad_uniform(LSC_CACHE_OPTS CacheOpts, bool UseA32,
                                    ResourceDescriptor &Resource,
@@ -1201,7 +1225,9 @@ private:
                                    uint32_t EltBytes, uint64_t Align,
                                    uint32_t Addrspace,
                                    LSC_DOC_ADDR_SPACE UserAddrSpace,
-                                   LSC_ADDR_SIZE AddrSize
+                                   LSC_ADDR_SIZE AddrSize,
+                                   CVariable *inputPredicate = nullptr,
+                                   CVariable *mergeVal = nullptr
       );
     void emitLSCVectorStore_subDW(LSC_CACHE_OPTS CacheOpts, bool UseA32,
                                   ResourceDescriptor &Resource,
@@ -1209,7 +1235,8 @@ private:
                                   int ImmOffset, int ImmScale, uint32_t NumElts,
                                   uint32_t EltBytes, alignment_t Align,
                                   LSC_DOC_ADDR_SPACE AddrSpace,
-                                  LSC_ADDR_SIZE AddrSize
+                                  LSC_ADDR_SIZE AddrSize,
+                                  llvm::Value *predicate = nullptr
       );
     void emitLSCVectorStore_uniform(LSC_CACHE_OPTS CacheOpts, bool UseA32,
                                     ResourceDescriptor &Resource,
@@ -1218,7 +1245,8 @@ private:
                                     uint32_t NumElts, uint32_t EltBytes,
                                     alignment_t Align,
                                     LSC_DOC_ADDR_SPACE AddrSpace,
-                                    LSC_ADDR_SIZE AddrSize
+                                    LSC_ADDR_SIZE AddrSize,
+                                    llvm::Value *predicate = nullptr
       );
     LSC_FENCE_OP getLSCMemoryFenceOp(bool IsGlobalMemFence, bool InvalidateL1,
                                      bool EvictL1) const;

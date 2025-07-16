@@ -10,7 +10,6 @@ SPDX-License-Identifier: MIT
 #include "Compiler/IGCPassSupport.h"
 #include "common/LLVMWarningsPush.hpp"
 #include <llvm/IR/Function.h>
-#include <llvmWrapper/IR/Instructions.h>
 #include "common/LLVMWarningsPop.hpp"
 
 #include "Compiler/CISACodeGen/OpenCLKernelCodeGen.hpp"
@@ -43,7 +42,7 @@ void BIFFlagCtrlResolution::FillFlagCtrl() {
   BIF_FLAG_CTRL_SET(RenderFamily, PtrCGC->platform.getPlatformInfo().eRenderCoreFamily);
   BIF_FLAG_CTRL_SET(
       FlushDenormals,
-      ((PtrCGC->m_floatDenormMode32 == FLOAT_DENORM_FLUSH_TO_ZERO) ||
+      ((PtrCGC->getModuleMetaData()->compOpt.FloatDenormMode32 == FLOAT_DENORM_FLUSH_TO_ZERO) ||
        PtrCGC->getModuleMetaData()->compOpt.DenormsAreZero));
   BIF_FLAG_CTRL_SET(FastRelaxedMath,
                     PtrCGC->getModuleMetaData()->compOpt.RelaxedBuiltins);
@@ -67,6 +66,8 @@ void BIFFlagCtrlResolution::FillFlagCtrl() {
                     PtrCGC->platform.hasThreadPauseSupport());
   BIF_FLAG_CTRL_SET(UseNative64BitFloatBuiltin,
                     !PtrCGC->platform.hasNoFP64Inst());
+  BIF_FLAG_CTRL_SET(UseBfn, IGC_IS_FLAG_ENABLED(EnableBfn) &&
+      PtrCGC->platform.supportBfnInstruction());
   BIF_FLAG_CTRL_SET(hasHWLocalThreadID, PtrCGC->platform.hasHWLocalThreadID());
   BIF_FLAG_CTRL_SET(CRMacros, PtrCGC->platform.hasCorrectlyRoundedMacros());
   BIF_FLAG_CTRL_SET(
@@ -92,6 +93,18 @@ void BIFFlagCtrlResolution::FillFlagCtrl() {
     BIF_FLAG_CTRL_SET(UseHighAccuracyMath, false);
   }
 
+  // Stateless to stateful optimization checks if the offset of GEP instruction is positive.
+  // This is done with the assumption that the sign bit of global_id will be always off.
+  // This assume interferes with instcombine pass, so it is skipped unless really needed, that is:
+  //   1) StatelessToStateful pass is enabled, AND
+  //   2) Buffers don't use implicit bufferOffsetArg.
+  BIF_FLAG_CTRL_SET(UseAssumeInGetGlobalId,
+      PtrCGC->m_DriverInfo.SupportsStatelessToStatefulBufferTransformation() &&
+      !PtrCGC->getModuleMetaData()->compOpt.GreaterThan4GBBufferRequired &&
+      IGC_IS_FLAG_ENABLED(EnableStatelessToStateful) &&
+      !((IGC_IS_FLAG_ENABLED(EnableSupportBufferOffset) || PtrCGC->getModuleMetaData()->compOpt.HasBufferOffsetArg)) &&
+      !PtrCGC->getModuleMetaData()->compOpt.OptDisable);
+
   BIF_FLAG_CTRL_SET(EnableSWSrgbWrites,
                     IGC_GET_FLAG_VALUE(cl_khr_srgb_image_writes));
   BIF_FLAG_CTRL_SET(MaxHWThreadIDPerSubDevice,
@@ -105,6 +118,10 @@ void BIFFlagCtrlResolution::FillFlagCtrl() {
   }
 
   BIF_FLAG_CTRL_SET(UseOOBChecks, PtrCGC->platform.needsOutOfBoundsBuiltinChecks());
+
+  // NOTE: No need to check for UseLegacyBindlessMode,
+  //       as it's unrelated to images.
+  BIF_FLAG_CTRL_SET(UseBindlessImage, PtrCGC->getModuleMetaData()->UseBindlessImage);
 }
 
 #undef BIF_FLAG_CTRL_SET

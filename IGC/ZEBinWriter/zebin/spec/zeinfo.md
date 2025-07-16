@@ -1,6 +1,6 @@
 <!---======================= begin_copyright_notice ============================
 
-Copyright (C) 2020-2023 Intel Corporation
+Copyright (C) 2020-2025 Intel Corporation
 
 SPDX-License-Identifier: MIT
 
@@ -112,7 +112,7 @@ execution_env:
 
 ### Supported attributes in execution environment:
 This section defines the execution_env attribute.
-If an attribute is **Required**, it must be present in exection_env. If it's **Optional** and it's not present, the **Default** value is used.
+If an attribute is **Required**, it must be present in execution_env. If it's **Optional** and it's not present, the **Default** value is used.
 
 | Attribute | Type | Required/Optional | Default | Description |
 | ------ | ------ |  ------ | ------ | ------ |
@@ -145,6 +145,8 @@ If an attribute is **Required**, it must be present in exection_env. If it's **O
 | has_sample | bool | Optional | false | |
 | has_rtcalls | bool | Optional | false | |
 | generate_local_id | bool | Optional | false | Flag of HW local ID capable info in cross-thread-payload. |
+| has_lsc_stores_with_non_default_l1_cache_controls | bool | Optional | false | Flag of HasLscStoresWithNonDefaultL1CacheControls to determine if the resource barriers should flush UAV coherency. |
+| require_iab | bool | Optional | false | When set to false, implicit arg buffer is not used by the program. So runtime may decide to not program the buffer. However, if debugger connects, the runtime would have to program implicit arg buffer. This flag may be false only when has_stack_calls is also false. It is an error to explicitly set this flag to false when has_stack_calls is true. When set to true, runtime must allocate implicit arg buffer. |
 <!--- ExecutionEnv -->
 
 ### Supported thread scheduling mode:

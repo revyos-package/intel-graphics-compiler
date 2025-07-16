@@ -152,8 +152,11 @@ public:
     return iter != configs.end();
   }
 
-  unsigned setModeByRegPressure(unsigned maxRP, unsigned largestInputReg);
+  unsigned setModeByRegPressure(unsigned maxRP, unsigned largestInputReg,
+                                bool forceGRFModedUp = false);
   bool hasLargerGRFSameThreads() const;
+  bool hasSmallerGRFSameThreads() const;
+  unsigned getSpillThreshold() const;
 
   unsigned getNumGRF() const { return configs[currentMode].numGRF; }
   unsigned getDefaultGRF() const { return configs[defaultMode].numGRF; }
@@ -187,6 +190,14 @@ public:
           return c.VRTEnable && c.numGRF <= upperBoundGRF;
         });
     return found->numGRF;
+  }
+
+  unsigned getMaxGRFMode() const {
+    auto found =
+        std::find_if(configs.rbegin(), configs.rend(), [this](const Config &c) {
+          return c.VRTEnable && c.numGRF <= upperBoundGRF;
+        });
+    return configs.size() - std::distance(configs.rbegin(), found) - 1;
   }
 
   // Get GRF number for initial kernel creation
@@ -255,6 +266,8 @@ private:
   unsigned currentMode;
   unsigned lowerBoundGRF;
   unsigned upperBoundGRF;
+  unsigned GRFModeUpValue;
+  const TARGET_PLATFORM platform;
   Options *options;
 };
 
@@ -310,7 +323,7 @@ public:
                      G4_INST *aSmall_start, G4_INST *aSmall_patch,
                      G4_INST *aBig_start, G4_INST *aBig_patch,
                      G4_INST *aBig_call, G4_INST *aSmall_call)
-      : IP_WA_placeholder(aIP_WA), Big_BB(aBig_BB), Small_BB(aSmall_BB),
+      : Big_BB(aBig_BB), Small_BB(aSmall_BB), IP_WA_placeholder(aIP_WA),
         Small_start(aSmall_start), Small_patch(aSmall_patch),
         Big_start(aBig_start), Big_patch(aBig_patch), Big_call(aBig_call),
         Small_call(aSmall_call) {}
@@ -712,7 +725,8 @@ public:
   const char *getName() const { return name; }
 
   bool updateKernelToLargerGRF();
-  void updateKernelByRegPressure(unsigned regPressure);
+  void updateKernelByRegPressure(unsigned regPressure,
+                                 bool forceGRFModeUp = false);
   bool updateKernelFromNumGRFAttr();
 
   void evalAddrExp();

@@ -13,6 +13,7 @@ SPDX-License-Identifier: MIT
 #include <stdlib.h>
 
 #if defined _WIN32
+#   include <BaseTsd.h>
 #   include <intrin.h>
 #endif
 
@@ -1057,6 +1058,19 @@ inline QWORD Hash( const DWORD *data, DWORD count )
         HASH_JENKINS_MIX( a, hi, lo );
     }
     return (((QWORD)hi)<<32)|lo;
+}
+
+// This is a modified version of the hash combine function from boost
+// https://www.boost.org/doc/libs/1_84_0/boost/intrusive/detail/hash_combine.hpp
+// 0xffffffffffffffff / 0x517cc1b727220a95 = M_PI
+inline QWORD HashCombine(const QWORD hash1, const QWORD hash2 )
+{
+    return hash1 ^ (hash2 + 0x517cc1b727220a95 + (hash1 << 6) + (hash1 >> 2));
+}
+
+inline QWORD AddEntryToHash(const DWORD data, const QWORD hash)
+{
+    return HashCombine(hash, Hash(&data, 1));
 }
 
 struct HashJenkinsMixReturnAggregate

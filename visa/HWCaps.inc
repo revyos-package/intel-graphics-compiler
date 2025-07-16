@@ -182,6 +182,10 @@ bool hasSmov() const { return getPlatformGeneration() < PlatformGen::XE; }
 
 bool doAccSub() const { return getPlatformGeneration() >= PlatformGen::GEN11; }
 
+bool doFlagLVN() const {
+  return false;
+}
+
 bool hasNFType() const {
   return getPlatform() >= GENX_ICLLP &&
          getPlatformGeneration() < PlatformGen::XE;
@@ -942,4 +946,7 @@ bool src1Src2SwapForCompaction()
   return false;
 }
 
+bool reserver510() {
+  return false;
+}
 // end HW capabilities

@@ -1,6 +1,6 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (C) 2017-2021 Intel Corporation
+Copyright (C) 2017-2025 Intel Corporation
 
 SPDX-License-Identifier: MIT
 
@@ -27,6 +27,8 @@ namespace llvm
 
 namespace IGC
 {
+    llvm::CallInst* CallMemoryFenceWorkgroup(llvm::Instruction* pInsertBefore);
+
     class CCommand
     {
     public:
@@ -231,6 +233,10 @@ namespace IGC
         /// @brief  push the sampler value into the function argument list
         void prepareSamplerValue(void);
 
+        /// @brief  create annotations for inline sampler based on the value used for initialization
+        /// @brief  this method doesn't fill out the 'index' field of InlineSamplersMD.
+        static void CreateInlineSamplerAnnotations(llvm::Module* M, InlineSamplersMD& inlineSamplerMD, int samplerValue);
+
         /// @brief  create a call to the GetBufferPtr intrinsic pseudo-instruction
         /// @brief  push the image index into the function argument list
         void createGetBufferPtr(void);
@@ -246,6 +252,14 @@ namespace IGC
 
         /// @brief  push the paired resource pointer into the function argument list
         void preparePairedResource(void);
+
+        /// @brief  Prepare args for GenISA_typedread intrinsic call.
+        /// @brief  Calls createGetBufferPtr, adds CoordX, Y and Z, then LOD.
+        void prepareTypedReadArgs();
+
+        /// @brief  Replace m_pCallInst with call to GenISA_typedread intrinsic.
+        /// @brief  Method specifically for handling read_write images.
+        void replaceGenISATypedRead();
 
         // m_pParamMap - maps image and sampler kernel parameters to BTIs
         //               and sampler array indexes, respecitvely
@@ -264,6 +278,7 @@ namespace IGC
         llvm::Value* CoordY;
         llvm::Value* CoordZ;
         bool m_IncorrectBti;
+        ModuleMetaData* m_modMD = nullptr;
     };
 
     class CBuiltinsResolver

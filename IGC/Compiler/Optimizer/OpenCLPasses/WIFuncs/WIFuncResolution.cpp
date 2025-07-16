@@ -1,6 +1,6 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (C) 2017-2021 Intel Corporation
+Copyright (C) 2017-2025 Intel Corporation
 
 SPDX-License-Identifier: MIT
 
@@ -512,7 +512,9 @@ Value* WIFuncResolution::getGlobalOffset(CallInst& CI)
     // Creates:
     // %globalOffset = extractelement <8 x i32> %payloadHeader, i32 %dim
 
-    auto Ty = IGC_IS_FLAG_ENABLED(ShortImplicitPayloadHeader) ? ImplicitArg::PAYLOAD_HEADER_SHORT : ImplicitArg::PAYLOAD_HEADER;
+    auto Ty = AllowShortImplicitPayloadHeader(getAnalysis<CodeGenContextWrapper>().getCodeGenContext())
+        ? ImplicitArg::GLOBAL_OFFSET : ImplicitArg::PAYLOAD_HEADER;
+
     auto F = CI.getFunction();
     Value* V = m_implicitArgs.getImplicitArgValue(*F, Ty, m_pMdUtils);
     IGC_ASSERT(V != nullptr);
@@ -869,6 +871,7 @@ void LowerImplicitArgIntrinsics::visitCallInst(CallInst& CI)
             break;
         }
         case GenISAIntrinsic::GenISA_getPayloadHeader:
+        case GenISAIntrinsic::GenISA_getGlobalOffset:
         {
             // global_offset is loaded from PayloadHeader[0:2]
             // currently there are no other uses for payload header.
@@ -960,3 +963,13 @@ void LowerImplicitArgIntrinsics::visitCallInst(CallInst& CI)
     }
 }
 
+llvm::CallInst* WIFuncResolution::CallGetLocalID(llvm::Instruction* pInsertBefore)
+{
+    IGCLLVM::IRBuilder<> builder(pInsertBefore);
+    llvm::Module* pM = pInsertBefore->getModule();
+    llvm::FunctionType* pFuncTypeGetLocalID = llvm::FunctionType::get(builder.getInt32Ty(), { }, false);
+
+    auto pFuncGetLocalID = pM->getOrInsertFunction(WIFuncsAnalysis::GET_LOCAL_THREAD_ID, pFuncTypeGetLocalID);
+
+    return llvm::CallInst::Create(pFuncGetLocalID, { }, "", pInsertBefore);
+}

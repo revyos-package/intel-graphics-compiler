@@ -35,7 +35,7 @@ if(NOT DEFINED IGC_API_MAJOR_VERSION)
   set(IGC_API_MAJOR_VERSION 2)
 endif()
 if(NOT DEFINED IGC_API_MINOR_VERSION)
-  set(IGC_API_MINOR_VERSION 9)
+  set(IGC_API_MINOR_VERSION 15)
 endif()
 if(NOT DEFINED IGC_API_PATCH_VERSION)
   set(IGC_API_PATCH_VERSION 0)
@@ -270,25 +270,15 @@ if (FCL_ENABLED)
   unset(_allowBifLink)
 endif()
 
-
-# Currently IGC uses legacy SPIRV-LLVM-Translator
-# that is located at gfx-driver/Source/IGC/AdaptorOCL/SPIRV
-# This translator will be replaced with vanilla Khronos translator.
-# The following cmake code perfoms search for the such translator.
-# But, until the transition is not completed, this code is under IGC_OPTION__LINK_KHRONOS_SPIRV_TRANSLATOR condition
-# Remove this condition after transition period is over
-option(IGC_OPTION__USE_KHRONOS_SPIRV_TRANSLATOR_IN_SC "[Experimental] Enable usage of Khronos SPIRV-LLVM-Translator in Scalar Compiler" ON)
-
-# TODO: Change this flag to opt-out or remove completely once
-# opaque pointers are fully supported within the IGC stack.
-option(IGC_OPTION__API_ENABLE_OPAQUE_POINTERS "[Experimental] Enable opaque pointers across the IGC stack.\
-  Forces opaque pointers' usage in IGC/LLVM passes, OCL Clang FE and built-in functions' bitcode"
-  OFF)
-# TODO: Remove the deprecated flag
-option(IGC_OPTION__LLVM_OPAQUE_POINTERS_ENABLED "[DEPRECATED] Allow usage of opaque pointers within LLVM transformations" OFF)
-if(IGC_OPTION__LLVM_OPAQUE_POINTERS_ENABLED)
-  message(WARNING "IGC_OPTION__LLVM_OPAQUE_POINTERS_ENABLED is deprecated. Please use the implied IGC_OPTION__API_ENABLE_OPAQUE_POINTERS flag directly")
-  set(IGC_OPTION__API_ENABLE_OPAQUE_POINTERS ON)
+# TODO: Remove this flag once only LLVM 16+ is supported (no possibility to enable typed pointers).
+if(IGC_OPTION__LLVM_PREFERRED_VERSION VERSION_GREATER_EQUAL 16)
+  option(IGC_OPTION__API_ENABLE_OPAQUE_POINTERS "[Experimental] Enable opaque pointers across the IGC stack.\
+    Forces opaque pointers' usage in IGC/LLVM passes, OCL Clang FE and built-in functions' bitcode.\
+    Enabled by default for LLVM 16+." ON)
+else()
+  option(IGC_OPTION__API_ENABLE_OPAQUE_POINTERS "[Experimental] Enable opaque pointers across the IGC stack.\
+    Forces opaque pointers' usage in IGC/LLVM passes, OCL Clang FE and built-in functions' bitcode.\
+    Enabled by default for LLVM 16+." OFF)
 endif()
 
 option(IGC_OPTION__ENABLE_LIT_TESTS "Enable lit testing for IGC compiler. May require additional tools like llvm lit and opt" OFF)
@@ -1095,7 +1085,7 @@ foreach(_compilerFlagName IN ITEMS "CMAKE_CXX_FLAGS" "CMAKE_C_FLAGS")
     endif()
   endif()
 
-# NOTE: Increase bracket-depth to 512 for clang because we exceed the default limit of 256.
+# NOTE: Increase bracket-depth to 1024 for clang because we exceed the default limit of 256.
 #       This resulted in errors like:
 #       "instantiating fold expression with ... arguments exceeded expression nesting limit of 256"
   if(_igc_compiler_is_clang)
@@ -1104,7 +1094,7 @@ foreach(_compilerFlagName IN ITEMS "CMAKE_CXX_FLAGS" "CMAKE_C_FLAGS")
         "${_compilerFlagName}"
         ALL_PATTERN ""
         SET_RAW
-        -fbracket-depth=512
+        -fbracket-depth=1024
     )
   endif()
 endforeach()
@@ -1472,6 +1462,21 @@ if(LLVM_ON_WIN32)
     )
 endif()
 
+if (WIN32)
+  include_directories(
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../../SPIRV-LLVM-Translator_${IGC_OPTION__LLVM_PREFERRED_VERSION}/include"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../../SPIRV-LLVM-Translator_${IGC_OPTION__LLVM_PREFERRED_VERSION}/lib/SPIRV"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../../SPIRV-LLVM-Translator_${IGC_OPTION__LLVM_PREFERRED_VERSION}/lib/SPIRV/Mangler"
+    )
+endif (WIN32)
+if (NOT WIN32)
+  include_directories(
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../../SPIRV-LLVM-Translator/include"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../../SPIRV-LLVM-Translator/lib/SPIRV"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../../SPIRV-LLVM-Translator/lib/SPIRV/Mangler"
+    )
+endif (NOT WIN32)
+
 # ==================================== ZE Binary Writer ================================================
 
 add_subdirectory(ZEBinWriter/zebin)
@@ -1599,6 +1604,7 @@ add_subdirectory(Compiler)
 add_subdirectory(DebugInfo)
 add_subdirectory(DriverInterface)
 igc_sg_define(IGC__DriverInterface)
+igc_sg_define(IGC__LivenessUtils)
 
 add_subdirectory(VISALinkerDriver)
 
@@ -2157,8 +2163,10 @@ configure_file(${CMAKE_CURRENT_SOURCE_DIR}/AdaptorOCL/ocl_igc_interface/impl/ver
 
 if(UNIX)
   install(TARGETS ${IGC_BUILD__PROJ__igc_dll} LIBRARY DESTINATION ${CMAKE_INSTALL_FULL_LIBDIR} COMPONENT igc-core NAMELINK_SKIP)
+  install(TARGETS ${IGC_BUILD__PROJ__igc_dll} LIBRARY DESTINATION ${CMAKE_INSTALL_FULL_LIBDIR} COMPONENT igc-core-devel NAMELINK_ONLY)
   if (FCL_ENABLED)
     install(TARGETS ${IGC_BUILD__PROJ__fcl_dll} LIBRARY DESTINATION ${CMAKE_INSTALL_FULL_LIBDIR} COMPONENT igc-opencl NAMELINK_SKIP)
+    install(TARGETS ${IGC_BUILD__PROJ__fcl_dll} LIBRARY DESTINATION ${CMAKE_INSTALL_FULL_LIBDIR} COMPONENT igc-opencl-devel NAMELINK_ONLY)
   endif()
   install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/AdaptorOCL/ocl_igc_shared DESTINATION ${CMAKE_INSTALL_FULL_INCLUDEDIR}/igc COMPONENT igc-opencl-devel)
   install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/AdaptorOCL/ocl_igc_interface DESTINATION ${CMAKE_INSTALL_FULL_INCLUDEDIR}/igc COMPONENT igc-opencl-devel)
@@ -2188,7 +2196,7 @@ if(UNIX)
     install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/../NOTICES.txt DESTINATION ${CMAKE_INSTALL_FULL_LIBDIR}/igc2 COMPONENT igc-core)
   endif()
   install(FILES ${IGC_BUILD__VISA_DIR}/include/RelocationInfo.h DESTINATION ${CMAKE_INSTALL_FULL_INCLUDEDIR}/visa COMPONENT igc-opencl-devel)
-  install(DIRECTORY ${IGC_BUILD__VISA_DIR}/iga/IGALibrary/api/ DESTINATION ${CMAKE_INSTALL_FULL_INCLUDEDIR}/iga COMPONENT igc-opencl-devel FILES_MATCHING PATTERN "*.h*")
+  install(DIRECTORY ${IGC_BUILD__VISA_DIR}/iga/IGALibrary/api/ DESTINATION ${CMAKE_INSTALL_FULL_INCLUDEDIR}/iga COMPONENT igc-core-devel FILES_MATCHING PATTERN "*.h*")
 elseif (WIN32)
   install(TARGETS ${IGC_BUILD__PROJ__igc_dll}
           RUNTIME DESTINATION Release/bin          CONFIGURATIONS Release)
@@ -2263,24 +2271,32 @@ if(UNIX)
   set(CPACK_PACKAGE_VERSION_MINOR ${IGC_API_MINOR_VERSION})
   set(CPACK_PACKAGE_VERSION_PATCH ${IGC_API_PATCH_VERSION})
   set(CPACK_PACKAGE_VERSION_BUILD ${IGC_BUILD_METADATA})
-  set(CPACK_PACKAGE_VERSION "${CPACK_PACKAGE_VERSION_MAJOR}.${CPACK_PACKAGE_VERSION_MINOR}.${CPACK_PACKAGE_VERSION_PATCH}")
-  set(PACKAGE_VERSION_WTH_METADATA "${CPACK_PACKAGE_VERSION_MAJOR}.${CPACK_PACKAGE_VERSION_MINOR}.${CPACK_PACKAGE_VERSION_PATCH}+${CPACK_PACKAGE_VERSION_BUILD}")
+
+  # Check if current build is a release build
+  #
+  # If build is a release build the version string will be MAJOR.MINOR.PATCH+RELEASE_METADATA
+  # Else the version string becomes MAJOR.MINOR.PATCH-dev.BUILD_METADATA
+
+  if(DEFINED IGC_RELEASE_METADATA AND NOT IGC_RELEASE_METADATA STREQUAL "")
+    set(CPACK_PACKAGE_VERSION "${CPACK_PACKAGE_VERSION_MAJOR}.${CPACK_PACKAGE_VERSION_MINOR}.${CPACK_PACKAGE_VERSION_PATCH}")
+    set(PACKAGE_VERSION_WTH_METADATA "${CPACK_PACKAGE_VERSION_MAJOR}.${CPACK_PACKAGE_VERSION_MINOR}.${CPACK_PACKAGE_VERSION_PATCH}+${IGC_RELEASE_METADATA}")
+  else()
+    set(CPACK_PACKAGE_VERSION "${CPACK_PACKAGE_VERSION_MAJOR}.${CPACK_PACKAGE_VERSION_MINOR}.${CPACK_PACKAGE_VERSION_PATCH}-dev.${CPACK_PACKAGE_VERSION_BUILD}")
+    set(PACKAGE_VERSION_WTH_METADATA "${CPACK_PACKAGE_VERSION_MAJOR}.${CPACK_PACKAGE_VERSION_MINOR}.${CPACK_PACKAGE_VERSION_PATCH}-dev.${CPACK_PACKAGE_VERSION_BUILD}")
+  endif()
 
   set(CPACK_PACKAGE_INSTALL_DIRECTORY ${IGC_INSTALL_TIME_ROOT_DIR})
   set(CPACK_DEBIAN_PACKAGE_CONTROL_EXTRA "postinst;postrm")
-  if(DEFINED IGC_BUILD_METADATA)
-    set(CPACK_DEBIAN_PACKAGE_DESCRIPTION "Intel(R) Graphics Compiler for OpenCL(TM)\nBase revision: ${IGC_BUILD_METADATA}")
-    set(CPACK_RPM_PACKAGE_DESCRIPTION "Intel(R) Graphics Compiler for OpenCL(TM)\nBase revision: ${IGC_BUILD_METADATA}")
-  else()
-    set(CPACK_DEBIAN_PACKAGE_DESCRIPTION "Intel(R) Graphics Compiler for OpenCL(TM)")
-    set(CPACK_RPM_PACKAGE_DESCRIPTION "Intel(R) Graphics Compiler for OpenCL(TM)")
-  endif()
+  set(CPACK_DEBIAN_PACKAGE_DESCRIPTION "Intel(R) Graphics Compiler for OpenCL(TM)\nBase revision: ${IGC_BUILD_METADATA+IGC_RELEASE_METADATA}")
+  set(CPACK_RPM_PACKAGE_DESCRIPTION "Intel(R) Graphics Compiler for OpenCL(TM)\nBase revision: ${IGC_BUILD_METADATA+IGC_RELEASE_METADATA}")
   set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS ON)
   set(CPACK_RPM_PACKAGE_RELOCATABLE TRUE)
 
-
   set(CPACK_DEBIAN_IGC-CORE_FILE_NAME "intel-igc-core-2_${PACKAGE_VERSION_WTH_METADATA}_${CPACK_DEBIAN_PACKAGE_ARCHITECTURE}.deb")
   set(CPACK_DEBIAN_IGC-CORE_PACKAGE_NAME "intel-igc-core-2")
+  set(CPACK_DEBIAN_IGC-CORE-DEVEL_FILE_NAME "intel-igc-core-devel_${PACKAGE_VERSION_WTH_METADATA}_${CPACK_DEBIAN_PACKAGE_ARCHITECTURE}.deb")
+  set(CPACK_DEBIAN_IGC-CORE-DEVEL_PACKAGE_NAME "intel-igc-core-devel")
+  set(CPACK_DEBIAN_IGC-CORE-DEVEL_PACKAGE_DEPENDS "intel-igc-core-2(=${CPACK_PACKAGE_VERSION})")
   set(CPACK_DEBIAN_IGC-OPENCL_FILE_NAME "intel-igc-opencl-2_${PACKAGE_VERSION_WTH_METADATA}_${CPACK_DEBIAN_PACKAGE_ARCHITECTURE}.deb")
   set(CPACK_DEBIAN_IGC-OPENCL_PACKAGE_NAME "intel-igc-opencl-2")
   set(CPACK_DEBIAN_IGC-OPENCL_PACKAGE_DEPENDS "intel-igc-core-2(=${CPACK_PACKAGE_VERSION})")
@@ -2288,6 +2304,9 @@ if(UNIX)
   set(CPACK_DEBIAN_IGC-OPENCL-DEVEL_PACKAGE_DEPENDS "intel-igc-opencl-2(=${CPACK_PACKAGE_VERSION})")
 
   set(CPACK_RPM_IGC-CORE_FILE_NAME "intel-igc-core-2-${PACKAGE_VERSION_WTH_METADATA}.${CPACK_RPM_PACKAGE_ARCHITECTURE}.rpm")
+  set(CPACK_RPM_IGC-CORE-DEVEL_FILE_NAME "intel-igc-core-devel_${PACKAGE_VERSION_WTH_METADATA}_${CPACK_RPM_PACKAGE_ARCHITECTURE}.rpm")
+  set(CPACK_RPM_IGC-CORE-DEVEL_PACKAGE_NAME "intel-igc-core-devel")
+  set(CPACK_RPM_IGC-CORE-DEVEL_PACKAGE_REQUIRES "intel-igc-core-2 = ${CPACK_PACKAGE_VERSION}")
   set(CPACK_RPM_IGC-CORE_PACKAGE_NAME "intel-igc-core-2")
   set(CPACK_RPM_IGC-OPENCL_FILE_NAME "intel-igc-opencl-2-${PACKAGE_VERSION_WTH_METADATA}.${CPACK_RPM_PACKAGE_ARCHITECTURE}.rpm")
   set(CPACK_RPM_IGC-OPENCL_PACKAGE_NAME "intel-igc-opencl-2")
@@ -2298,6 +2317,7 @@ if(UNIX)
   set(CPACK_ARCHIVE_IGC-CORE_FILE_NAME "intel-igc-core-2-${PACKAGE_VERSION_WTH_METADATA}.${CPACK_PACKAGE_ARCHITECTURE}")
   set(CPACK_ARCHIVE_IGC-OPENCL_FILE_NAME "intel-igc-opencl-2-${PACKAGE_VERSION_WTH_METADATA}.${CPACK_PACKAGE_ARCHITECTURE}")
   set(CPACK_ARCHIVE_IGC-OPENCL-DEVEL_FILE_NAME "intel-igc-opencl-devel-${PACKAGE_VERSION_WTH_METADATA}.${CPACK_PACKAGE_ARCHITECTURE}")
+  set(CPACK_ARCHIVE_IGC-CORE-DEVEL_FILE_NAME "intel-igc-core-devel-${PACKAGE_VERSION_WTH_METADATA}.${CPACK_PACKAGE_ARCHITECTURE}")
 
   # Create separate debug symbol packages if the CMake/CPack version in use
   # provides stable support for that functionality.
@@ -2307,7 +2327,7 @@ if(UNIX)
   set(CPACK_DEB_COMPONENT_INSTALL ON)
   set(CPACK_RPM_COMPONENT_INSTALL ON)
   set(CPACK_ARCHIVE_COMPONENT_INSTALL ON)
-  set(CPACK_COMPONENTS_ALL igc-core igc-opencl igc-opencl-devel)
+  set(CPACK_COMPONENTS_ALL igc-core igc-opencl igc-opencl-devel igc-core-devel)
 
   include (CPack)
 endif(UNIX)

@@ -17,14 +17,10 @@ SPDX-License-Identifier: MIT
 #include "Compiler/CISACodeGen/messageEncoding.hpp"
 #include "Compiler/CISACodeGen/VariableReuseAnalysis.hpp"
 #include "Compiler/CISACodeGen/helper.h"
-#include "Compiler/CISACodeGen/OpenCLKernelCodeGen.hpp"
 #include "Compiler/CISACodeGen/VectorProcess.hpp"
 #include "Compiler/CISACodeGen/EmitVISAPass.hpp"
-#include "Compiler/MetaDataApi/MetaDataApi.h"
-#include "common/secure_mem.h"
 #include "Probe/Assertion.h"
 
-#include <iomanip>
 
 using namespace llvm;
 using namespace IGC;
@@ -37,16 +33,7 @@ CShader::CShader(Function *pFunc, CShaderProgram *pProgram, GenericShaderState &
     , encoder()
 {
     m_ctx = m_parent->GetContext();
-
-    bool SepSpillPvtSS = SeparateSpillAndScratch(m_ctx);
-    bool SeparateScratchWA =
-        IGC_IS_FLAG_ENABLED(EnableSeparateScratchWA) &&
-        !m_ctx->getModuleMetaData()->disableSeparateScratchWA;
-    m_simdProgram.init(!m_ctx->platform.hasScratchSurface(),
-        m_ctx->platform.maxPerThreadScratchSpace(
-        ),
-        GetContext()->getModuleMetaData()->compOpt.UseScratchSpacePrivateMemory,
-        SepSpillPvtSS, SeparateScratchWA);
+    GenericShaderState::setScratchUsage(*m_ctx, m_simdProgram);
 }
 
 bool CShader::IsRecompilationRequestForced()
@@ -1721,6 +1708,73 @@ uint CShader::GetNbElementAndMask(llvm::Value* value, uint32_t& mask)
             // Number elements = {num GRFs} * {num DWords in GRF} = {num GRFs} * 8;
             return int_cast<unsigned int>(cast<ConstantInt>(numGRFs)->getZExtValue() * 8);
         }
+        case GenISAIntrinsic::GenISA_LSC2DBlockRead:
+        case GenISAIntrinsic::GenISA_LSC2DBlockReadAddrPayload:
+        {
+            // 2D block read requires its block size to be multiple of GRF size.
+            uint32_t eltBits, blkWidth, blkHeight, numBlks;
+            bool isTranspose, isVnni;
+            if (IID == GenISAIntrinsic::GenISA_LSC2DBlockRead)
+            {
+                eltBits = (uint32_t)cast<ConstantInt>(inst->getOperand(6))->getZExtValue();
+                blkWidth = (uint32_t)cast<ConstantInt>(inst->getOperand(7))->getZExtValue();
+                blkHeight = (uint32_t)cast<ConstantInt>(inst->getOperand(8))->getZExtValue();
+                numBlks = (uint32_t)cast<ConstantInt>(inst->getOperand(9))->getZExtValue();
+                isTranspose = (uint)cast<ConstantInt>(inst->getOperand(10))->getZExtValue();
+                isVnni = (uint)cast<ConstantInt>(inst->getOperand(11))->getZExtValue();
+            }
+            else
+            {
+                IGC_ASSERT(IID == GenISAIntrinsic::GenISA_LSC2DBlockReadAddrPayload);
+                eltBits = (uint32_t)cast<ConstantInt>(inst->getOperand(3))->getZExtValue();
+                blkWidth = (uint32_t)cast<ConstantInt>(inst->getOperand(4))->getZExtValue();
+                blkHeight = (uint32_t)cast<ConstantInt>(inst->getOperand(5))->getZExtValue();
+                numBlks = (uint32_t)cast<ConstantInt>(inst->getOperand(6))->getZExtValue();
+                isTranspose = cast<ConstantInt>(inst->getOperand(7))->getZExtValue();
+                isVnni = cast<ConstantInt>(inst->getOperand(8))->getZExtValue();
+            }
+
+            // Width is padded to the next power-of-2 value
+            uint32_t blkWidthCeil = (uint32_t)PowerOf2Ceil(blkWidth);
+            if (blkWidthCeil != blkWidth)
+            {
+                m_ctx->EmitWarning("Block2D: block width not power of 2, zero padded.");
+            }
+            uint32_t blkHeightCeil = blkHeight;
+            if (isTranspose)
+            {
+                blkHeightCeil = (uint32_t)PowerOf2Ceil(blkHeight);
+                if (blkHeightCeil != blkHeight)
+                {
+                    m_ctx->EmitWarning("Block2D: transpose block height not power of 2, zero padded.");
+                }
+            }
+            if (isVnni)
+            {
+                IGC_ASSERT(eltBits == 16 || eltBits == 8);
+                uint32_t N = 32 / eltBits;
+                uint32_t origVal = blkHeightCeil;
+                blkHeightCeil = (uint32_t)divideCeil(blkHeightCeil, N) * N;
+                if (blkHeightCeil != origVal)
+                {
+                    m_ctx->EmitWarning("Block2D: transform block height not multiple "
+                        "of N (32/eltBits), zero padded.");
+                }
+            }
+            uint32_t blkBits = blkWidthCeil * blkHeightCeil * eltBits;
+            uint32_t numGRFsPerBlk = (uint32_t)divideCeil(blkBits, getGRFSize() * 8);
+            uint32_t blkBitsCeil = getGRFSize() * 8 * numGRFsPerBlk;
+            if (blkBitsCeil != blkBits)
+            {
+                m_ctx->EmitWarning("Block2D: block size not multiple of GRF size, zero padded.");
+            }
+            uint32_t numGRFs = numGRFsPerBlk * numBlks;
+            VISA_Type visaTy = GetType(inst->getType());
+            uint32_t eltTyBytes = CEncoder::GetCISADataTypeSize(visaTy);
+            uint32_t nbElement = (uint32_t)divideCeil(numGRFs * getGRFSize(), eltTyBytes);
+
+            return nbElement;
+        }
         default:
             break;
         }
@@ -2064,7 +2118,8 @@ CVariable* CShader::GetStructVariable(llvm::Value* v)
         isa<InsertValueInst>(v) ||
         isa<CallInst>(v) ||
         isa<Argument>(v) ||
-        isa<PHINode>(v),
+        isa<PHINode>(v) ||
+        isa<SelectInst>(v),
         "Invalid instruction using struct type!");
 
     if (isa<InsertValueInst>(v))
@@ -2119,6 +2174,29 @@ CVariable* CShader::GetStructVariable(llvm::Value* v)
                     return it->second;
                 }
                 v = FirstInsertValueInst;
+            }
+        }
+    }
+    else if (auto* SI = dyn_cast<SelectInst>(v))
+    {
+        if (IGC_IS_FLAG_ENABLED(EnableDeSSA) && m_deSSA)
+        {
+            e_alignment pAlign = EALIGN_GRF;
+            Value* rVal = m_deSSA->getRootValue(v, &pAlign);
+
+            // If a struct type is coalesced with another non-struct type,
+            // need to call createAliasIfNeeded().  Otherwise, all coalesced
+            // structs are of the same type (Byte).
+            if (rVal && !rVal->getType()->isStructTy()) {
+                CVariable* rootV = GetSymbol(rVal);
+                return createAliasIfNeeded(v, rootV);
+            }
+
+            v = rVal ? rVal : v;
+            auto it = symbolMapping.find(v);
+            if (it != symbolMapping.end())
+            {
+                return it->second;
             }
         }
     }
@@ -2204,7 +2282,7 @@ CVariable* CShader::GetConstant(llvm::Constant* C, CVariable* dstVar)
         }
 
         // Emit a scalar move to load the element of index k.
-        auto copyScalar = [=](int k, CVariable* Var)
+        auto copyScalar = [this, C, eTy](int k, CVariable* Var)
         {
             Constant* const EC = C->getAggregateElement(k);
             IGC_ASSERT_MESSAGE(nullptr != EC, "Constant Vector: Invalid non-constant element!");
@@ -2226,7 +2304,7 @@ CVariable* CShader::GetConstant(llvm::Constant* C, CVariable* dstVar)
         };
 
         // Emit a simd4 move to load 4 byte float.
-        auto copyV4 = [=](int k, uint32_t vfimm, CVariable* Var)
+        auto copyV4 = [this](int k, uint32_t vfimm, CVariable* Var)
         {
             CVariable* Imm = ImmToVariable(vfimm, ISA_TYPE_VF);
             GetEncoder().SetUniformSIMDSize(SIMDMode::SIMD4);
@@ -2841,7 +2919,7 @@ CVariable* CShader::getOrCreateArgumentSymbol(
                 // optimization, with some advanced analysis.
                 if (ArgType == ImplicitArg::ArgType::R0 ||
                     ArgType == ImplicitArg::ArgType::PAYLOAD_HEADER ||
-                    ArgType == ImplicitArg::ArgType::PAYLOAD_HEADER_SHORT ||
+                    ArgType == ImplicitArg::ArgType::GLOBAL_OFFSET ||
                     ArgType == ImplicitArg::ArgType::WORK_DIM ||
                     ArgType == ImplicitArg::ArgType::NUM_GROUPS ||
                     ArgType == ImplicitArg::ArgType::GLOBAL_SIZE ||
@@ -3127,6 +3205,14 @@ unsigned int CShader::EvaluateSIMDConstExpr(Value* C)
 CVariable* CShader::GetSymbol(llvm::Value* value, bool fromConstantPool,
     e_alignment MinAlign)
 {
+    auto it = symbolMapping.find(value);
+
+    // mapping exists, return
+    if (it != symbolMapping.end())
+    {
+        return it->second;
+    }
+
     CVariable* var = nullptr;
 
     // Symbol mappings for struct types
@@ -3239,14 +3325,6 @@ CVariable* CShader::GetSymbol(llvm::Value* value, bool fromConstantPool,
         {
             return ImmToVariable(EvaluateSIMDConstExpr(inst), ISA_TYPE_D);
         }
-    }
-
-    auto it = symbolMapping.find(value);
-
-    // mapping exists, return
-    if (it != symbolMapping.end())
-    {
-        return it->second;
     }
 
     if (IGC_IS_FLAG_ENABLED(EnableDeSSA) &&
@@ -3991,7 +4069,8 @@ void CShader::CopyVariableRaw(
     CVariable* dst,
     CVariable* src)
 {
-    VISA_Type dataType = ISA_TYPE_UD;
+    // handle cases with uniform variables
+    VISA_Type dataType = dst->IsUniform() ? dst->GetType() : ISA_TYPE_UD;
     uint dataTypeSizeInBytes = CEncoder::GetCISADataTypeSize(dataType);
     uint offset = 0;
     uint bytesToCopy = src->GetSize() * src->GetNumberInstance();
@@ -4001,7 +4080,8 @@ void CShader::CopyVariableRaw(
         bool dstSeconfHalf = offset >= dst->GetSize();
         bool srcSeconfHalf = offset >= src->GetSize();
         encoder.SetSecondHalf(dstSeconfHalf || srcSeconfHalf);
-        SIMDMode simdMode = getGRFSize() == 64 ? SIMDMode::SIMD32 : SIMDMode::SIMD16;
+        SIMDMode simdMode = dst->IsUniform() ? SIMDMode::SIMD1 :
+            getGRFSize() == 64 ? SIMDMode::SIMD32 : SIMDMode::SIMD16;
         uint movSize = numLanes(simdMode) * dataTypeSizeInBytes;
         while (movSize > bytesToCopy ||
             (!srcSeconfHalf && ((offset + movSize) > src->GetSize())) ||
@@ -4071,7 +4151,7 @@ bool CShader::CompileSIMDSizeInCommon(SIMDMode simdMode)
 
     if (ret && m_ctx->hasSyncRTCalls(entry))
     {
-        ret = (m_Platform->getMaxRayQuerySIMDSize() >= simdMode);
+        ret = (m_Platform->getMaxRayQuerySIMDSize(m_ctx->type) >= simdMode);
     }
 
     return ret;
@@ -4199,15 +4279,24 @@ Tristate CShader::shouldGenerateLSCQuery(
         return Tristate::False;
     }
 
-    // Geneate LSC for load/store instructions as Load/store emit can
+    // Generate LSC for load/store instructions as Load/store emit can
     // handle full-payload uniform non-transpose LSC on PVC A0.
     if (vectorLdStInst == nullptr
         || isa<LoadInst>(vectorLdStInst)
         || isa<StoreInst>(vectorLdStInst))
         return Tristate::True;
-    // special checks for typed r/w
+
     if (GenIntrinsicInst* inst = dyn_cast<GenIntrinsicInst>(vectorLdStInst))
     {
+        // Generate LSC for predicated load/store instructions similar to
+        // simple load/store instructions.
+        if (inst->getIntrinsicID() == GenISAIntrinsic::GenISA_PredicatedLoad ||
+            inst->getIntrinsicID() == GenISAIntrinsic::GenISA_PredicatedStore)
+        {
+            return Tristate::True;
+        }
+
+        // special checks for typed r/w
         if (inst->getIntrinsicID() == GenISAIntrinsic::GenISA_typedread ||
             inst->getIntrinsicID() == GenISAIntrinsic::GenISA_typedwrite ||
             inst->getIntrinsicID() == GenISAIntrinsic::GenISA_typedwriteMS ||

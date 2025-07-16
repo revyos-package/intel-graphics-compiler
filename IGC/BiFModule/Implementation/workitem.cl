@@ -40,9 +40,9 @@ uint __intel_WorkgroupSize()
 size_t __intel_EnqueuedWorkgroupSize()
 {
     size_t totalWorkGroupSize =
-        __builtin_IB_get_enqueued_local_size(0) *
-        __builtin_IB_get_enqueued_local_size(1) *
-        __builtin_IB_get_enqueued_local_size(2);
+        (size_t) __builtin_IB_get_enqueued_local_size(0) *
+        (size_t) __builtin_IB_get_enqueued_local_size(1) *
+        (size_t) __builtin_IB_get_enqueued_local_size(2);
 
     BuiltinAssumeGE0(totalWorkGroupSize);
     return totalWorkGroupSize;
@@ -105,15 +105,16 @@ size_t OVERLOADABLE __intel_GlobalInvocationId(uint dim)
         return 0;
 
     size_t v =
-        __builtin_IB_get_group_id(dim) * __builtin_IB_get_enqueued_local_size(dim) +
-        __intel_LocalInvocationId(dim) + __builtin_IB_get_global_offset(dim);
+        (size_t) __builtin_IB_get_group_id(dim) * (size_t) __builtin_IB_get_enqueued_local_size(dim) +
+        (size_t) __intel_LocalInvocationId(dim) + (size_t) __builtin_IB_get_global_offset(dim);
 
 #ifndef NO_ASSUME_SUPPORT
      BuiltinAssumeGE0(v);
      // We want to show, that the value is positive.
      // On LLVM level, where the signedness of the type is lost, the only way to prove
      // that the value is positive is to check the sign bit.
-     __builtin_assume((v & 0x8000000000000000ULL) == 0);
+     if (BIF_FLAG_CTRL_GET(UseAssumeInGetGlobalId))
+        __builtin_assume((v & 0x8000000000000000ULL) == 0);
 #endif
 
     return v;
@@ -146,58 +147,6 @@ uint __intel_LocalInvocationIndex()
 }
 
 ////////////////////////
-
-#if !defined(__USE_KHRONOS_SPIRV_TRANSLATOR__)
-
-size_t3 __builtin_spirv_BuiltInNumWorkgroups()
-{
-    size_t3 v = BuiltinVector(__builtin_IB_get_num_groups);
-    BuiltinVectorAssumeGE0(v);
-    return v;
-}
-
-size_t3 __builtin_spirv_BuiltInWorkgroupSize()
-{
-   size_t3 v = BuiltinVector(__builtin_IB_get_local_size);
-   BuiltinVectorAssumeGE0(v);
-   return v;
-}
-
-size_t3 __builtin_spirv_BuiltInWorkgroupId()
-{
-    return __intel_WorkgroupId();
-}
-
-size_t3 __builtin_spirv_BuiltInLocalInvocationId()
-{
-    return __intel_LocalInvocationId();
-}
-
-size_t3 __builtin_spirv_BuiltInGlobalInvocationId()
-{
-    return __intel_GlobalInvocationId();
-}
-
-size_t3 __builtin_spirv_BuiltInGlobalSize()
-{
-    size_t3 v = BuiltinVector(__builtin_IB_get_global_size);
-    BuiltinVectorAssumeGE0(v);
-    return v;
-}
-
-size_t3 __builtin_spirv_BuiltInEnqueuedWorkgroupSize()
-{
-    size_t3 v = BuiltinVector(__builtin_IB_get_enqueued_local_size);
-    BuiltinVectorAssumeGE0(v);
-    return v;
-}
-
-size_t3 __builtin_spirv_BuiltInGlobalOffset()
-{
-    return BuiltinVector(__builtin_IB_get_global_offset);
-}
-
-#else // defined(__USE_KHRONOS_SPIRV_TRANSLATOR__)
 
 size_t OVERLOADABLE __spirv_BuiltInNumWorkgroups(int dimindx)
 {
@@ -249,8 +198,6 @@ size_t OVERLOADABLE __spirv_BuiltInGlobalOffset(int dimindx)
     return __builtin_IB_get_global_offset(dimindx);
 }
 
-#endif
-
 size_t SPIRV_OVERLOADABLE SPIRV_BUILTIN_NO_OP(BuiltInGlobalLinearId, , )()
 {
   uint dim = SPIRV_BUILTIN_NO_OP(BuiltInWorkDim, , )();
@@ -259,18 +206,38 @@ size_t SPIRV_OVERLOADABLE SPIRV_BUILTIN_NO_OP(BuiltInGlobalLinearId, , )()
   switch (dim) {
     default:
     case 1:
-      result = __intel_GlobalInvocationId(0) - __builtin_IB_get_global_offset(0);
+    {
+      size_t gid0 = __intel_GlobalInvocationId(0);
+      size_t globalOffset0 = __builtin_IB_get_global_offset(0);
+      result = gid0 - globalOffset0;
       break;
+    }
     case 2:
-      result = (__intel_GlobalInvocationId(1) - __builtin_IB_get_global_offset(1))*
-                __builtin_IB_get_global_size(0) + (__intel_GlobalInvocationId(0) - __builtin_IB_get_global_offset(0));
+    {
+      size_t gid0 = __intel_GlobalInvocationId(0);
+      size_t gid1 = __intel_GlobalInvocationId(1);
+      size_t globalOffset0 = __builtin_IB_get_global_offset(0);
+      size_t globalOffset1 = __builtin_IB_get_global_offset(1);
+      size_t globalSize0 = __builtin_IB_get_global_size(0);
+      result = (gid1 - globalOffset1) * globalSize0 +
+               (gid0 - globalOffset0);
       break;
+    }
     case 3:
-      result = ((__intel_GlobalInvocationId(2) - __builtin_IB_get_global_offset(2)) *
-                __builtin_IB_get_global_size(1) * __builtin_IB_get_global_size(0)) +
-               ((__intel_GlobalInvocationId(1) - __builtin_IB_get_global_offset(1)) * __builtin_IB_get_global_size(0)) +
-               (__intel_GlobalInvocationId(0) - __builtin_IB_get_global_offset(0));
+    {
+      size_t gid0 = __intel_GlobalInvocationId(0);
+      size_t gid1 = __intel_GlobalInvocationId(1);
+      size_t gid2 = __intel_GlobalInvocationId(2);
+      size_t globalOffset0 = __builtin_IB_get_global_offset(0);
+      size_t globalOffset1 = __builtin_IB_get_global_offset(1);
+      size_t globalOffset2 = __builtin_IB_get_global_offset(2);
+      size_t globalSize0 = __builtin_IB_get_global_size(0);
+      size_t globalSize1 = __builtin_IB_get_global_size(1);
+      result = ((gid2 - globalOffset2) * globalSize1 * globalSize0) +
+               ((gid1 - globalOffset1) * globalSize0) +
+               (gid0 - globalOffset0);
       break;
+    }
   }
 
   BuiltinAssumeGE0(result);

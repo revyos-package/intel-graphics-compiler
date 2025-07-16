@@ -416,4 +416,3 @@ bool SamplerPerfOptPass::runOnFunction(Function& F)
     }
     return changed;
 }
-

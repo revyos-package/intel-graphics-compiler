@@ -77,6 +77,7 @@ void GenXBIFFlagCtrlResolution::FillFlagCtrl() {
   BIF_FLAG_CTRL_SET(ProfilingTimerResolution, 0.0f);
   BIF_FLAG_CTRL_SET(UseMathWithLUT, false);
   BIF_FLAG_CTRL_SET(UseHighAccuracyMath, false);
+  BIF_FLAG_CTRL_SET(UseAssumeInGetGlobalId, true);
   // FIXME: target specific, but subtarget cannot be reached in middle-end.
   BIF_FLAG_CTRL_SET(HasInt64SLMAtomicCAS, false);
   BIF_FLAG_CTRL_SET(JointMatrixLoadStoreOpt, 3);
@@ -88,10 +89,12 @@ void GenXBIFFlagCtrlResolution::FillFlagCtrl() {
   BIF_FLAG_CTRL_SET(hasHWLocalThreadID, false);
   BIF_FLAG_CTRL_SET(APIRS, false);
   BIF_FLAG_CTRL_SET(UseLSC, false);
+  BIF_FLAG_CTRL_SET(UseBfn, false);
   BIF_FLAG_CTRL_SET(ForceL1Prefetch, false);
   BIF_FLAG_CTRL_SET(UseNativeFP64GlobalAtomicAdd, false);
   BIF_FLAG_CTRL_SET(MaxHWThreadIDPerSubDevice, 1);
   BIF_FLAG_CTRL_SET(UseOOBChecks, false);
+  BIF_FLAG_CTRL_SET(UseBindlessImage, false);
 }
 
 #undef BIF_FLAG_CTRL_SET

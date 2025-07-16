@@ -10,7 +10,6 @@ SPDX-License-Identifier: MIT
 #include "GenISAIntrinsics/GenIntrinsics.h"
 #include "GenISAIntrinsics/GenIntrinsicInst.h"
 #include "Compiler/CodeGenPublic.h"
-#include "Compiler/IGCPassSupport.h"
 #include "Compiler/CISACodeGen/ShaderCodeGen.hpp"
 
 #include "common/LLVMWarningsPush.hpp"
@@ -19,7 +18,6 @@ SPDX-License-Identifier: MIT
 #include "llvm/Analysis/CodeMetrics.h"
 #include "llvm/Analysis/LoopInfo.h"
 #include "llvm/Analysis/ScalarEvolution.h"
-#include "llvm/Support/raw_ostream.h"
 #include "llvmWrapper/Transforms/Utils/LoopUtils.h"
 #include "common/LLVMWarningsPop.hpp"
 
@@ -187,7 +185,8 @@ namespace llvm {
             {
                 LoopUnrollThreshold = ctx->getModuleMetaData()->csInfo.SetLoopUnrollThreshold;
             }
-            else if (ctx->type == ShaderType::PIXEL_SHADER && ctx->getModuleMetaData()->compOpt.SetLoopUnrollThreshold > 0)
+            else if ((ctx->type == ShaderType::PIXEL_SHADER || ctx->type == ShaderType::RAYTRACING_SHADER) &&
+                ctx->getModuleMetaData()->compOpt.SetLoopUnrollThreshold > 0)
             {
                 LoopUnrollThreshold = ctx->getModuleMetaData()->compOpt.SetLoopUnrollThreshold;
             }
@@ -383,14 +382,15 @@ namespace llvm {
         if (L->getNumBlocks() != 1) {
             if (IGC_IS_FLAG_ENABLED(EnableAdvRuntimeUnroll) && IGCLLVM::isInnermost(L)) {
                 auto countNonPHI = [](BasicBlock* BB) {
-                    unsigned Total = BB->size();
+                    // Count the number of instructions in the basic block without dbg instructions
+                    unsigned InstCountInBB = BB->sizeWithoutDebug();
                     unsigned PHIs = 0;
                     for (auto BI = BB->begin(), BE = BB->end(); BI != BE; ++BI) {
                         if (!isa<PHINode>(&*BI))
                             break;
                         ++PHIs;
                     }
-                    return Total - PHIs;
+                    return InstCountInBB - PHIs;
                 };
                 auto hasLoad = [](BasicBlock* BB) {
                     for (auto BI = BB->begin(), BE = BB->end(); BI != BE; ++BI)

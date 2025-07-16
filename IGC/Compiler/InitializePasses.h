@@ -1,6 +1,6 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (C) 2017-2024 Intel Corporation
+Copyright (C) 2017-2025 Intel Corporation
 
 SPDX-License-Identifier: MIT
 
@@ -23,6 +23,7 @@ void initializeAtomicOptPassPass(llvm::PassRegistry&);
 void initializeAggregateArgumentsAnalysisPass(llvm::PassRegistry&);
 void initializeAlignmentAnalysisPass(llvm::PassRegistry&);
 void initializePreBIImportAnalysisPass(llvm::PassRegistry&);
+void initializePromoteToPredicatedMemoryAccessPass(llvm::PassRegistry&);
 void initializeBIImportPass(llvm::PassRegistry&);
 void initializeBlockCoalescingPass(llvm::PassRegistry&);
 void initializeBlockMemOpAddrScalarizationPassPass(llvm::PassRegistry&);
@@ -117,6 +118,7 @@ void initializeOpenCLPrintfAnalysisPass(llvm::PassRegistry&);
 void initializeOpenCLPrintfResolutionPass(llvm::PassRegistry&);
 void initializePeepholeTypeLegalizerPass(llvm::PassRegistry&);
 void initializePositionDepAnalysisPass(llvm::PassRegistry&);
+void initializePrepareInlineSamplerForBindlessPass(llvm::PassRegistry&);
 void initializePrivateMemoryResolutionPass(llvm::PassRegistry&);
 void initializePrivateMemoryToSLMPass(llvm::PassRegistry&);
 void initializePrivateMemoryUsageAnalysisPass(llvm::PassRegistry&);
@@ -132,6 +134,7 @@ void initializePullConstantHeuristicsPass(llvm::PassRegistry&);
 void initializeScalarizerCodeGenPass(llvm::PassRegistry&);
 void initializeReduceLocalPointersPass(llvm::PassRegistry&);
 void initializeReplaceUnsupportedIntrinsicsPass(llvm::PassRegistry&);
+void initializeResolveInlineSamplerForBindlessPass(llvm::PassRegistry&);
 void initializePreCompiledFuncImportPass(llvm::PassRegistry&);
 void initializePurgeMetaDataUtilsPass(llvm::PassRegistry&);
 void initializeRemoveNonPositionOutputPass(llvm::PassRegistry&);
@@ -150,8 +153,11 @@ void initializeScalarizeFunctionPass(llvm::PassRegistry&);
 void initializeSimd32ProfitabilityAnalysisPass(llvm::PassRegistry&);
 void initializeSetFastMathFlagsPass(llvm::PassRegistry&);
 void initializeSPIRMetaDataTranslationPass(llvm::PassRegistry&);
+void initializeSplitStructurePhisPassPass(llvm::PassRegistry&);
+void initializeMergeScalarPhisPassPass(llvm::PassRegistry &);
 void initializeSpv2dBlockIOResolutionPass(llvm::PassRegistry&);
 void initializeSpvSubgroupMMAResolutionPass(llvm::PassRegistry&);
+void initializeSplitLoadsPass(llvm::PassRegistry&);
 void initializeStatelessToStatefulPass(llvm::PassRegistry&);
 void initializeSubGroupFuncsResolutionPass(llvm::PassRegistry&);
 void initializeSubGroupReductionPatternPass(llvm::PassRegistry&);
@@ -177,7 +183,8 @@ void initializeLSCCacheOptimizationPassPass(llvm::PassRegistry&);
 void initializeBindlessKernelArgLoweringPassPass(llvm::PassRegistry&);
 void initializeSplitPreparePassPass(llvm::PassRegistry&);
 void initializeSplitAsyncPassPass(llvm::PassRegistry&);
-void initializeMergeAllocasPass(llvm::PassRegistry&);
+void initializeMergeAllocasOCLPass(llvm::PassRegistry&);
+void initializeMergeAllocasRaytracingPass(llvm::PassRegistry&);
 void initializeAllocationBasedLivenessAnalysis(llvm::PassRegistry&);
 void initializePrepareSyncRTHelpersPass(llvm::PassRegistry&);
 void initializeSyncHandlingPassPass(llvm::PassRegistry&);
@@ -223,6 +230,7 @@ void initializeLoopAllocaUpperboundPass(llvm::PassRegistry&);
 void initializeLoopHoistConstantPass(llvm::PassRegistry&);
 void initializeSpecialCasesDisableLICMPass(llvm::PassRegistry&);
 void initializeMemOptPass(llvm::PassRegistry&);
+void initializeMergeUniformStoresPass(llvm::PassRegistry&);
 void initializeLdStCombinePass(llvm::PassRegistry&);
 void initializeBIFTransformsPass(llvm::PassRegistry&);
 void initializeThreadCombiningPass(llvm::PassRegistry&);
@@ -243,6 +251,7 @@ void initializeFCmpPaternMatchPass(llvm::PassRegistry&);
 void initializeCodeAssumptionPass(llvm::PassRegistry&);
 void initializeIGCInstructionCombiningPassPass(llvm::PassRegistry&);
 void initializeIntDivConstantReductionPass(llvm::PassRegistry&);
+void initializeIntDivRemIncrementReductionPass(llvm::PassRegistry&);
 void initializeIntDivRemCombinePass(llvm::PassRegistry&);
 void initializeGenRotatePass(llvm::PassRegistry&);
 void initializeSynchronizationObjectCoalescingPass(llvm::PassRegistry&);
@@ -253,6 +262,7 @@ void initializeUnreachableHandlingPass(llvm::PassRegistry&);
 void initializeBreakdownIntrinsicPassPass(llvm::PassRegistry&);
 void initializeCatchAllLineNumberPass(llvm::PassRegistry&);
 void initializeDebugInfoPassPass(llvm::PassRegistry&);
+void initializeVectorShuffleAnalysisPass(llvm::PassRegistry&);
 void initializeIGCLivenessAnalysisPass(llvm::PassRegistry&);
 void initializeIGCRegisterPressurePrinterPass(llvm::PassRegistry&);
 void initializeIGCVectorizerPass(llvm::PassRegistry&);
@@ -279,3 +289,4 @@ void initializeRemoveLoopDependencyPass(llvm::PassRegistry&);
 void initializeResourceLoopUnrollPass(llvm::PassRegistry&);
 void initializeInjectPrintfPass(llvm::PassRegistry&);
 void initializeWaveShuffleIndexSinkingPass(llvm::PassRegistry&);
+void initializeInstructionHoistingOptimizationPass(llvm::PassRegistry &);

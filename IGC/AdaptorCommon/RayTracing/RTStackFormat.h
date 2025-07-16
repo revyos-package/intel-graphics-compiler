@@ -1,6 +1,6 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (C) 2019-2021 Intel Corporation
+Copyright (C) 2019-2025 Intel Corporation
 
 SPDX-License-Identifier: MIT
 
@@ -15,6 +15,7 @@ SPDX-License-Identifier: MIT
 #pragma once
 
 #include "API/RayDispatchGlobalData.h"
+#include "ConstantsEnums.h"
 
 #include <stdint.h>
 #include <stddef.h>
@@ -34,6 +35,8 @@ SPDX-License-Identifier: MIT
 // The others are lower level internal utilities, used only by higher level macros.
 //
 // Explanation of code in original resource : https://www.fluentcpp.com/2019/08/30/how-to-disable-a-warning-in-cpp/
+
+// clang-format off
 #if defined(__clang__)
     #define DO_PRAGMA_DIAG(X) _Pragma(#X)                                                     // internal utility
     #define DISABLE_WARNING_PUSH         DO_PRAGMA_DIAG(GCC diagnostic push)
@@ -77,10 +80,11 @@ SPDX-License-Identifier: MIT
     #define DISABLE_WARNING_PADDING_AT_END_OF_STRUCT
     #define DISABLE_WARNING_ANON_TYPES_IN_ANON_UNION
 #endif
+// clang-format on
 
-
-DISABLE_WARNING_PUSH       // save the current pragma state, save the current compiler settings
-// select the warnings that we want to disable, for this file only
+// save the current pragma state, save the current compiler settings select the
+// warnings that we want to disable, for this file only
+DISABLE_WARNING_PUSH
 DISABLE_WARNING_ANONYMOUS_STRUCT_UNION
 DISABLE_WARNING_PADDING_AT_END_OF_STRUCT
 DISABLE_WARNING_ANON_TYPES_IN_ANON_UNION
@@ -158,6 +162,7 @@ public:
 };
 
 static_assert(sizeof(KSP) == 8, "changed?");
+
 
 
 struct NodeInfo
@@ -324,7 +329,7 @@ struct MemRay<Xe>
         rayMask               = 8,
 
         ComparisonValue       = 7,
-        pad2                  = 8,
+        pad2 = 8,
     };
 
     // 32 B
@@ -426,7 +431,8 @@ struct MemRay<Xe>
         struct {
             uint64_t instLeafPtr : (T)Bits::instLeafPtr;  // the pointer to instance leaf in case we traverse an instance (64-bytes alignment)
             uint64_t rayMask     : (T)Bits::rayMask;      // ray mask used for ray masking
-            uint64_t pad2        : (T)Bits::pad2;
+
+            uint64_t pad2 : (T)Bits::pad2;
         };
     };
 };
@@ -1268,6 +1274,11 @@ enum class RayFlags_Xe3 : uint16_t
 // "Only defined ray flags are propagated by the system, e.g. visible to the RayFlags() shader intrinsic."
 constexpr uint32_t RayFlagsMask_Xe3 = getRayFlagMask((uint32_t)RayFlags_Xe3::FORCE_2STATE_STOC);
 static_assert(sizeof(MemTravStack) == 32, "MemTravStack has to be 32 bytes large");
+
+enum class RayQueryFlags : uint16_t
+{
+    NONE = 0x00,
+};
 
 
 // On DG2, writes will not go to the L1$ unless they are 16-byte aligned

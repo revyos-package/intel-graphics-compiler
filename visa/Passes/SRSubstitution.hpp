@@ -39,15 +39,13 @@ struct regMap {
 };
 
 struct regMapBRA {
-  G4_INST *inst;
-  Gen4_Operand_Number opndNum;
-  unsigned int offset;
-  G4_Operand *opnd;
+  G4_INST *inst = nullptr;
+  Gen4_Operand_Number opndNum = Opnd_total_num;
+  unsigned int offset = 0;
+  G4_Operand *opnd = nullptr;
 
-  regMapBRA()
-      : inst(nullptr), offset(0), opnd(nullptr), opndNum(Opnd_total_num) {
-    ;
-  }
+  regMapBRA() {}
+
   regMapBRA(G4_INST *i, Gen4_Operand_Number n, unsigned int off,
             G4_Operand *src)
       : inst(i), opndNum(n), offset(off), opnd(src) {
@@ -90,28 +88,28 @@ public:
   void SRSub(G4_BB *bb);
 };
 
-class SRSubPassBeforeRA {
+class SRSubPassAfterRA {
   IR_Builder &builder;
   G4_Kernel &kernel;
   unsigned candidateID = 0;
 
 public:
-  SRSubPassBeforeRA(IR_Builder &B, G4_Kernel &K) : builder(B), kernel(K) {
+  SRSubPassAfterRA(IR_Builder &B, G4_Kernel &K) : builder(B), kernel(K) {
   }
-  SRSubPassBeforeRA(const SRSubPassBeforeRA &) = delete;
-  SRSubPassBeforeRA& operator=(const SRSubPassBeforeRA&) = delete;
-  ~SRSubPassBeforeRA() {
+  SRSubPassAfterRA(const SRSubPassAfterRA &) = delete;
+  SRSubPassAfterRA& operator=(const SRSubPassAfterRA&) = delete;
+  ~SRSubPassAfterRA() {
   };
 
   void run() {
     for (auto bb : kernel.fg) {
-      SRSubBeforeRA(bb);
+      SRSubAfterRA(bb);
     }
   }
-  bool isSRCandidateBeforeRA(G4_INST *inst, regCandidatesBRA &dstSrcRegs);
-  bool replaceWithSendiBeforeRA(G4_BB *bb, INST_LIST_ITER instIter,
+  bool isSRCandidateAfterRA(G4_INST *inst, regCandidatesBRA &dstSrcRegs);
+  bool replaceWithSendiAfterRA(G4_BB *bb, INST_LIST_ITER instIter,
                                 regCandidatesBRA &dstSrcRegs);
-  void SRSubBeforeRA(G4_BB *bb);
+  void SRSubAfterRA(G4_BB *bb);
 };
 
 } // namespace vISA

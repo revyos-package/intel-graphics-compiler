@@ -464,15 +464,17 @@ void *VISAKernelImpl::encodeAndEmit(unsigned int &binarySize) {
 
   if (m_options->getOption(vISA_DumpPerfStats) ||
       m_options->getOption(vISA_DumpPerfStatsVerbose)) {
-    // set BinaryHash
-    m_jitInfo->stats.binaryHash =
-        std::hash<std::string>{}(std::string((char*)binary, binarySize));
+    finalizePerfStats(std::hash<std::string>{}(std::string((char*)binary, binarySize)));
     dumpPerfStatsInJson(m_asmName);
   }
 
   return binary;
 }
 
+void VISAKernelImpl::finalizePerfStats(uint64_t binaryHash) {
+  // set BinaryHash
+  m_jitInfo->stats.binaryHash = binaryHash;
+}
 
 void KERNEL_INFO::collectStats(G4_Kernel &kernel) {
   for (auto decl : kernel.Declares) {
@@ -656,7 +658,31 @@ void VISAKernelImpl::dumpPerfStatsInJson(const std::string &filename) {
     }
   }
 
-  llvm::json::Value output_jv = llvm::json::Array({std::move(pv)});
+  llvm::json::Value output_jv = nullptr;
+  if (m_options->getOption(vISA_DumpSendInfoStats)) {
+    llvm::json::Array Src0Array;
+    for (const auto &val : m_jitInfo->sendInfo.src0Vec) {
+      Src0Array.push_back(val);
+    }
+    llvm::json::Array Src1Array;
+    for (const auto &val : m_jitInfo->sendInfo.src1Vec) {
+      Src1Array.push_back(val);
+    }
+    llvm::json::Array DestArray;
+    for (const auto &val : m_jitInfo->sendInfo.destVec) {
+      DestArray.push_back(val);
+    }
+
+    llvm::json::Value sendArray =
+        llvm::json::Object({{"src0", std::move(Src0Array)},
+                            {"src1", std::move(Src1Array)},
+                            {"dest", std::move(DestArray)}});
+
+    output_jv = llvm::json::Array({std::move(pv), std::move(sendArray)});
+  }
+  else {
+    output_jv = llvm::json::Array({std::move(pv)});
+  }
   statsOutput << llvm::formatv("{0:2}", output_jv).str() << "\n";
 }
 
@@ -2116,10 +2142,13 @@ int VISAKernelImpl::CreateVISADstOperand(VISA_VectorOpnd *&cisa_opnd,
   cisa_opnd = static_cast<VISA_VectorOpnd *>(getOpndFromPool());
   if (IS_GEN_BOTH_PATH) {
     G4_Declare *dcl = cisa_decl->genVar.dcl;
+    G4_Declare *aliasDcl = dcl->getRootDeclare();
 
     // replace vISA %null variable with a null dst to avoid confusing later
     // passes
-    if (cisa_decl->type == GENERAL_VAR && cisa_decl->index == 0) {
+    if (cisa_decl->type == GENERAL_VAR &&
+        (cisa_decl->index == 0 ||
+         (aliasDcl && strcmp(aliasDcl->getName(), "%null") == 0))) {
       cisa_opnd->g4opnd = m_builder->createNullDst(dcl->getElemType());
     } else {
       cisa_opnd->g4opnd = m_builder->createDst(
@@ -5527,7 +5556,8 @@ int VISAKernelImpl::AppendVISA3dRTWriteCPS(
     VISA_VectorOpnd *renderTargetIndex, vISA_RT_CONTROLS cntrls,
     VISA_StateOpndHandle *surface, VISA_RawOpnd *r1Header,
     VISA_VectorOpnd *sampleIndex, VISA_VectorOpnd *cPSCounter,
-    uint8_t numMsgSpecificOpnds, VISA_RawOpnd **opndArray) {
+    uint8_t numMsgSpecificOpnds, VISA_RawOpnd **opndArray
+) {
   TIME_SCOPE(VISA_BUILDER_APPEND_INST);
 
   AppendVISAInstCommon();
@@ -7360,6 +7390,8 @@ int VISAKernelImpl::AppendVISADpasInstCommon(
     if (src2Precision == GenPrecision::FP16 ||
         src2Precision == GenPrecision::BF16 ||
         src2Precision == GenPrecision::TF32 ||
+        src2Precision == GenPrecision::BF8 ||
+        src2Precision == GenPrecision::HF8 ||
         src2Bits == 8 || (src1Bits <= 4 && src2Bits == 4)) {
       G4_SubReg_Align srAlign = getIRBuilder()->getGRFAlign();
       if (Count != 8)
@@ -7596,12 +7628,13 @@ int VISAKernelImpl::AppendVISAQwordScatterInst(
 
 VISA_BUILDER_API int VISAKernelImpl::AppendVISALscUntypedLoad(
     LSC_OP subOpcode, LSC_SFID sfid, VISA_PredOpnd *pred,
-    VISA_Exec_Size execSize, VISA_EMask_Ctrl emask, LSC_CACHE_OPTS cacheOpts,
+    VISA_Exec_Size execSize, VISA_EMask_Ctrl emask,
+    LSC_CACHE_OPTS cacheOpts, bool ov,
     LSC_ADDR addr, LSC_DATA_SHAPE data,
     VISA_VectorOpnd *surface, unsigned surfaceIndex,
     VISA_RawOpnd *dstData, VISA_RawOpnd *src0Addr) {
   return AppendVISALscUntypedInst(subOpcode, sfid, pred, execSize, emask,
-                                  cacheOpts, addr, data,
+                                  cacheOpts, ov, addr, data,
                                   surface, surfaceIndex, dstData,
                                   src0Addr, nullptr, nullptr);
 }
@@ -7613,7 +7646,7 @@ VISA_BUILDER_API int VISAKernelImpl::AppendVISALscUntypedStore(
     VISA_VectorOpnd *surface, unsigned surfaceIndex,
     VISA_RawOpnd *src0Addr, VISA_RawOpnd *src1Data) {
   return AppendVISALscUntypedInst(subOpcode, sfid, pred, execSize, emask,
-                                  cacheOpts, addr, data,
+                                  cacheOpts, false, addr, data,
                                   surface, surfaceIndex, nullptr,
                                   src0Addr, src1Data, nullptr);
 }
@@ -7626,7 +7659,7 @@ VISA_BUILDER_API int VISAKernelImpl::AppendVISALscUntypedAtomic(
     VISA_RawOpnd *dstReadBack, VISA_RawOpnd *src0Addr,
     VISA_RawOpnd *src1AtomOpnd1, VISA_RawOpnd *src2AtomOpnd2) {
   return AppendVISALscUntypedInst(subOpcode, sfid, pred, execSize, emask,
-                                  cacheOpts, addr, data,
+                                  cacheOpts, false, addr, data,
                                   surface, surfaceIndex,
                                   dstReadBack,
                                   src0Addr, src1AtomOpnd1, src2AtomOpnd2);
@@ -7655,7 +7688,8 @@ static const int LSC_ZERO = 0;
 
 VISA_BUILDER_API int VISAKernelImpl::AppendVISALscUntypedInst(
     LSC_OP subOpcode, LSC_SFID lscSfid, VISA_PredOpnd *pred,
-    VISA_Exec_Size execSize, VISA_EMask_Ctrl emask, LSC_CACHE_OPTS cacheOpts,
+    VISA_Exec_Size execSize, VISA_EMask_Ctrl emask,
+    LSC_CACHE_OPTS cacheOpts, bool ov,
     LSC_ADDR addr, LSC_DATA_SHAPE dataShape,
     VISA_VectorOpnd *surface, unsigned surfaceIndex,
     VISA_RawOpnd *dstData, VISA_RawOpnd *src0Addr,
@@ -7704,6 +7738,8 @@ VISA_BUILDER_API int VISAKernelImpl::AppendVISALscUntypedInst(
     //
     ADD_OPND(numOpnds, opnds, CreateOtherOpnd(cacheOpts.l1, ISA_TYPE_UB));
     ADD_OPND(numOpnds, opnds, CreateOtherOpnd(cacheOpts.l3, ISA_TYPE_UB));
+    if (hasOV(lscSfid, subOpcode))
+      ADD_OPND(numOpnds, opnds, CreateOtherOpnd(ov, ISA_TYPE_BOOL));
     //
     ADD_OPND(numOpnds, opnds, CreateOtherOpnd(addr.type, ISA_TYPE_UB));
     ADD_OPND(numOpnds, opnds, CreateOtherOpnd(addr.immScale, ISA_TYPE_UW));
@@ -8310,7 +8346,7 @@ VISAKernelImpl::AppendVISALscUntypedAppendCounterAtomicInst(
     ADD_OPND(numOpnds, opnds, dst);
     // src0 address
     VISA_RawOpnd *src0Addr = nullptr;
-    int nullOperandCreateStatus = CreateVISANullRawOperand(src0Addr, false);
+    [[maybe_unused]] int nullOperandCreateStatus = CreateVISANullRawOperand(src0Addr, false);
     vISA_ASSERT(nullOperandCreateStatus == VISA_SUCCESS, "not able to create null operand");
     ADD_OPND(numOpnds, opnds, src0Addr);
     // src1 data

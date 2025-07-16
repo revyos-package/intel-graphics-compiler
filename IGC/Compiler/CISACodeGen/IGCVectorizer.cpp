@@ -8,7 +8,6 @@ SPDX-License-Identifier: MIT
 
 #include "IGCVectorizer.h"
 #include "llvmWrapper/IR/DerivedTypes.h"
-#include <llvmWrapper/IR/BasicBlock.h>
 #include <algorithm>
 
 //
@@ -97,6 +96,7 @@ IGC_INITIALIZE_PASS_END(IGCVectorizer, PASS_FLAG2, PASS_DESCRIPTION2,
 #define PRINT_LOG_NL(Str) if (DEBUG) { OutputLogStreamM << Str << "\n"; writeLog(); }
 #define PRINT_INST(I) if (DEBUG) { I->print(OutputLogStreamM, false); }
 #define PRINT_INST_NL(I) if (DEBUG) { if (I) { I->print(OutputLogStreamM, false); } else { PRINT_LOG("NULL"); } OutputLogStreamM << "\n"; }
+#define PRINT_DECL_NL(I) if (DEBUG) { if (I) { I->print(OutputLogStreamM); } else { PRINT_LOG("NULL"); } OutputLogStreamM << "\n"; }
 #define PRINT_DS(Str, DS) if (DEBUG) { for (auto DS_EL : DS) { { PRINT_LOG(Str); } { PRINT_INST_NL(DS_EL); } } }
 
 IGCVectorizer::IGCVectorizer() : FunctionPass(ID) {
@@ -114,8 +114,12 @@ void IGCVectorizer::initializeLogFile(Function &F) {
     if (!IGC_IS_FLAG_ENABLED(VectorizerLog))
         return;
 
+    string FName = F.getName().str();
+
+    if (FName.size() > 128) FName.resize(128);
+
     std::stringstream ss;
-    ss << F.getName().str() << "_"
+    ss << FName << "_"
        << "Vectorizer";
     auto Name = Debug::DumpName(IGC::Debug::GetShaderOutputName())
                     .Hash(CGCtx->hash)
@@ -164,7 +168,8 @@ void IGCVectorizer::findInsertElementsInDataFlow(llvm::Instruction *I,
 }
 
 unsigned int getConstantValueAsInt(Value *I) {
-    ConstantInt *Value = static_cast<ConstantInt *>(I);
+    ConstantInt *Value = dyn_cast<ConstantInt>(I);
+    IGC_ASSERT_MESSAGE(Value, "IGCVectorizer: trying to get an index from value that is not constant int");
     unsigned int Result = Value->getSExtValue();
     return Result;
 }
@@ -172,24 +177,20 @@ unsigned int getConstantValueAsInt(Value *I) {
 unsigned int getVectorSize(Value *I) {
     IGCLLVM::FixedVectorType *VecType =
         llvm::dyn_cast<IGCLLVM::FixedVectorType>(I->getType());
-    if (!VecType)
-        return 0;
+    IGC_ASSERT_MESSAGE(VecType, "IGCVectorizer: Trying to get vector size from value that is not VecType");
     unsigned int NumElements = VecType->getNumElements();
     return NumElements;
 }
 
 
-// due to our emitter, currently we only process float fdiv's that we can
-// construct as INV (first operand is 1.0f);
+// due to our emitter, currently we only process float fdiv's
 bool isFDivSafe(Instruction *I) {
     if (!IGC_GET_FLAG_VALUE(VectorizerAllowFDIV)) return false;
     auto* Binary = llvm::dyn_cast<BinaryOperator>(I);
+    if (!Binary) return false;
+
     auto OpCode = Binary->getOpcode();
     if (!(OpCode == Instruction::FDiv && I->getType()->isFloatTy())) return false;
-
-    //auto* constFloat = llvm::dyn_cast<llvm::ConstantFP>(I->getOperand(0));
-    //if (!constFloat) return false;
-    //if (!constFloat->isExactlyValue(1.f)) return false;
 
     return true;
 }
@@ -198,39 +199,84 @@ bool isBinarySafe(Instruction *I) {
 
     bool Result = false;
     auto* Binary = llvm::dyn_cast<BinaryOperator>(I);
-    if (Binary) {
-        auto OpCode = Binary->getOpcode();
-        Result |=  OpCode == Instruction::FMul;
-        Result |=  (OpCode == Instruction::FAdd && IGC_GET_FLAG_VALUE(VectorizerAllowFADD));
-        Result |= isFDivSafe(I);
+    if (!Binary) return Result;
+
+    auto OpCode = Binary->getOpcode();
+    Result |=  (OpCode == Instruction::FMul && IGC_GET_FLAG_VALUE(VectorizerAllowFMUL));
+    Result |=  (OpCode == Instruction::FAdd && IGC_GET_FLAG_VALUE(VectorizerAllowFADD));
+    Result |=  (OpCode == Instruction::FSub && IGC_GET_FLAG_VALUE(VectorizerAllowFSUB));
+    Result |= isFDivSafe(I);
+    return Result;
+}
+
+bool isPHISafe(Instruction *I) {
+    auto* PHI = llvm::dyn_cast<PHINode>(I);
+    if (PHI && PHI->getNumIncomingValues() == 2)
+        return true;
+    return false;
+}
+
+bool isFloatTyped(Instruction* I) {
+
+    const auto* fixedVecType = llvm::dyn_cast<llvm::FixedVectorType>(I->getType());
+    if (fixedVecType) {
+        if (fixedVecType->getElementType()->isFloatTy())
+            return true;
     }
+
+    return I->getType()->isFloatTy();
+}
+
+bool isIntrinsicSafe(Instruction *I) {
+    bool Result = false;
+    IntrinsicInst *IntrinsicI = llvm::dyn_cast<IntrinsicInst>(I);
+    if(!IntrinsicI) return Result;
+
+    auto IntrinsicID = IntrinsicI->getIntrinsicID();
+    Result |= (IntrinsicID == llvm::Intrinsic::exp2   && IGC_GET_FLAG_VALUE(VectorizerAllowEXP2));
+    Result |= (IntrinsicID == llvm::Intrinsic::maxnum && IGC_GET_FLAG_VALUE(VectorizerAllowMAXNUM));
     return Result;
 }
 
 bool isSafeToVectorize(Instruction *I) {
+
+    bool isFloat = isFloatTyped(I);
+
     // this is a very limited approach for vectorizing but it's safe
     bool Result =
-        llvm::isa<PHINode>(I) ||
+        isPHISafe(I)  ||
         llvm::isa<ExtractElementInst>(I) ||
         llvm::isa<InsertElementInst>(I) ||
-        llvm::isa<FPTruncInst>(I) ||
-        isBinarySafe(I);
+        (llvm::isa<FPTruncInst>(I) && IGC_GET_FLAG_VALUE(VectorizerAllowFPTRUNC)) ||
+        isBinarySafe(I) ||
+        isIntrinsicSafe(I);
 
-    return Result;
+    return Result && isFloat;
 }
 
-bool IGCVectorizer::handlePHI(VecArr &Slice, Type *VectorType) {
+bool IGCVectorizer::handlePHI(VecArr &Slice) {
     PHINode *ScalarPhi = static_cast<PHINode *>(Slice[0]);
 
     if (!checkPHI(ScalarPhi, Slice))
         return false;
 
+    Value *PrevVectorization = nullptr;
     if (ScalarToVector.count(ScalarPhi)) {
-        PRINT_LOG_NL(" PHI was vectorized before, no bother ");
-        return true;
+
+        auto Vectorized = ScalarToVector[ScalarPhi];
+        if (llvm::isa<InsertElementInst>(Vectorized)) {
+            PRINT_LOG_NL("Was sourced by other vector instruction, but wasn't vectorized");
+            PrevVectorization = Vectorized;
+        }
+        else {
+            PRINT_LOG_NL(" PHI was vectorized before, no bother ");
+            return true;
+        }
     }
 
-    PHINode *Phi = PHINode::Create(VectorType, 2);
+    llvm::VectorType* PhiVectorType = llvm::FixedVectorType::get(ScalarPhi->getType(), Slice.size());
+
+    PHINode *Phi = PHINode::Create(PhiVectorType, 2);
     Phi->setName("vectorized_phi");
 
     VecVal Operands;
@@ -297,21 +343,30 @@ bool IGCVectorizer::handlePHI(VecArr &Slice, Type *VectorType) {
     Phi->setDebugLoc(ScalarPhi->getDebugLoc());
     CreatedVectorInstructions.push_back(Phi);
 
-    for (auto &El : Slice)
-        ScalarToVector[El] = Phi;
     PRINT_LOG("PHI created: ");
     PRINT_INST_NL(Phi);
+
+    replaceSliceInstructionsWithExtract(Slice, Phi);
+
+    for (auto &El : Slice) {
+        if (ScalarToVector.count(El)) {
+            PRINT_LOG_NL("Vectorized version already present");
+            PRINT_INST(El); PRINT_LOG(" --> "); PRINT_INST_NL(ScalarToVector[El]);
+        }
+        ScalarToVector[El] = Phi;
+    }
+
+    if (PrevVectorization) {
+        PRINT_LOG_NL("Replaced with proper vector version");
+        PrevVectorization->replaceAllUsesWith(Phi);
+    }
+
     return true;
 }
 
 bool IGCVectorizer::handleInsertElement(VecArr &Slice, Instruction* Final) {
     Instruction *First = Slice.front();
     if (!checkInsertElement(First, Slice))
-        return false;
-
-    // we can handle case with more than 1 value
-    // but it wasn't tested
-    if (!Final->hasOneUse())
         return false;
 
     PRINT_LOG_NL("InsertElement substituted with vectorized instruction");
@@ -350,6 +405,34 @@ InsertElementInst* IGCVectorizer::createVector(VecArr& Slice, Instruction* Inser
     return CreatedInsert;
 }
 
+void IGCVectorizer::replaceSliceInstructionsWithExtract(VecArr &Slice, Instruction* CreatedInst) {
+
+    // this requires different deletion strategy to be enabled by default
+    if (IGC_IS_FLAG_DISABLED(VectorizerEnablePartialVectorization)) return;
+
+    PRINT_LOG(" Extracted from: "); PRINT_INST_NL(CreatedInst);
+
+    for (size_t i = 0; i < Slice.size(); i++) {
+
+        llvm::Value* index = llvm::ConstantInt::get(llvm::Type::getInt32Ty(M->getContext()), i);
+
+        auto CreatedExtract = ExtractElementInst::Create(CreatedInst, index);
+
+        CreatedExtract->setName("vector_extract");
+        CreatedExtract->setDebugLoc(Slice[i]->getDebugLoc());
+
+        if (llvm::isa<PHINode>(CreatedInst))
+            CreatedExtract->insertBefore(CreatedInst->getParent()->getFirstNonPHI());
+        else CreatedExtract->insertAfter(CreatedInst);
+        CreatedVectorInstructions.push_back(CreatedExtract);
+
+        PRINT_INST_NL(CreatedExtract);
+
+        Slice[i]->replaceAllUsesWith(CreatedExtract);
+        ScalarToVector[CreatedExtract] = CreatedInst;
+    }
+}
+
 bool IGCVectorizer::handleBinaryInstruction(VecArr &Slice) {
 
     Value *PrevVectorization = nullptr;
@@ -381,7 +464,7 @@ bool IGCVectorizer::handleBinaryInstruction(VecArr &Slice) {
 
     auto BinaryOpcode = llvm::cast<BinaryOperator>(First)->getOpcode();
 
-    auto* CreatedInst = BinaryOperator::Create(BinaryOpcode, Operands[0], Operands[1]);
+    auto* CreatedInst = BinaryOperator::CreateWithCopiedFlags(BinaryOpcode, Operands[0], Operands[1], First);
     CreatedInst->setName("vectorized_binary");
 
     CreatedInst->setDebugLoc(First->getDebugLoc());
@@ -390,6 +473,8 @@ bool IGCVectorizer::handleBinaryInstruction(VecArr &Slice) {
 
     PRINT_LOG("Binary instruction created: ");
     PRINT_INST_NL(CreatedInst);
+
+    replaceSliceInstructionsWithExtract(Slice, CreatedInst);
 
     for (auto &el : Slice) {
         if (ScalarToVector.count(el)) {
@@ -440,6 +525,73 @@ bool IGCVectorizer::handleCastInstruction(VecArr &Slice) {
     return true;
 }
 
+bool IGCVectorizer::handleIntrinsic(VecArr & Slice) {
+
+    Value *PrevVectorization = nullptr;
+    Instruction *First = Slice.front();
+    if (ScalarToVector.count(First)) {
+        auto Vectorized = ScalarToVector[First];
+        if (llvm::isa<InsertElementInst>(Vectorized)) {
+            PRINT_LOG_NL("Was sourced by other vector instruction, but wasn't vectorized");
+            PrevVectorization = Vectorized;
+        }
+        else {
+            PRINT_LOG_NL("Already was vectorized by other slice");
+            return true;
+        }
+    }
+
+    VecVal Operands;
+    for (unsigned int OperNum = 0; OperNum < First->getNumOperands() - 1 ; ++OperNum) {
+
+        Value* Vectorized = checkOperandsToBeVectorized(First, OperNum, Slice);
+        if (Vectorized)
+            Operands.push_back(Vectorized);
+        else {
+            Value* VectorizedOperand = vectorizeSlice(Slice, OperNum);
+            if (!VectorizedOperand) { PRINT_LOG_NL("Couldn't vectorize Slice"); return false; }
+            Operands.push_back(VectorizedOperand);
+        }
+    }
+
+    llvm::VectorType* VectorType = llvm::FixedVectorType::get(First->getType(), Slice.size());
+
+    auto IntrinsicID = llvm::cast<IntrinsicInst>(First)->getIntrinsicID();
+    auto *Decl = Intrinsic::getDeclaration(M, IntrinsicID, {VectorType});
+
+    PRINT_DS("operands: ", Operands);
+    auto* CreatedInst = llvm::CallInst::Create(Decl, Operands);
+
+    PRINT_DECL_NL(Decl);
+
+    CreatedInst->setName("vectorized_intrinsic");
+
+    CreatedInst->setDebugLoc(First->getDebugLoc());
+    CreatedInst->insertAfter(Slice.back());
+    CreatedVectorInstructions.push_back(CreatedInst);
+
+    PRINT_LOG("Intrinsic instruction created: ");
+    PRINT_INST_NL(CreatedInst);
+
+    replaceSliceInstructionsWithExtract(Slice, CreatedInst);
+
+    for (auto &el : Slice) {
+        if (ScalarToVector.count(el)) {
+            PRINT_LOG_NL("Vectorized version already present");
+            PRINT_INST(el); PRINT_LOG(" --> "); PRINT_INST_NL(ScalarToVector[el]);
+        }
+        ScalarToVector[el] = CreatedInst;
+    }
+
+    if (PrevVectorization) {
+        PRINT_LOG_NL("Replaced with proper vector version");
+        PrevVectorization->replaceAllUsesWith(CreatedInst);
+    }
+
+    return true;
+}
+
+
 // this basicaly seeds the chain
 bool IGCVectorizer::handleExtractElement(VecArr &Slice) {
     Instruction *First = Slice.front();
@@ -467,11 +619,13 @@ bool IGCVectorizer::processChain(InsertStruct &InSt) {
 
         Instruction *First = Slice[0];
         if (llvm::isa<PHINode>(First)) {
-            if (!handlePHI(Slice, InSt.Final->getType())) return false;
+            if (!handlePHI(Slice)) return false;
         } else if (llvm::isa<CastInst>(First)) {
             if (!handleCastInstruction(Slice)) return false;
         } else if (llvm::isa<BinaryOperator>(First)) {
             if (!handleBinaryInstruction(Slice)) return false;
+        } else if (llvm::isa<IntrinsicInst>(First)) {
+            if (!handleIntrinsic(Slice)) return false;
         } else if (llvm::isa<ExtractElementInst>(First)) {
             if (!handleExtractElement(Slice)) return false;
         } else if (llvm::isa<InsertElementInst>(First)) {
@@ -483,10 +637,8 @@ bool IGCVectorizer::processChain(InsertStruct &InSt) {
     return true;
 }
 
-void IGCVectorizer::clusterInsertElement(
-    InsertElementInst* HeadInsertEl, InsertStruct &InSt) {
-    InSt.Final = HeadInsertEl;
-    Instruction *Head = HeadInsertEl;
+void IGCVectorizer::clusterInsertElement(InsertStruct &InSt) {
+    Instruction *Head = InSt.Final;
 
     while (true) {
         InSt.Vec.push_back(Head);
@@ -505,29 +657,43 @@ void IGCVectorizer::clusterInsertElement(
     PRINT_INST_NL(InSt.Final);
     PRINT_DS("vec: ", InSt.Vec);
     PRINT_LOG_NL("--------------------------");
+
+    for (unsigned int i = 0; i < InSt.Vec.size(); ++i) {
+        auto *InsertionIndex = InSt.Vec[i]->getOperand(2);
+        unsigned int Index = getConstantValueAsInt(InsertionIndex);
+        // elements are stored so index of the array
+        // corresponds with the way how final data should be laid out
+        if (Index != i) {
+            PRINT_LOG_NL("Not supported index swizzle");
+            InSt.Vec.clear();
+        }
+    }
 }
 
 void IGCVectorizer::printSlice(Slice* S) {
 
     PRINT_LOG_NL("Slice: [ " << S << " ]");
     PRINT_LOG_NL("OpNum: " << S->OpNum);
-    PRINT_LOG_NL("Parent: " << S->Parent);
+    PRINT_LOG_NL("ParentIndex: " << S->ParentIndex);
     PRINT_DS("Slice: ", S->Vector);
 }
 
 void IGCVectorizer::buildTree(VecArr &V, VecOfSlices& Chain) {
 
     std::unordered_set<llvm::Instruction *> Explored;
-    std::queue<Slice*> BFSQ;
+    std::queue<unsigned> BFSQ;
 
-    Chain.push_back({ 0, V, nullptr});
-    Slice* Root = &Chain.back();
-    BFSQ.push(Root);
+    Chain.push_back({ 0, V, (unsigned)-1});
+    // we never delete from chain, so we can just track indexes of each slice
+    // 0 --> root index; rest calculated as backIndex = size() - 1
+    BFSQ.push(0);
 
     while (!BFSQ.empty()) {
-        Slice *CurSlice = BFSQ.front();
-        auto First = CurSlice->Vector.front();
+        unsigned ParentIndex = BFSQ.front();
         BFSQ.pop();
+
+        Slice *CurSlice = &Chain[ParentIndex];
+        auto First = CurSlice->Vector.front();
 
         PRINT_LOG_NL(""); PRINT_LOG("Start: "); PRINT_INST_NL(First);
         for (unsigned int OpNum = 0; OpNum < First->getNumOperands(); ++OpNum) {
@@ -558,8 +724,8 @@ void IGCVectorizer::buildTree(VecArr &V, VecOfSlices& Chain) {
             PRINT_DS("   check: ", LocalVector);
             if (IsSame) {
                 PRINT_LOG_NL("Pushed");
-                Chain.push_back({OpNum, std::move(LocalVector), CurSlice});
-                BFSQ.push(&Chain.back());
+                Chain.push_back({OpNum, std::move(LocalVector), ParentIndex});
+                BFSQ.push(Chain.size() - 1);
             }
         }
     }
@@ -698,6 +864,10 @@ bool IGCVectorizer::checkSlice(VecArr &Slice, InsertStruct &InSt) {
             PRINT_LOG_NL("Not all operations in the slice are identical");
             return false;
         }
+        if (Compare->getParent() != Slice[i]->getParent()) {
+            PRINT_LOG_NL("Not all operations in the slice are located in the same BB");
+            return false;
+        }
     }
 
     return true;
@@ -747,7 +917,24 @@ void IGCVectorizer::collectInstructionToProcess(VecArr &ToProcess,
     }
 }
 
+bool IGCVectorizer::checkIfSIMD16(llvm::Function &F) {
+
+    MDUtils = getAnalysis<MetaDataUtilsWrapper>().getMetaDataUtils();
+    bool Result = false;
+    if(MDUtils->findFunctionsInfoItem(&F) != MDUtils->end_FunctionsInfo()) {
+        IGC::IGCMD::FunctionInfoMetaDataHandle funcInfoMD = MDUtils->getFunctionsInfoItem(&F);
+        unsigned SimdSize = funcInfoMD->getSubGroupSize()->getSIMDSize();
+        Result = SimdSize == 16;
+    }
+
+    return Result;
+}
+
 bool IGCVectorizer::runOnFunction(llvm::Function &F) {
+
+    // DPAS only allowed in simd16 mode + helps to reduce untested cases
+    if (!checkIfSIMD16(F)) return false;
+
     M = F.getParent();
     CGCtx = getAnalysis<CodeGenContextWrapper>().getCodeGenContext();
     initializeLogFile(F);
@@ -797,9 +984,20 @@ bool IGCVectorizer::runOnFunction(llvm::Function &F) {
 
         // we process collected insert elements into a specific data structure
         // for convenience
-        for (auto el : VecOfInsert) {
-            InsertStruct InSt;
-            clusterInsertElement(static_cast<InsertElementInst*>(el), InSt);
+        InsertStruct InSt;
+        InSt.SlChain.reserve(256);
+        for (auto elFinal : VecOfInsert) {
+
+            InSt.SlChain.clear();
+            InSt.Vec.clear();
+
+            if (!elFinal->hasOneUse()) {
+                PRINT_LOG_NL("Final insert has more than one use -> rejected");
+                continue;
+            }
+            InSt.Final = elFinal;
+            clusterInsertElement(InSt);
+
             if (InSt.Vec.size() != getVectorSize(InSt.Final)) {
                 PRINT_LOG_NL("partial insert -> rejected");
                 continue;
@@ -814,18 +1012,21 @@ bool IGCVectorizer::runOnFunction(llvm::Function &F) {
             CreatedVectorInstructions.clear();
             if (!processChain(InSt)) {
                 writeLog();
-                std::reverse(CreatedVectorInstructions.begin(), CreatedVectorInstructions.end());
-                PRINT_DS("To Clean: ", CreatedVectorInstructions);
-                for (auto& el : CreatedVectorInstructions) {
-                    PRINT_LOG("Cleaned: "); PRINT_INST_NL(el); writeLog();
-                    el->eraseFromParent();
+                if (IGC_IS_FLAG_DISABLED(VectorizerEnablePartialVectorization)) {
+                    // this is important to not mix up instructions that were created for the chain
+                    // that was scraped later
+                    std::reverse(CreatedVectorInstructions.begin(), CreatedVectorInstructions.end());
+                    PRINT_DS("To Clean: ", CreatedVectorInstructions);
+                    // we move to a new cycle-proof deletion algorithm
+                    for (auto& el : CreatedVectorInstructions) {
+                        PRINT_LOG("Cleaned: "); PRINT_INST_NL(el); writeLog();
+                        ScalarToVector.erase(el);
+                        el->replaceAllUsesWith(UndefValue::get(el->getType()));
+                        el->eraseFromParent();
+                    }
                 }
-                ScalarToVector.clear();
             }
-            else {
-                for (auto& el : CreatedVectorInstructions) { PRINT_LOG("Created: "); PRINT_INST_NL(el); writeLog(); }
-            }
-            writeLog();
+            else { PRINT_DS("Created: ", CreatedVectorInstructions); writeLog(); }
         }
 
         PRINT_LOG("\n\n");

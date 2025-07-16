@@ -1,6 +1,6 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (C) 2017-2023 Intel Corporation
+Copyright (C) 2017-2025 Intel Corporation
 
 SPDX-License-Identifier: MIT
 
@@ -9,7 +9,6 @@ SPDX-License-Identifier: MIT
 #include "Compiler/Optimizer/OCLBIUtils.h"
 #include "Compiler/CISACodeGen/helper.h"
 #include "Compiler/MetaDataApi/MetaDataApi.h"
-#include "Compiler/DebugInfo/Utils.h"
 #include "common/LLVMWarningsPush.hpp"
 #include "llvmWrapper/IR/DerivedTypes.h"
 #include "llvmWrapper/IR/IRBuilder.h"
@@ -18,8 +17,8 @@ SPDX-License-Identifier: MIT
 #include "AdaptorCommon/ImplicitArgs.hpp"
 #include "LLVM3DBuilder/BuiltinsFrontend.hpp"
 #include "Probe/Assertion.h"
-#include "IGC/common/StringMacros.hpp"
 #include <llvm/Support/Casting.h>
+#include "IGC/Compiler/CISACodeGen/messageEncoding.hpp"
 
 using namespace llvm;
 using namespace IGC;
@@ -136,7 +135,162 @@ void CImagesBI::prepareCoords(Dimension Dim, Value* Coord, Value* Zero)
     }
 }
 
+void CImagesBI::CreateInlineSamplerAnnotations(Module* M, InlineSamplersMD& inlineSamplerMD, int samplerValue)
+{
+    inlineSamplerMD.m_Value = samplerValue;
+    if (llvm::StringRef(M->getTargetTriple()).startswith("igil") || llvm::StringRef(M->getTargetTriple()).startswith("gpu_64"))
+    {
+        inlineSamplerMD.addressMode = samplerValue & LEGACY_SAMPLER_ADDRESS_MASK;
+        switch (samplerValue & LEGACY_SAMPLER_ADDRESS_MASK)
+        {
+        case LEGACY_CLK_ADDRESS_NONE:
+            inlineSamplerMD.TCXAddressMode = iOpenCL::SAMPLER_TEXTURE_ADDRESS_MODE_CLAMP;
+            inlineSamplerMD.TCYAddressMode = iOpenCL::SAMPLER_TEXTURE_ADDRESS_MODE_CLAMP;
+            inlineSamplerMD.TCZAddressMode = iOpenCL::SAMPLER_TEXTURE_ADDRESS_MODE_CLAMP;
+            break;
+        case LEGACY_CLK_ADDRESS_CLAMP:
+            inlineSamplerMD.TCXAddressMode = iOpenCL::SAMPLER_TEXTURE_ADDRESS_MODE_BORDER;
+            inlineSamplerMD.TCYAddressMode = iOpenCL::SAMPLER_TEXTURE_ADDRESS_MODE_BORDER;
+            inlineSamplerMD.TCZAddressMode = iOpenCL::SAMPLER_TEXTURE_ADDRESS_MODE_BORDER;
+            break;
+        case LEGACY_CLK_ADDRESS_CLAMP_TO_EDGE:
+            inlineSamplerMD.TCXAddressMode = iOpenCL::SAMPLER_TEXTURE_ADDRESS_MODE_CLAMP;
+            inlineSamplerMD.TCYAddressMode = iOpenCL::SAMPLER_TEXTURE_ADDRESS_MODE_CLAMP;
+            inlineSamplerMD.TCZAddressMode = iOpenCL::SAMPLER_TEXTURE_ADDRESS_MODE_CLAMP;
+            break;
+        case LEGACY_CLK_ADDRESS_REPEAT:
+            inlineSamplerMD.TCXAddressMode = iOpenCL::SAMPLER_TEXTURE_ADDRESS_MODE_WRAP;
+            inlineSamplerMD.TCYAddressMode = iOpenCL::SAMPLER_TEXTURE_ADDRESS_MODE_WRAP;
+            inlineSamplerMD.TCZAddressMode = iOpenCL::SAMPLER_TEXTURE_ADDRESS_MODE_WRAP;
+            break;
+        case LEGACY_CLK_ADDRESS_MIRRORED_REPEAT:
+            inlineSamplerMD.TCXAddressMode = iOpenCL::SAMPLER_TEXTURE_ADDRESS_MODE_MIRROR;
+            inlineSamplerMD.TCYAddressMode = iOpenCL::SAMPLER_TEXTURE_ADDRESS_MODE_MIRROR;
+            inlineSamplerMD.TCZAddressMode = iOpenCL::SAMPLER_TEXTURE_ADDRESS_MODE_MIRROR;
+            break;
+#if defined ( _DEBUG ) || defined ( _INTERNAL )
+        case LEGACY_CLK_ADDRESS_MIRRORED_REPEAT_101_INTEL:
+            inlineSamplerMD.TCXAddressMode = iOpenCL::SAMPLER_TEXTURE_ADDRESS_MODE_MIRROR101;
+            inlineSamplerMD.TCYAddressMode = iOpenCL::SAMPLER_TEXTURE_ADDRESS_MODE_MIRROR101;
+            inlineSamplerMD.TCZAddressMode = iOpenCL::SAMPLER_TEXTURE_ADDRESS_MODE_MIRROR101;
+            break;
+#endif // RELEASE INTERNAL||DEBUG
 
+        default:
+            IGC_ASSERT_MESSAGE(0, "Invalid sampler type");
+            break;
+        }
+
+        inlineSamplerMD.NormalizedCoords = (samplerValue & LEGACY_SAMPLER_NORMALIZED_MASK);
+
+        switch (samplerValue & LEGACY_SAMPLER_FILTER_MASK)
+        {
+        case LEGACY_CLK_FILTER_NEAREST:
+            inlineSamplerMD.MagFilterType = (iOpenCL::SAMPLER_MAPFILTER_POINT);
+            inlineSamplerMD.MinFilterType = (iOpenCL::SAMPLER_MAPFILTER_POINT);
+            break;
+        case LEGACY_CLK_FILTER_LINEAR:
+            inlineSamplerMD.MagFilterType = (iOpenCL::SAMPLER_MAPFILTER_LINEAR);
+            inlineSamplerMD.MinFilterType = (iOpenCL::SAMPLER_MAPFILTER_LINEAR);
+            break;
+        default:
+            IGC_ASSERT_MESSAGE(0, "Filter Type must have value");
+            break;
+        }
+
+        // Border color should always be transparent black:
+        inlineSamplerMD.BorderColorR = (0.0f);
+        inlineSamplerMD.BorderColorG = (0.0f);
+        inlineSamplerMD.BorderColorB = (0.0f);
+        inlineSamplerMD.BorderColorA = (0.0f);
+    }
+    else if (llvm::StringRef(M->getTargetTriple()).startswith("spir"))
+    {
+        switch (samplerValue & SPIR_SAMPLER_ADDRESS_MASK)
+        {
+        case SPIR_CLK_ADDRESS_NONE:
+            inlineSamplerMD.TCXAddressMode = (iOpenCL::SAMPLER_TEXTURE_ADDRESS_MODE_CLAMP);
+            inlineSamplerMD.TCYAddressMode = (iOpenCL::SAMPLER_TEXTURE_ADDRESS_MODE_CLAMP);
+            inlineSamplerMD.TCZAddressMode = (iOpenCL::SAMPLER_TEXTURE_ADDRESS_MODE_CLAMP);
+            inlineSamplerMD.addressMode = (LEGACY_CLK_ADDRESS_NONE);
+            break;
+        case SPIR_CLK_ADDRESS_CLAMP:
+            inlineSamplerMD.TCXAddressMode = (iOpenCL::SAMPLER_TEXTURE_ADDRESS_MODE_BORDER);
+            inlineSamplerMD.TCYAddressMode = (iOpenCL::SAMPLER_TEXTURE_ADDRESS_MODE_BORDER);
+            inlineSamplerMD.TCZAddressMode = (iOpenCL::SAMPLER_TEXTURE_ADDRESS_MODE_BORDER);
+            inlineSamplerMD.addressMode = (LEGACY_CLK_ADDRESS_CLAMP);
+            break;
+        case SPIR_CLK_ADDRESS_CLAMP_TO_EDGE:
+            inlineSamplerMD.TCXAddressMode = (iOpenCL::SAMPLER_TEXTURE_ADDRESS_MODE_CLAMP);
+            inlineSamplerMD.TCYAddressMode = (iOpenCL::SAMPLER_TEXTURE_ADDRESS_MODE_CLAMP);
+            inlineSamplerMD.TCZAddressMode = (iOpenCL::SAMPLER_TEXTURE_ADDRESS_MODE_CLAMP);
+            inlineSamplerMD.addressMode = (LEGACY_CLK_ADDRESS_CLAMP_TO_EDGE);
+            break;
+        case SPIR_CLK_ADDRESS_REPEAT:
+            inlineSamplerMD.TCXAddressMode = (iOpenCL::SAMPLER_TEXTURE_ADDRESS_MODE_WRAP);
+            inlineSamplerMD.TCYAddressMode = (iOpenCL::SAMPLER_TEXTURE_ADDRESS_MODE_WRAP);
+            inlineSamplerMD.TCZAddressMode = (iOpenCL::SAMPLER_TEXTURE_ADDRESS_MODE_WRAP);
+            inlineSamplerMD.addressMode = (LEGACY_CLK_ADDRESS_REPEAT);
+            break;
+        case SPIR_CLK_ADDRESS_MIRRORED_REPEAT:
+            inlineSamplerMD.TCXAddressMode = (iOpenCL::SAMPLER_TEXTURE_ADDRESS_MODE_MIRROR);
+            inlineSamplerMD.TCYAddressMode = (iOpenCL::SAMPLER_TEXTURE_ADDRESS_MODE_MIRROR);
+            inlineSamplerMD.TCZAddressMode = (iOpenCL::SAMPLER_TEXTURE_ADDRESS_MODE_MIRROR);
+            inlineSamplerMD.addressMode = (LEGACY_CLK_ADDRESS_MIRRORED_REPEAT);
+            break;
+#if defined ( _DEBUG ) || defined ( _INTERNAL )
+        case SPIR_CLK_ADDRESS_MIRRORED_REPEAT_101_INTEL:
+            inlineSamplerMD.TCXAddressMode = (iOpenCL::SAMPLER_TEXTURE_ADDRESS_MODE_MIRROR101);
+            inlineSamplerMD.TCYAddressMode = (iOpenCL::SAMPLER_TEXTURE_ADDRESS_MODE_MIRROR101);
+            inlineSamplerMD.TCZAddressMode = (iOpenCL::SAMPLER_TEXTURE_ADDRESS_MODE_MIRROR101);
+            break;
+#endif // RELEASE INTERNAL||DEBUG
+
+        default:
+            IGC_ASSERT_MESSAGE(0, "Invalid sampler type");
+            break;
+        }
+
+        switch (samplerValue & SPIR_SAMPLER_NORMALIZED_MASK)
+        {
+        case SPIR_CLK_NORMALIZED_COORDS_TRUE:
+            inlineSamplerMD.NormalizedCoords = (LEGACY_CLK_NORMALIZED_COORDS_TRUE);
+            break;
+        case SPIR_CLK_NORMALIZED_COORDS_FALSE:
+            inlineSamplerMD.NormalizedCoords = (LEGACY_CLK_NORMALIZED_COORDS_FALSE);
+            break;
+        default:
+            IGC_ASSERT_MESSAGE(0, "Invalid normalized coords");
+            break;
+        }
+
+
+        switch (samplerValue & SPIR_SAMPLER_FILTER_MASK)
+        {
+        case SPIR_CLK_FILTER_NEAREST:
+            inlineSamplerMD.MagFilterType = (iOpenCL::SAMPLER_MAPFILTER_POINT);
+            inlineSamplerMD.MinFilterType = (iOpenCL::SAMPLER_MAPFILTER_POINT);
+            break;
+        case SPIR_CLK_FILTER_LINEAR:
+            inlineSamplerMD.MagFilterType = (iOpenCL::SAMPLER_MAPFILTER_LINEAR);
+            inlineSamplerMD.MinFilterType = (iOpenCL::SAMPLER_MAPFILTER_LINEAR);
+            break;
+        default:
+            IGC_ASSERT_MESSAGE(0, "Filter Type must have value");
+            break;
+        }
+
+        // Border color should always be transparent black:
+        inlineSamplerMD.BorderColorR = (0.0f);
+        inlineSamplerMD.BorderColorG = (0.0f);
+        inlineSamplerMD.BorderColorB = (0.0f);
+        inlineSamplerMD.BorderColorA = (0.0f);
+    }
+    else
+    {
+        IGC_ASSERT_MESSAGE(0, "Input IR version must be OCL or SPIR");
+    }
+}
 
 void CImagesBI::prepareColor(Value* Color)
 {
@@ -216,6 +370,17 @@ void CImagesBI::prepareImageBTI()
 
 void CImagesBI::preparePairedResource()
 {
+    if (m_pCodeGenContext->getModuleMetaData()->UseBindlessImage)
+    {
+        ConstantInt* bindlessIndex = ConstantInt::get(m_pIntType, BINDLESS_BTI);
+
+        uint32_t addrSpace = EncodeAS4GFXResource(*bindlessIndex, RESOURCE);
+        Type* ptrTy = llvm::PointerType::get(m_pFloatType, addrSpace);
+        Value* pairedResource = UndefValue::get(ptrTy);
+        m_args.push_back(pairedResource);
+        return;
+    }
+
     Value* pImg = nullptr;
     ConstantInt* imageIndex = CImagesUtils::getImageIndex(m_pParamMap, m_pCallInst, 0, pImg);
     IGC_ASSERT(isa<Argument>(pImg) || isa<LoadInst>(pImg));
@@ -293,25 +458,28 @@ BufferType CImagesBI::CImagesUtils::getImageType(ParamMap* pParamMap, CallInst* 
 
 void CImagesBI::createGetBufferPtr()
 {
+    //@TODO: Remove the part related to bindless once bindless
+    //       is fully implemented outside this pass.
+    if (m_pCodeGenContext->getModuleMetaData()->UseBindlessImage)
+    {
+        // If bindless image is preferred, don't create GetBufferPtr, instead just map the bindless pointer
+        Value* pImg = m_pCallInst->getOperand(0);
+        ConstantInt* bindlessIndex = ConstantInt::get(m_pIntType, BINDLESS_BTI);
+        uint32_t addrSpace = EncodeAS4GFXResource(*bindlessIndex, BINDLESS);
+        Type* ptrTy = llvm::PointerType::get(m_pFloatType, addrSpace);
+
+        Value* basePointer = isa<IntegerType>(pImg->getType()) ?
+            BitCastInst::CreateBitOrPointerCast(pImg, ptrTy, "bindless_img", m_pCallInst) :
+            BitCastInst::CreatePointerCast(pImg, ptrTy, "bindless_img", m_pCallInst);
+        m_args.push_back(basePointer);
+        return;
+    }
+
     Value* pImg = nullptr;
     ConstantInt* imageIndex = CImagesUtils::getImageIndex(m_pParamMap, m_pCallInst, 0, pImg);
     BufferType bufType = CImagesUtils::getImageType(m_pParamMap, m_pCallInst, 0);
     unsigned int addressSpace = IGC::EncodeAS4GFXResource(*imageIndex, bufType);
     Type* ptrTy = llvm::PointerType::get(m_pFloatType, addressSpace);
-
-    if (bufType == BufferType::BINDLESS)
-    {
-        // If bindless image is preferred, don't create GetBufferPtr, instead just map the bindless pointer
-        auto modMD = m_pCodeGenContext->getModuleMetaData();
-        if (modMD->UseBindlessImage)
-        {
-            Value* basePointer = isa<IntegerType>(pImg->getType()) ?
-                BitCastInst::CreateBitOrPointerCast(pImg, ptrTy, "bindless_img", m_pCallInst) :
-                BitCastInst::CreatePointerCast(pImg, ptrTy, "bindless_img", m_pCallInst);
-            m_args.push_back(basePointer);
-            return;
-        }
-    }
 
     Function* pFuncGetBufferPtr = getFunctionDeclaration(GenISAIntrinsic::GenISA_GetBufferPtr, ptrTy);
 
@@ -422,6 +590,40 @@ bool CImagesBI::derivedFromInt(const Value* pVal)
     return go(pVal);
 }
 
+void CImagesBI::prepareTypedReadArgs()
+{
+    createGetBufferPtr();
+    m_args.push_back(CoordX); // u
+    m_args.push_back(CoordY); // v
+    m_args.push_back(CoordZ); // r
+    m_args.push_back(m_pCallInst->getOperand(2)); // LOD
+}
+
+void CImagesBI::replaceGenISATypedRead()
+{
+    GenISAIntrinsic::ID intrinsicName = GenISAIntrinsic::GenISA_typedread;
+    Type* Tys[] = {m_args[0]->getType()};
+
+    Function* func = getFunctionDeclaration(intrinsicName, Tys);
+    Instruction* newCall = CallInst::Create(func, m_args, m_pCallInst->getName(), m_pCallInst);
+    if (m_pCallInst->getType()->getScalarType() != m_pFloatType)
+    {
+        // GenISA_typedread intrinsic returns <4 x float>
+        // therefore we do bitcast that should disappear in the final code.
+        Type *CastTy = m_pCallInst->getType();
+        Instruction* tmp = BitCastInst::Create(
+            Instruction::BitCast,
+            newCall,
+            CastTy,
+            "",
+            m_pCallInst);
+        tmp->setDebugLoc(m_DL);
+        newCall = tmp;
+    }
+    newCall->setDebugLoc(m_DL);
+    m_pCallInst->replaceAllUsesWith(newCall);
+}
+
 class COCL_sample : public CImagesBI
 {
 public:
@@ -429,6 +631,35 @@ public:
 
     Value* getSamplerValue(void)
     {
+        auto modMD = m_pCodeGenContext->getModuleMetaData();
+        //@TODO: Remove the part related to bindless once bindless
+        //       is fully implemented outside this pass.
+        if (modMD->UseBindlessImage)
+        {
+            Value* sampler;
+            if (modMD->UseBindlessImageWithSamplerTracking)
+            {
+                Value* samplerValue = ValueTracker::track(m_pCallInst, 1, m_pMdUtils, m_modMD);
+                int samplerConstantVal = int_cast<int>(cast<ConstantInt>(samplerValue)->getZExtValue());
+
+                // Bindless inline sampler is passed via implicit kernel argument.
+                ImplicitArgs implicitArgs(*m_pFunc, m_pMdUtils);
+                sampler = implicitArgs.getNumberedImplicitArg(*m_pFunc, ImplicitArg::INLINE_SAMPLER, samplerConstantVal);
+            }
+            else
+            {
+                sampler = m_pCallInst->getArgOperand(1);
+            }
+
+            // Map the bindless pointer.
+            ConstantInt* bindlessIndex = ConstantInt::get(m_pIntType, BINDLESS_BTI);
+            unsigned int addressSpace = IGC::EncodeAS4GFXResource(*bindlessIndex, BufferType::BINDLESS_SAMPLER);
+            Type* ptrTy = llvm::PointerType::get(m_pFloatType, addressSpace);
+            Value* bindlessSampler = isa<IntegerType>(sampler->getType()) ?
+                BitCastInst::CreateBitOrPointerCast(sampler, ptrTy, "bindless_sampler", m_pCallInst) :
+                BitCastInst::CreatePointerCast(sampler, ptrTy, "bindless_sampler", m_pCallInst);
+            return bindlessSampler;
+        }
         ConstantInt* samplerIndex = nullptr;
         auto isBindlessSampler = [](Value *v)
         {
@@ -444,13 +675,12 @@ public:
             }
             return false;
         };
+
         Value* samplerValue = ValueTracker::track(m_pCallInst, 1, m_pMdUtils, m_modMD, isBindlessSampler);
         if (!samplerValue) {
             emitError("There are instructions that use a sampler, but no sampler found in the kernel!", m_pCallInst);
             return nullptr;
         }
-
-        auto modMD = m_pCodeGenContext->getModuleMetaData();
 
         auto addToInlineSamplersMD = [&](int samplerConstantVal)
         {
@@ -470,70 +700,12 @@ public:
             FunctionMetaData& funcMD = m_modMD->FuncMD[m_pFunc];
             ResourceAllocMD& resAllocMD = funcMD.resAllocMD;
             InlineSamplersMD inlineSamplerMD;
-            CreateInlineSamplerAnnotations(inlineSamplerMD, samplerConstantVal);
+            CreateInlineSamplerAnnotations(m_pCallInst->getModule(), inlineSamplerMD, samplerConstantVal);
             inlineSamplerMD.index = currSamplerIdx;
             resAllocMD.inlineSamplersMD.push_back(inlineSamplerMD);
             m_pMdUtils->save(*m_pCtx);
             return samplerIndex;
         };
-
-        if (modMD->UseBindlessImage)
-        {
-            // In bindless mode, samplerValue is BinaryOperator::Or computed in ResolveSampledImageBuiltins pass.
-            // Continue to track back the sampler's origin value, which could be one of following values:
-            //   * a constant, e.g. inline sampler.
-            //   * kernel argument, e.g. sampler that is kernel argument.
-            //   * load inst, e.g. sampler in SYCL bindless sampled image.
-            Value *samplerValueOrigin = ValueTracker::track(samplerValue, m_pFunc, m_pMdUtils, m_modMD, isSYCLBindlessImageLoad);
-            if (!samplerValueOrigin) {
-                emitError("There are instructions that use a sampler, but no sampler found in the kernel!", m_pCallInst);
-                return nullptr;
-            }
-            // Map the bindless pointer.
-            Value *bindlessSampler = nullptr;
-            if (auto *samplerConstant = dyn_cast<ConstantInt>(samplerValueOrigin))
-            {
-                // Sampler is constant, e.g. inline sampler.
-                int samplerConstantVal = int_cast<int>(samplerConstant->getZExtValue());
-                samplerIndex = addToInlineSamplersMD(samplerConstantVal);
-
-                // Bindless inline sampler is passed via implicit kernel argument.
-                ImplicitArgs implicitArgs(*m_pFunc, m_pMdUtils);
-
-                Argument *arg = implicitArgs.getNumberedImplicitArg(*m_pFunc, ImplicitArg::INLINE_SAMPLER, samplerConstantVal);
-                if (!arg) {
-                    emitError("Implicit arg isn't found for inline sampler!", m_pCallInst);
-                    return nullptr;
-                }
-                auto *binOp = cast<BinaryOperator>(samplerValue);
-                if (arg->getType() == Type::getInt64Ty(*m_pCtx))
-                {
-                    binOp->setOperand(0, arg);
-                }
-                else
-                {
-                    auto * argExt = new ZExtInst(arg, Type::getInt64Ty(*m_pCtx), "", binOp);
-                    binOp->setOperand(0, argExt);
-                }
-
-                unsigned addressSpace = IGC::EncodeAS4GFXResource(*samplerIndex, BufferType::BINDLESS_SAMPLER);
-                Type *ptrTy = PointerType::get(m_pFloatType, addressSpace);
-                bindlessSampler = BitCastInst::CreateBitOrPointerCast(m_pCallInst->getOperand(1), ptrTy, "bindless_sampler", m_pCallInst);
-            }
-            else
-            {
-                // Sampler is either sampler that is kernel argument, or sampler in SYCL bindless sampled image.
-                // If sampler is argument, look up index in the parameter map.
-                int i = isa<Argument>(samplerValueOrigin) ? (*m_pParamMap)[samplerValueOrigin].index : 0;
-                samplerIndex = ConstantInt::get(m_pIntType, i);
-                unsigned int addressSpace = IGC::EncodeAS4GFXResource(*samplerIndex, BufferType::BINDLESS_SAMPLER);
-                Type* ptrTy = llvm::PointerType::get(m_pFloatType, addressSpace);
-                bindlessSampler = isa<IntegerType>(samplerValue->getType()) ?
-                    BitCastInst::CreateBitOrPointerCast(samplerValue, ptrTy, "bindless_sampler", m_pCallInst) :
-                    BitCastInst::CreatePointerCast(samplerValue, ptrTy, "bindless_sampler", m_pCallInst);
-            }
-            return bindlessSampler;
-        }
 
         // Argument samplers are looked up in the parameter map
         if (isa<Argument>(samplerValue))
@@ -549,164 +721,6 @@ public:
         int samplerConstantVal = int_cast<int>(samplerConstant->getZExtValue());
 
         return addToInlineSamplersMD(samplerConstantVal);
-    }
-
-    void CreateInlineSamplerAnnotations(InlineSamplersMD& inlineSamplerMD, int samplerValue)
-    {
-        inlineSamplerMD.m_Value = samplerValue;
-        Module* M = m_pCallInst->getParent()->getModule();
-        if (llvm::StringRef(M->getTargetTriple()).startswith("igil") || llvm::StringRef(M->getTargetTriple()).startswith("gpu_64"))
-        {
-            inlineSamplerMD.addressMode = samplerValue & LEGACY_SAMPLER_ADDRESS_MASK;
-            switch (samplerValue & LEGACY_SAMPLER_ADDRESS_MASK)
-            {
-            case LEGACY_CLK_ADDRESS_NONE:
-                inlineSamplerMD.TCXAddressMode = iOpenCL::SAMPLER_TEXTURE_ADDRESS_MODE_CLAMP;
-                inlineSamplerMD.TCYAddressMode = iOpenCL::SAMPLER_TEXTURE_ADDRESS_MODE_CLAMP;
-                inlineSamplerMD.TCZAddressMode = iOpenCL::SAMPLER_TEXTURE_ADDRESS_MODE_CLAMP;
-                break;
-            case LEGACY_CLK_ADDRESS_CLAMP:
-                inlineSamplerMD.TCXAddressMode = iOpenCL::SAMPLER_TEXTURE_ADDRESS_MODE_BORDER;
-                inlineSamplerMD.TCYAddressMode = iOpenCL::SAMPLER_TEXTURE_ADDRESS_MODE_BORDER;
-                inlineSamplerMD.TCZAddressMode = iOpenCL::SAMPLER_TEXTURE_ADDRESS_MODE_BORDER;
-                break;
-            case LEGACY_CLK_ADDRESS_CLAMP_TO_EDGE:
-                inlineSamplerMD.TCXAddressMode = iOpenCL::SAMPLER_TEXTURE_ADDRESS_MODE_CLAMP;
-                inlineSamplerMD.TCYAddressMode = iOpenCL::SAMPLER_TEXTURE_ADDRESS_MODE_CLAMP;
-                inlineSamplerMD.TCZAddressMode = iOpenCL::SAMPLER_TEXTURE_ADDRESS_MODE_CLAMP;
-                break;
-            case LEGACY_CLK_ADDRESS_REPEAT:
-                inlineSamplerMD.TCXAddressMode = iOpenCL::SAMPLER_TEXTURE_ADDRESS_MODE_WRAP;
-                inlineSamplerMD.TCYAddressMode = iOpenCL::SAMPLER_TEXTURE_ADDRESS_MODE_WRAP;
-                inlineSamplerMD.TCZAddressMode = iOpenCL::SAMPLER_TEXTURE_ADDRESS_MODE_WRAP;
-                break;
-            case LEGACY_CLK_ADDRESS_MIRRORED_REPEAT:
-                inlineSamplerMD.TCXAddressMode = iOpenCL::SAMPLER_TEXTURE_ADDRESS_MODE_MIRROR;
-                inlineSamplerMD.TCYAddressMode = iOpenCL::SAMPLER_TEXTURE_ADDRESS_MODE_MIRROR;
-                inlineSamplerMD.TCZAddressMode = iOpenCL::SAMPLER_TEXTURE_ADDRESS_MODE_MIRROR;
-                break;
-#if defined ( _DEBUG ) || defined ( _INTERNAL )
-            case LEGACY_CLK_ADDRESS_MIRRORED_REPEAT_101_INTEL:
-                inlineSamplerMD.TCXAddressMode = iOpenCL::SAMPLER_TEXTURE_ADDRESS_MODE_MIRROR101;
-                inlineSamplerMD.TCYAddressMode = iOpenCL::SAMPLER_TEXTURE_ADDRESS_MODE_MIRROR101;
-                inlineSamplerMD.TCZAddressMode = iOpenCL::SAMPLER_TEXTURE_ADDRESS_MODE_MIRROR101;
-                break;
-#endif // RELEASE INTERNAL||DEBUG
-
-            default:
-                IGC_ASSERT_MESSAGE(0, "Invalid sampler type");
-                break;
-            }
-
-            inlineSamplerMD.NormalizedCoords = (samplerValue & LEGACY_SAMPLER_NORMALIZED_MASK);
-
-            switch (samplerValue & LEGACY_SAMPLER_FILTER_MASK)
-            {
-            case LEGACY_CLK_FILTER_NEAREST:
-                inlineSamplerMD.MagFilterType = (iOpenCL::SAMPLER_MAPFILTER_POINT);
-                inlineSamplerMD.MinFilterType = (iOpenCL::SAMPLER_MAPFILTER_POINT);
-                break;
-            case LEGACY_CLK_FILTER_LINEAR:
-                inlineSamplerMD.MagFilterType = (iOpenCL::SAMPLER_MAPFILTER_LINEAR);
-                inlineSamplerMD.MinFilterType = (iOpenCL::SAMPLER_MAPFILTER_LINEAR);
-                break;
-            default:
-                IGC_ASSERT_MESSAGE(0, "Filter Type must have value");
-                break;
-            }
-
-            // Border color should always be transparent black:
-            inlineSamplerMD.BorderColorR = (0.0f);
-            inlineSamplerMD.BorderColorG = (0.0f);
-            inlineSamplerMD.BorderColorB = (0.0f);
-            inlineSamplerMD.BorderColorA = (0.0f);
-        }
-        else if (llvm::StringRef(M->getTargetTriple()).startswith("spir"))
-        {
-            switch (samplerValue & SPIR_SAMPLER_ADDRESS_MASK)
-            {
-            case SPIR_CLK_ADDRESS_NONE:
-                inlineSamplerMD.TCXAddressMode = (iOpenCL::SAMPLER_TEXTURE_ADDRESS_MODE_CLAMP);
-                inlineSamplerMD.TCYAddressMode = (iOpenCL::SAMPLER_TEXTURE_ADDRESS_MODE_CLAMP);
-                inlineSamplerMD.TCZAddressMode = (iOpenCL::SAMPLER_TEXTURE_ADDRESS_MODE_CLAMP);
-                inlineSamplerMD.addressMode = (LEGACY_CLK_ADDRESS_NONE);
-                break;
-            case SPIR_CLK_ADDRESS_CLAMP:
-                inlineSamplerMD.TCXAddressMode = (iOpenCL::SAMPLER_TEXTURE_ADDRESS_MODE_BORDER);
-                inlineSamplerMD.TCYAddressMode = (iOpenCL::SAMPLER_TEXTURE_ADDRESS_MODE_BORDER);
-                inlineSamplerMD.TCZAddressMode = (iOpenCL::SAMPLER_TEXTURE_ADDRESS_MODE_BORDER);
-                inlineSamplerMD.addressMode = (LEGACY_CLK_ADDRESS_CLAMP);
-                break;
-            case SPIR_CLK_ADDRESS_CLAMP_TO_EDGE:
-                inlineSamplerMD.TCXAddressMode = (iOpenCL::SAMPLER_TEXTURE_ADDRESS_MODE_CLAMP);
-                inlineSamplerMD.TCYAddressMode = (iOpenCL::SAMPLER_TEXTURE_ADDRESS_MODE_CLAMP);
-                inlineSamplerMD.TCZAddressMode = (iOpenCL::SAMPLER_TEXTURE_ADDRESS_MODE_CLAMP);
-                inlineSamplerMD.addressMode = (LEGACY_CLK_ADDRESS_CLAMP_TO_EDGE);
-                break;
-            case SPIR_CLK_ADDRESS_REPEAT:
-                inlineSamplerMD.TCXAddressMode = (iOpenCL::SAMPLER_TEXTURE_ADDRESS_MODE_WRAP);
-                inlineSamplerMD.TCYAddressMode = (iOpenCL::SAMPLER_TEXTURE_ADDRESS_MODE_WRAP);
-                inlineSamplerMD.TCZAddressMode = (iOpenCL::SAMPLER_TEXTURE_ADDRESS_MODE_WRAP);
-                inlineSamplerMD.addressMode = (LEGACY_CLK_ADDRESS_REPEAT);
-                break;
-            case SPIR_CLK_ADDRESS_MIRRORED_REPEAT:
-                inlineSamplerMD.TCXAddressMode = (iOpenCL::SAMPLER_TEXTURE_ADDRESS_MODE_MIRROR);
-                inlineSamplerMD.TCYAddressMode = (iOpenCL::SAMPLER_TEXTURE_ADDRESS_MODE_MIRROR);
-                inlineSamplerMD.TCZAddressMode = (iOpenCL::SAMPLER_TEXTURE_ADDRESS_MODE_MIRROR);
-                inlineSamplerMD.addressMode = (LEGACY_CLK_ADDRESS_MIRRORED_REPEAT);
-                break;
-#if defined ( _DEBUG ) || defined ( _INTERNAL )
-            case SPIR_CLK_ADDRESS_MIRRORED_REPEAT_101_INTEL:
-                inlineSamplerMD.TCXAddressMode = (iOpenCL::SAMPLER_TEXTURE_ADDRESS_MODE_MIRROR101);
-                inlineSamplerMD.TCYAddressMode = (iOpenCL::SAMPLER_TEXTURE_ADDRESS_MODE_MIRROR101);
-                inlineSamplerMD.TCZAddressMode = (iOpenCL::SAMPLER_TEXTURE_ADDRESS_MODE_MIRROR101);
-                break;
-#endif // RELEASE INTERNAL||DEBUG
-
-            default:
-                IGC_ASSERT_MESSAGE(0, "Invalid sampler type");
-                break;
-            }
-
-            switch (samplerValue & SPIR_SAMPLER_NORMALIZED_MASK)
-            {
-            case SPIR_CLK_NORMALIZED_COORDS_TRUE:
-                inlineSamplerMD.NormalizedCoords = (LEGACY_CLK_NORMALIZED_COORDS_TRUE);
-                break;
-            case SPIR_CLK_NORMALIZED_COORDS_FALSE:
-                inlineSamplerMD.NormalizedCoords = (LEGACY_CLK_NORMALIZED_COORDS_FALSE);
-                break;
-            default:
-                IGC_ASSERT_MESSAGE(0, "Invalid normalized coords");
-                break;
-            }
-
-
-            switch (samplerValue & SPIR_SAMPLER_FILTER_MASK)
-            {
-            case SPIR_CLK_FILTER_NEAREST:
-                inlineSamplerMD.MagFilterType = (iOpenCL::SAMPLER_MAPFILTER_POINT);
-                inlineSamplerMD.MinFilterType = (iOpenCL::SAMPLER_MAPFILTER_POINT);
-                break;
-            case SPIR_CLK_FILTER_LINEAR:
-                inlineSamplerMD.MagFilterType = (iOpenCL::SAMPLER_MAPFILTER_LINEAR);
-                inlineSamplerMD.MinFilterType = (iOpenCL::SAMPLER_MAPFILTER_LINEAR);
-                break;
-            default:
-                IGC_ASSERT_MESSAGE(0, "Filter Type must have value");
-                break;
-            }
-
-            // Border color should always be transparent black:
-            inlineSamplerMD.BorderColorR = (0.0f);
-            inlineSamplerMD.BorderColorG = (0.0f);
-            inlineSamplerMD.BorderColorB = (0.0f);
-            inlineSamplerMD.BorderColorA = (0.0f);
-        }
-        else
-        {
-            IGC_ASSERT_MESSAGE(0, "Input IR version must be OCL or SPIR");
-        }
     }
 
     bool prepareSamplerValue()
@@ -891,6 +905,20 @@ public:
     }
 };
 
+class COCL_ldui_rw : public CImagesBI
+{
+public:
+    COCL_ldui_rw(ParamMap* paramMap, InlineMap* inlineMap, int* nextSampler, Dimension Dim) : CImagesBI(paramMap, inlineMap, nextSampler, Dim) {}
+
+    void createIntrinsic()
+    {
+        Value* Coord = m_pCallInst->getOperand(1);
+        prepareCoords(m_dim, Coord, m_pIntZero);
+        prepareTypedReadArgs();
+        replaceGenISATypedRead();
+    }
+};
+
 class COCL_ld : public CImagesBI
 {
 public:
@@ -913,6 +941,20 @@ public:
             m_args[5]->getType(),
         };
         replaceGenISACallInst(GenISAIntrinsic::GenISA_ldptr, types);
+    }
+};
+
+class COCL_ld_rw : public CImagesBI
+{
+public:
+    COCL_ld_rw(ParamMap* paramMap, InlineMap* inlineMap, int* nextSampler, Dimension Dim) : CImagesBI(paramMap, inlineMap, nextSampler, Dim) {}
+
+    void createIntrinsic()
+    {
+        Value* Coord = m_pCallInst->getOperand(1);
+        prepareCoords(m_dim, Coord, m_pIntZero);
+        prepareTypedReadArgs();
+        replaceGenISATypedRead();
     }
 };
 
@@ -1431,6 +1473,46 @@ CBuiltinsResolver::CBuiltinsResolver(CImagesBI::ParamMap* paramMap, CImagesBI::I
     m_CommandMap["__builtin_IB_OCL_2d_ld"] = initImageClass<COCL_ld>(paramMap, inlineMap, nextSampler, CImagesBI::Dimension::DIM_2D);
     m_CommandMap["__builtin_IB_OCL_2darr_ld"] = initImageClass<COCL_ld>(paramMap, inlineMap, nextSampler, CImagesBI::Dimension::DIM_2D_ARRAY);
     m_CommandMap["__builtin_IB_OCL_3d_ld"] = initImageClass<COCL_ld>(paramMap, inlineMap, nextSampler, CImagesBI::Dimension::DIM_3D);
+
+    m_CommandMap["__builtin_IB_OCL_1d_ldui_ro"] = initImageClass<COCL_ldui>(paramMap, inlineMap, nextSampler, CImagesBI::Dimension::DIM_1D);
+    m_CommandMap["__builtin_IB_OCL_1darr_ldui_ro"] = initImageClass<COCL_ldui>(paramMap, inlineMap, nextSampler, CImagesBI::Dimension::DIM_1D_ARRAY);
+    m_CommandMap["__builtin_IB_OCL_2d_ldui_ro"] = initImageClass<COCL_ldui>(paramMap, inlineMap, nextSampler, CImagesBI::Dimension::DIM_2D);
+    m_CommandMap["__builtin_IB_OCL_2darr_ldui_ro"] = initImageClass<COCL_ldui>(paramMap, inlineMap, nextSampler, CImagesBI::Dimension::DIM_2D_ARRAY);
+    m_CommandMap["__builtin_IB_OCL_3d_ldui_ro"] = initImageClass<COCL_ldui>(paramMap, inlineMap, nextSampler, CImagesBI::Dimension::DIM_3D);
+    m_CommandMap["__builtin_IB_OCL_1d_ld_ro"] = initImageClass<COCL_ld>(paramMap, inlineMap, nextSampler, CImagesBI::Dimension::DIM_1D);
+    m_CommandMap["__builtin_IB_OCL_1darr_ld_ro"] = initImageClass<COCL_ld>(paramMap, inlineMap, nextSampler, CImagesBI::Dimension::DIM_1D_ARRAY);
+    m_CommandMap["__builtin_IB_OCL_2d_ld_ro"] = initImageClass<COCL_ld>(paramMap, inlineMap, nextSampler, CImagesBI::Dimension::DIM_2D);
+    m_CommandMap["__builtin_IB_OCL_2darr_ld_ro"] = initImageClass<COCL_ld>(paramMap, inlineMap, nextSampler, CImagesBI::Dimension::DIM_2D_ARRAY);
+    m_CommandMap["__builtin_IB_OCL_3d_ld_ro"] = initImageClass<COCL_ld>(paramMap, inlineMap, nextSampler, CImagesBI::Dimension::DIM_3D);
+
+    if (m_CodeGenContext->platform.supportsBGRATypedRead())
+    {
+        m_CommandMap["__builtin_IB_OCL_1d_ldui_rw"] = initImageClass<COCL_ldui_rw>(paramMap, inlineMap, nextSampler, CImagesBI::Dimension::DIM_1D);
+        m_CommandMap["__builtin_IB_OCL_1darr_ldui_rw"] = initImageClass<COCL_ldui_rw>(paramMap, inlineMap, nextSampler, CImagesBI::Dimension::DIM_1D_ARRAY);
+        m_CommandMap["__builtin_IB_OCL_2d_ldui_rw"] = initImageClass<COCL_ldui_rw>(paramMap, inlineMap, nextSampler, CImagesBI::Dimension::DIM_2D);
+        m_CommandMap["__builtin_IB_OCL_2darr_ldui_rw"] = initImageClass<COCL_ldui_rw>(paramMap, inlineMap, nextSampler, CImagesBI::Dimension::DIM_2D_ARRAY);
+        m_CommandMap["__builtin_IB_OCL_3d_ldui_rw"] = initImageClass<COCL_ldui_rw>(paramMap, inlineMap, nextSampler, CImagesBI::Dimension::DIM_3D);
+        m_CommandMap["__builtin_IB_OCL_1d_ld_rw"] = initImageClass<COCL_ld_rw>(paramMap, inlineMap, nextSampler, CImagesBI::Dimension::DIM_1D);
+        m_CommandMap["__builtin_IB_OCL_1darr_ld_rw"] = initImageClass<COCL_ld_rw>(paramMap, inlineMap, nextSampler, CImagesBI::Dimension::DIM_1D_ARRAY);
+        m_CommandMap["__builtin_IB_OCL_2d_ld_rw"] = initImageClass<COCL_ld_rw>(paramMap, inlineMap, nextSampler, CImagesBI::Dimension::DIM_2D);
+        m_CommandMap["__builtin_IB_OCL_2darr_ld_rw"] = initImageClass<COCL_ld_rw>(paramMap, inlineMap, nextSampler, CImagesBI::Dimension::DIM_2D_ARRAY);
+        m_CommandMap["__builtin_IB_OCL_3d_ld_rw"] = initImageClass<COCL_ld_rw>(paramMap, inlineMap, nextSampler, CImagesBI::Dimension::DIM_3D);
+    }
+    else
+    {
+        // Some image formats are not supported for typed reads, must route through sampler instead.
+        m_CommandMap["__builtin_IB_OCL_1d_ldui_rw"] = initImageClass<COCL_ldui>(paramMap, inlineMap, nextSampler, CImagesBI::Dimension::DIM_1D);
+        m_CommandMap["__builtin_IB_OCL_1darr_ldui_rw"] = initImageClass<COCL_ldui>(paramMap, inlineMap, nextSampler, CImagesBI::Dimension::DIM_1D_ARRAY);
+        m_CommandMap["__builtin_IB_OCL_2d_ldui_rw"] = initImageClass<COCL_ldui>(paramMap, inlineMap, nextSampler, CImagesBI::Dimension::DIM_2D);
+        m_CommandMap["__builtin_IB_OCL_2darr_ldui_rw"] = initImageClass<COCL_ldui>(paramMap, inlineMap, nextSampler, CImagesBI::Dimension::DIM_2D_ARRAY);
+        m_CommandMap["__builtin_IB_OCL_3d_ldui_rw"] = initImageClass<COCL_ldui>(paramMap, inlineMap, nextSampler, CImagesBI::Dimension::DIM_3D);
+        m_CommandMap["__builtin_IB_OCL_1d_ld_rw"] = initImageClass<COCL_ld>(paramMap, inlineMap, nextSampler, CImagesBI::Dimension::DIM_1D);
+        m_CommandMap["__builtin_IB_OCL_1darr_ld_rw"] = initImageClass<COCL_ld>(paramMap, inlineMap, nextSampler, CImagesBI::Dimension::DIM_1D_ARRAY);
+        m_CommandMap["__builtin_IB_OCL_2d_ld_rw"] = initImageClass<COCL_ld>(paramMap, inlineMap, nextSampler, CImagesBI::Dimension::DIM_2D);
+        m_CommandMap["__builtin_IB_OCL_2darr_ld_rw"] = initImageClass<COCL_ld>(paramMap, inlineMap, nextSampler, CImagesBI::Dimension::DIM_2D_ARRAY);
+        m_CommandMap["__builtin_IB_OCL_3d_ld_rw"] = initImageClass<COCL_ld>(paramMap, inlineMap, nextSampler, CImagesBI::Dimension::DIM_3D);
+    }
+
     m_CommandMap["__builtin_IB_OCL_2d_ldmcs"] = initImageClass<COCL_ldmcs>(paramMap, inlineMap, nextSampler, CImagesBI::Dimension::DIM_2D);
     m_CommandMap["__builtin_IB_OCL_2darr_ldmcs"] = initImageClass<COCL_ldmcs>(paramMap, inlineMap, nextSampler, CImagesBI::Dimension::DIM_2D_ARRAY);
     m_CommandMap["__builtin_IB_OCL_2d_ld2dms"] = initImageClass<COCL_ld2dms>(paramMap, inlineMap, nextSampler, CImagesBI::Dimension::DIM_2D);
@@ -1483,7 +1565,7 @@ CBuiltinsResolver::CBuiltinsResolver(CImagesBI::ParamMap* paramMap, CImagesBI::I
     m_CommandMap["__builtin_IB_write_2darr_f"] = initImageClass<CWrite>(paramMap, inlineMap, nextSampler, CImagesBI::Dimension::DIM_2D_ARRAY);
 
     // Get Image properties only supported here for bindless mode
-    if (modMD->compOpt.UseBindlessMode && !modMD->compOpt.UseLegacyBindlessMode){
+    if (modMD->UseBindlessImage){
         m_CommandMap["__builtin_IB_get_image_width"] = CGetImageProperty::create(paramMap, CImagesBI::ImageProperty::WIDTH);
         m_CommandMap["__builtin_IB_get_image_height"] = CGetImageProperty::create(paramMap, CImagesBI::ImageProperty::HEIGHT);
         m_CommandMap["__builtin_IB_get_image_depth"] = CGetImageProperty::create(paramMap, CImagesBI::ImageProperty::DEPTH);
@@ -1556,6 +1638,7 @@ CBuiltinsResolver::CBuiltinsResolver(CImagesBI::ParamMap* paramMap, CImagesBI::I
     m_CommandMap["__builtin_IB_dual_subslice_id"] = CSimpleIntrinMapping::create(GenISAIntrinsic::GenISA_dual_subslice_id, false);
     m_CommandMap["__builtin_IB_eu_id"] = CSimpleIntrinMapping::create(GenISAIntrinsic::GenISA_eu_id, false);
     m_CommandMap["__builtin_IB_get_sr0"] = CSimpleIntrinMapping::create(GenISAIntrinsic::GenISA_getSR0, false);
+    m_CommandMap["__builtin_IB_set_sr0"] = CSimpleIntrinMapping::create(GenISAIntrinsic::GenISA_setSR0, false);
     m_CommandMap["__builtin_IB_eu_thread_id"] = CSimpleIntrinMapping::create(GenISAIntrinsic::GenISA_eu_thread_id, false);
     m_CommandMap["__builtin_IB_eu_thread_pause"] = CSimpleIntrinMapping::create(GenISAIntrinsic::GenISA_eu_thread_pause, false);
 
@@ -1778,6 +1861,9 @@ CBuiltinsResolver::CBuiltinsResolver(CImagesBI::ParamMap* paramMap, CImagesBI::I
 
     m_CommandMap[StringRef("__builtin_IB_samplepos")] = CSamplePos::create();
 
+    m_CommandMap["__builtin_IB_bfn_i16"] = CSimpleIntrinMapping::create(GenISAIntrinsic::GenISA_bfn);
+    m_CommandMap["__builtin_IB_bfn_i32"] = CSimpleIntrinMapping::create(GenISAIntrinsic::GenISA_bfn);
+
     // `dp4a` built-ins
     m_CommandMap["__builtin_IB_dp4a_ss"] = CSimpleIntrinMapping::create(GenISAIntrinsic::GenISA_dp4a_ss, false);
     m_CommandMap["__builtin_IB_dp4a_uu"] = CSimpleIntrinMapping::create(GenISAIntrinsic::GenISA_dp4a_uu, false);
@@ -1785,6 +1871,8 @@ CBuiltinsResolver::CBuiltinsResolver(CImagesBI::ParamMap* paramMap, CImagesBI::I
     m_CommandMap["__builtin_IB_dp4a_us"] = CSimpleIntrinMapping::create(GenISAIntrinsic::GenISA_dp4a_us, false);
 
     m_CommandMap["__builtin_IB_software_exception"] = CSimpleIntrinMapping::create(GenISAIntrinsic::GenISA_software_exception, false);
+    m_CommandMap["__builtin_IB_enable_ieee_exception_trap"] = CSimpleIntrinMapping::create(GenISAIntrinsic::GenISA_enable_ieee_exception_trap, false);
+    m_CommandMap["__builtin_IB_disable_ieee_exception_trap"] = CSimpleIntrinMapping::create(GenISAIntrinsic::GenISA_disable_ieee_exception_trap, false);
     m_CommandMap["__builtin_IB_get_stack_pointer"] = CSimpleIntrinMapping::create(GenISAIntrinsic::GenISA_getStackPointer, false);
     m_CommandMap["__builtin_IB_get_stack_size_per_thread"] = CSimpleIntrinMapping::create(GenISAIntrinsic::GenISA_getStackSizePerThread, false);
 
@@ -1810,4 +1898,31 @@ bool CBuiltinsResolver::resolveBI(CallInst* Inst)
     m_CommandMap[calleeName]->verifyCommand();
 
     return !m_CommandMap[calleeName]->hasError();
+}
+
+llvm::CallInst* IGC::CallMemoryFenceWorkgroup(llvm::Instruction* pInsertBefore)
+{
+    IGCLLVM::IRBuilder<> builder(pInsertBefore);
+    llvm::Module* pM = pInsertBefore->getModule();
+
+    Value* trueValue = builder.getInt1(true);
+    Value* falseValue = builder.getInt1(false);
+    Value* groupScopeValue = builder.getInt32(LSC_SCOPE_GROUP);
+
+    // Add memory fence for workgroup
+    return  GenIntrinsicInst::Create(
+        GenISAIntrinsic::getDeclaration(pM, GenISAIntrinsic::GenISA_memoryfence),
+        {
+            trueValue,  // bool commitEnable
+            falseValue, // bool flushRW
+            falseValue, // bool flushConstant
+            falseValue, // bool flushTexture
+            falseValue, // bool flushIcache
+            falseValue,   // bool isGlobal
+            falseValue, // bool invalidateL1
+            falseValue, // bool evictL1
+            groupScopeValue // int memory scope
+        },
+        "",
+        pInsertBefore);
 }
