@@ -1,13 +1,12 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (C) 2017-2024 Intel Corporation
+Copyright (C) 2017-2025 Intel Corporation
 
 SPDX-License-Identifier: MIT
 
 ============================= end_copyright_notice ===========================*/
 
 #include <chrono>
-#include <iostream>
 
 #include "common/LLVMWarningsPush.hpp"
 #include <llvm/Support/ScaledNumber.h>
@@ -61,6 +60,8 @@ SPDX-License-Identifier: MIT
 #include "Compiler/Optimizer/OpenCLPasses/ImageFuncs/ImageFuncsAnalysis.hpp"
 #include "Compiler/Optimizer/OpenCLPasses/ImageFuncs/ImageFuncResolution.hpp"
 #include "Compiler/Optimizer/OpenCLPasses/ImageFuncs/ResolveSampledImageBuiltins.hpp"
+#include "Compiler/Optimizer/OpenCLPasses/PrepareInlineSamplerForBindless/PrepareInlineSamplerForBindless.hpp"
+#include "Compiler/Optimizer/OpenCLPasses/ResolveInlineSamplerForBindless/ResolveInlineSamplerForBindless.hpp"
 #include "Compiler/Optimizer/OpenCLPasses/PrivateMemory/PrivateMemoryUsageAnalysis.hpp"
 #include "Compiler/Optimizer/OpenCLPasses/PrivateMemory/PrivateMemoryResolution.hpp"
 #include "Compiler/Optimizer/OpenCLPasses/ProgramScopeConstants/ProgramScopeConstantAnalysis.hpp"
@@ -107,6 +108,7 @@ SPDX-License-Identifier: MIT
 #include "Compiler/Optimizer/OpenCLPasses/DpasFuncs/DpasFuncsResolution.hpp"
 #include "Compiler/Optimizer/OpenCLPasses/LSCFuncs/LSCFuncsResolution.hpp"
 #include "Compiler/Optimizer/OpenCLPasses/NamedBarriers/NamedBarriersResolution.hpp"
+#include "Compiler/Optimizer/OpenCLPasses/ManageableBarriers/ManageableBarriersResolution.hpp"
 #include "Compiler/Optimizer/OpenCLPasses/JointMatrixFuncsResolutionPass/JointMatrixFuncsResolutionPass.h"
 #include "Compiler/Optimizer/OpenCLPasses/RayTracing/ResolveOCLRaytracingBuiltins.hpp"
 #include "Compiler/Optimizer/OpenCLPasses/AccuracyDecoratedCallsBiFResolution/AccuracyDecoratedCallsBiFResolution.hpp"
@@ -120,11 +122,9 @@ SPDX-License-Identifier: MIT
 #include "Compiler/Optimizer/ReduceOptPass.hpp"
 #include "Compiler/CustomUnsafeOptPass.hpp"
 #include "MoveStaticAllocas.h"
-#ifdef IGC_SCALAR_USE_KHRONOS_SPIRV_TRANSLATOR
 #include "preprocess_spvir/PreprocessSPVIR.h"
 #include "preprocess_spvir/ConvertUserSemanticDecoratorOnFunctions.h"
 #include "preprocess_spvir/PromoteBools.h"
-#endif // IGC_SCALAR_USE_KHRONOS_SPIRV_TRANSLATOR
 #include "preprocess_spvir/HandleSPIRVDecorations/HandleSpirvDecorationMetadata.h"
 #include "LowerInvokeSIMD.hpp"
 #include "ResolveConstExprCalls.h"
@@ -134,6 +134,7 @@ SPDX-License-Identifier: MIT
 #include "Compiler/Optimizer/OpenCLPasses/MinimumValidAddressChecking/MinimumValidAddressChecking.hpp"
 #include "Compiler/Optimizer/OpenCLPasses/Spv2dBlockIOResolution/Spv2dBlockIOResolution.hpp"
 #include "Compiler/Optimizer/OpenCLPasses/SpvSubgroupMMAResolution/SpvSubgroupMMAResolution.hpp"
+#include "Compiler/Optimizer/PromoteToPredicatedMemoryAccess.hpp"
 
 #include "common/debug/Debug.hpp"
 #include "common/igc_regkeys.hpp"
@@ -327,18 +328,14 @@ static void CommonOCLBasedPasses(OpenCLProgramContext* pContext)
         pContext->m_InternalOptions.StoreCacheDefault;
 
     IGCPassManager mpmSPIR(pContext, "Unify");
-#ifdef IGC_SCALAR_USE_KHRONOS_SPIRV_TRANSLATOR
     mpmSPIR.add(new PreprocessSPVIR());
     mpmSPIR.add(new PromoteBools());
-#endif // IGC_SCALAR_USE_KHRONOS_SPIRV_TRANSLATOR
     mpmSPIR.add(new TypesLegalizationPass());
     mpmSPIR.add(new TargetLibraryInfoWrapperPass());
     mpmSPIR.add(new MetaDataUtilsWrapper(pMdUtils, pContext->getModuleMetaData()));
     mpmSPIR.add(new CodeGenContextWrapper(pContext));
     mpmSPIR.add(new SPIRMetaDataTranslation());
-#ifdef IGC_SCALAR_USE_KHRONOS_SPIRV_TRANSLATOR
     mpmSPIR.add(new ConvertUserSemanticDecoratorOnFunctions());
-#endif // IGC_SCALAR_USE_KHRONOS_SPIRV_TRANSLATOR
     mpmSPIR.add(new HandleSpirvDecorationMetadata());
     mpmSPIR.add(createDeadCodeEliminationPass());
     mpmSPIR.run(*pContext->getModule());
@@ -479,6 +476,11 @@ static void CommonOCLBasedPasses(OpenCLProgramContext* pContext)
         mpm.add(new PurgeMetaDataUtils());
     }
 
+    if (ManageableBarriersResolution::HasHWSupport(pContext->platform.getPlatformInfo().eRenderCoreFamily))
+    {
+        mpm.add(new ManageableBarriersResolution());
+    }
+
     // OpenCL WI + image function resolution
 
     // OCLTODO : do another DCE that will get rid of unused WI func calls before this?
@@ -560,9 +562,12 @@ static void CommonOCLBasedPasses(OpenCLProgramContext* pContext)
 
     mpm.add(new ResolveOCLRaytracingBuiltins());
     mpm.add(createRayTracingIntrinsicAnalysisPass());
+    mpm.add(new PrepareInlineSamplerForBindless());
+
     // Adding implicit args based on Analysis passes
     mpm.add(new AddImplicitArgs());
 
+    mpm.add(new ResolveInlineSamplerForBindless());
     if (IGC_IS_FLAG_ENABLED(BufferBoundsChecking) || pContext->isBufferBoundsChecking())
     {
         mpm.add(new BufferBoundsCheckingPatcher());
@@ -646,6 +651,12 @@ static void CommonOCLBasedPasses(OpenCLProgramContext* pContext)
     mpm.add(new BreakConstantExpr());
 
     mpm.add(new ScalarArgAsPointerAnalysis());
+
+    // Inserting Predicated Load If Conversion pass before OCL Scalaraizer to simplify pattern matching for the pass
+    if (IGC_IS_FLAG_ENABLED(EnablePromoteToPredicatedMemoryAccess))
+    {
+        mpm.add(new PromoteToPredicatedMemoryAccess());
+    }
 
     if (IGC_IS_FLAG_DISABLED(DisableOCLScalarizer))
     {

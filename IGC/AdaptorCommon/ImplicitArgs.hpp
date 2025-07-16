@@ -38,6 +38,7 @@ namespace IGC
             R0,
             START_ID = R0,
             PAYLOAD_HEADER,
+            GLOBAL_OFFSET, // previously packed in 8xi32 PayloadHeader
 
             // WI information
             WORK_DIM,
@@ -129,8 +130,6 @@ namespace IGC
 
             // BufferBoundsChecking
             BUFFER_SIZE,
-
-            PAYLOAD_HEADER_SHORT,
 
             NUM_IMPLICIT_ARGS
         };

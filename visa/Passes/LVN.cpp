@@ -150,6 +150,20 @@ bool LVN::canReplaceUses(INST_LIST_ITER inst_it, UseList &uses,
   G4_DstRegRegion *lvnDst = lvnInst->getDst();
   G4_Declare *lvnDstTopDcl = lvnDst->getTopDcl();
 
+  if (def->getBase()->asRegVar()->getDeclare()->getRegFile() !=
+      lvnDst->getBase()->asRegVar()->getDeclare()->getRegFile()) {
+    return false;
+  }
+
+  // The sizes of the flag variables must match
+  if (def->getBase()->asRegVar()->getDeclare()->getRegFile() == G4_FLAG) {
+    G4_Declare *defTopDcl = def->getTopDcl();
+    if (defTopDcl->getNumElems() != lvnDstTopDcl->getNumElems() ||
+        defTopDcl->getElemType() != lvnDstTopDcl->getElemType()) {
+      return false;
+    }
+  }
+
 #ifdef DEBUG_LVN_ON
   std::cerr << "Inst with same value in LVN Table:"
             << "\n";
@@ -182,6 +196,11 @@ bool LVN::canReplaceUses(INST_LIST_ITER inst_it, UseList &uses,
     // Ensure a single def flows in to the use
     auto it = useDef.find(use);
     if (it == useDef.end() || (*it).second.size() != 1) {
+      canReplace = false;
+      break;
+    }
+
+    if (opndNum == Opnd_pred || opndNum == Opnd_condMod) {
       canReplace = false;
       break;
     }
@@ -655,6 +674,31 @@ void LVN::removePhysicalVarRedefs(G4_DstRegRegion *dst) {
   }
 }
 
+void LVN::removeFlagVarRedefs(G4_Declare *topdcl) {
+
+  for (auto &all : lvnTable) {
+    for (auto it = all.second.begin(); it != all.second.end();) {
+      auto item = (*it);
+      bool erase = false;
+
+      auto dstTopDcl = item->inst->getDst()->getTopDcl();
+      if (dstTopDcl->getRegVar()->isFlag()) {
+        if (dstTopDcl == topdcl) {
+          item->active = false;
+          erase = true;
+        }
+      }
+
+      if (erase) {
+        it = all.second.erase(it);
+        continue;
+      }
+
+      it++;
+    }
+  }
+}
+
 bool LVN::checkIfInPointsTo(const G4_RegVar *addr, const G4_RegVar *var) const {
   // Check whether var is present in points2 of addr
   auto ptrToAllPointsTo = p2a.getAllInPointsTo(addr);
@@ -718,8 +762,23 @@ void LVN::removeRedefs(G4_INST *inst) {
       removePhysicalVarRedefs(dstRegRegion);
     }
   }
-}
 
+  G4_CondMod *condMod = inst->getCondMod();
+  if (condMod && condMod->getBase() && condMod->getBase()->isRegVar()) {
+    G4_Declare *condDcl = condMod->getTopDcl();
+    if (condDcl && condDcl->getRegVar()->isFlag()) {
+      removeFlagVarRedefs(condDcl);
+    }
+  }
+
+  G4_Predicate *predicate = inst->getPredicate();
+  if (predicate && predicate->getBase() && predicate->getBase()->isRegVar()) {
+    G4_Declare *predDcl = predicate->getTopDcl();
+    if (predDcl && predDcl->getRegVar()->isFlag()) {
+      removeFlagVarRedefs(predDcl);
+    }
+  }
+}
 int64_t LVN::getNegativeRepresentation(int64_t imm, G4_Type type) {
   union {
     double ddata;
@@ -1041,9 +1100,21 @@ bool LVN::addValue(G4_INST *inst) {
 
   G4_Operand *dst = inst->getDst();
   if (!dst->getBase() || !dst->getBase()->isRegVar() ||
-      dst->getBase()->asRegVar()->getDeclare()->getRegFile() != G4_GRF ||
+      (dst->getBase()->asRegVar()->getDeclare()->getRegFile() != G4_GRF &&
+       !(builder.doFlagLVN() &&
+         dst->getBase()->asRegVar()->getDeclare()->getRegFile() == G4_FLAG)) ||
       dst->getTopDcl()->getAddressed()) {
     return false;
+  }
+
+  // Only handle mov flag, imm
+  if (dst->getBase()->asRegVar()->getDeclare()->getRegFile() == G4_FLAG) {
+    if (inst->opcode() != G4_mov) {
+      return false;
+    }
+    if (!inst->getSrc(0)->isImm()) {
+      return false;
+    }
   }
 
   if (dst->getBase() && dst->getTopDcl()->isOutput()) {
@@ -1342,7 +1413,6 @@ void LVN::addValueToTable(G4_INST *inst, Value &oldValue) {
   };
 
   for (auto &item : perInstValueCache) {
-    auto it = dclValueTable.find(item.first);
     item.second->active = true;
     dclValueTable[item.first].push_back(item.second);
   }
@@ -1363,6 +1433,10 @@ void LVN::addUse(G4_DstRegRegion *dst, G4_INST *use, unsigned int srcIndex) {
     srcPos = Opnd_src1;
   } else if (srcIndex == 2) {
     srcPos = Opnd_src2;
+  } else if (srcIndex == 10) { // Must be not valid src index
+    srcPos = Opnd_condMod;
+  } else if (srcIndex == 11) {
+    srcPos = Opnd_pred;
   }
 
   UseInfo useInst = {use, srcPos};
@@ -1374,6 +1448,10 @@ void LVN::addUse(G4_DstRegRegion *dst, G4_INST *use, unsigned int srcIndex) {
     defUse.insert(std::make_pair(dst->getInst(), uses));
   } else {
     (*it).second.push_back(useInst);
+  }
+
+  if (srcIndex >= 10) {
+    return;
   }
 
   auto srcOpnd = use->getSrc(srcIndex);
@@ -1390,6 +1468,16 @@ void LVN::removeAddrTaken(G4_AddrExp *opnd) {
   G4_Declare *opndTopDcl = opnd->getRegVar()->getDeclare()->getRootDeclare();
 
   auto range_it = activeDefs.equal_range(opndTopDcl->getDeclId());
+  for (auto it = range_it.first; it != range_it.second;) {
+    auto prev_it = it;
+    (*prev_it).second.second->getInst()->removeAllUses();
+    it++;
+    activeDefs.erase(prev_it);
+  }
+}
+
+void LVN::removeFlag(G4_Declare *topDcl) {
+  auto range_it = activeDefs.equal_range(topDcl->getDeclId());
   for (auto it = range_it.first; it != range_it.second;) {
     auto prev_it = it;
     (*prev_it).second.second->getInst()->removeAllUses();
@@ -1545,6 +1633,48 @@ void LVN::populateDuTable(INST_LIST_ITER inst_it) {
         }
       }
     }
+    G4_CondMod *condMod = curInst->getCondMod();
+    if (condMod && condMod->getBase() && condMod->getBase()->isRegVar()) {
+      G4_Declare *condDcl = condMod->getTopDcl();
+      if (condDcl && condDcl->getRegVar()->isFlag()) {
+        auto range_it = activeDefs.equal_range(condDcl->getDeclId());
+        if (range_it.first != range_it.second) {
+          auto start_it = range_it.second;
+          start_it--;
+          for (auto it = start_it;;) {
+            G4_DstRegRegion *activeDst = (*it).second.second;
+            addUse(activeDst, curInst, 10);
+            if (it == range_it.first) {
+              // Last match reached
+              break;
+            }
+            it--;
+          }
+        }
+        removeFlag(condDcl);
+      }
+    }
+
+    G4_Predicate *predicate = curInst->getPredicate();
+    if (predicate && predicate->getBase() && predicate->getBase()->isRegVar()) {
+      G4_Declare *predDcl = predicate->getTopDcl();
+      if (predDcl && predDcl->getRegVar()->isFlag()) {
+        auto range_it = activeDefs.equal_range(predDcl->getDeclId());
+        if (range_it.first != range_it.second) {
+          auto start_it = range_it.second;
+          start_it--;
+          for (auto it = start_it;;) {
+            G4_DstRegRegion *activeDst = (*it).second.second;
+            addUse(activeDst, curInst, 11);
+            if (it == range_it.first) {
+              // Last match reached
+              break;
+            }
+            it--;
+          }
+        }
+      }
+    }
 
     inst_it++;
   }
@@ -1597,7 +1727,8 @@ void LVN::doLVN() {
       oldValue = value;
 
       if (isGlobal || value.isValueEmpty()) {
-        if (isGlobal && !value.isValueEmpty()) {
+        if (isGlobal && !value.isValueEmpty() &&
+            inst->getDst()->getTopDcl()->getRegFile() != G4_FLAG) {
           // If variable is global, we want to add it to LVN table.
           addGlobalValueToTable = true;
         }

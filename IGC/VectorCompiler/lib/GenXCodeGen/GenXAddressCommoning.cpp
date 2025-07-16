@@ -399,7 +399,7 @@ bool GenXAddressCommoning::processBaseReg(LiveRange *LR)
         continue;
       auto user = cast<Instruction>(ui->getUser());
 
-      auto isBaledWrr = [=]() {
+      auto isBaledWrr = [this, V, user, LR]() {
         if (!isa<LoadInst>(V) || !GenXIntrinsic::isWrRegion(user) || !user->hasOneUse())
           return false;
         StoreInst *SI = dyn_cast<StoreInst>(user->user_back());
@@ -1007,7 +1007,13 @@ bool GenXAddressCommoning::vectorizeAddrsFromOneVector(
         auto ui = OldConv->use_begin();
         auto user = cast<Instruction>(ui->getUser());
         auto NewExtract = R2.createRdRegion(NewConv, OldConv->getName(), user,
-            user->getDebugLoc(), /*ScalarAllowed=*/true);
+                                            user->getDebugLoc(),
+#if LLVM_VERSION_MAJOR < 16
+                                            /*ScalarAllowed=*/true);
+#else
+                                            /*ScalarAllowed=*/
+                                            !OldConv->getType()->isVectorTy());
+#endif
         Numbering->setNumber(NewExtract, Numbering->getNumber(user));
         // At this late stage, I believe nothing relies on the baling type for
         // this instruction being set to RDREGION, but we set it anyway for

@@ -12,18 +12,13 @@ SPDX-License-Identifier: MIT
 #include "common/LLVMWarningsPop.hpp"
 #include "GenISAIntrinsics/GenIntrinsicInst.h"
 #include "IGC/Compiler/CodeGenPublic.h"
-#include "common/IGCIRBuilder.h"
 #include "Probe/Assertion.h"
 #include "Compiler/CISACodeGen/helper.h"
 #include "Compiler/IGCPassSupport.h"
 #include "ResourceLoopUnroll.hpp"
-#include "visa_igc_common_header.h"
 #include "Compiler/CISACodeGen/WIAnalysis.hpp"
 #include "LLVM3DBuilder/BuiltinsFrontend.hpp"
 #include <llvm/Transforms/Utils/BasicBlockUtils.h>
-#include <memory>
-#include <utility>
-#include <map>
 
 using namespace llvm;
 namespace IGC
@@ -138,7 +133,7 @@ bool ResourceLoopUnroll::emitResourceLoop(llvm::CallInst* CI)
     LLVM3DBuilder<> builder(context, platform);
 
     auto createResLoopIter = [&builder, this]
-    (Instruction* inst, BasicBlock* checkBB, BasicBlock* sendBB, BasicBlock* nextBB, BasicBlock* exitBB)
+    (Instruction* inst, BasicBlock* checkBB, BasicBlock* nextBB, BasicBlock* exitBB)
         {
             Value* resource = nullptr;
             Value* sampler = nullptr;
@@ -173,22 +168,29 @@ bool ResourceLoopUnroll::emitResourceLoop(llvm::CallInst* CI)
                 Value* textureCond = nullptr;
                 Value* samplerCond = nullptr;
 
+                // No need to repeat 3 possible times to call readFirstLane(src).
+                // As readFirstLane(src) here will call:
+                // firstLaneID = getFirstLaneID(helperLaneMode), and
+                // create_waveshuffleIndex(src, firstLaneID, helperLaneMode);
+                // Here the helperLaneMode is actually nullptr (default).
+                llvm::Value* firstLaneID = builder.getFirstLaneID(nullptr);
+
                 // need care about pairTexture uniform???
                 if (!m_WIAnalysis->isUniform(pairTexture))
                 {
-                    pairTextureNew = builder.readFirstLane(pairTexture);
+                    pairTextureNew = builder.create_waveshuffleIndex(pairTexture, firstLaneID, nullptr);
                     pairTextureNew->setName("firstActivePairTex");
                 }
 
                 if (!m_WIAnalysis->isUniform(texture))
                 {
-                    textureNew = builder.readFirstLane(texture);
+                    textureNew = builder.create_waveshuffleIndex(texture, firstLaneID, nullptr);
                     textureNew->setName("firstActiveTex");
                 }
 
                 if (!m_WIAnalysis->isUniform(sampler))
                 {
-                    samplerNew = builder.readFirstLane(sampler);
+                    samplerNew = builder.create_waveshuffleIndex(sampler, firstLaneID, nullptr);
                     samplerNew->setName("firstActiveSampler");
                 }
 
@@ -223,37 +225,15 @@ bool ResourceLoopUnroll::emitResourceLoop(llvm::CallInst* CI)
                 IGC_ASSERT(0);
             }
 
-            // Here we swap the last loop load and goto, such as
-            // From
-            // (P89) lsc_load.ugm.ca.ca(M1, 16)  V1395:d32x3  bss(firstActiveRes)[V1385] : a32 /// $1953
-            // (!P89) goto (M1, 16) ___realTimePathTracingRayGeneration__YAXXZ_093_partial_check1736 /// $1954
-            // To
-            // (!P89) goto (M1, 16) ___realTimePathTracingRayGeneration__YAXXZ_093_partial_check1736 /// $1954
-            // (P89) lsc_load.ugm.ca.ca(M1, 16)  V1395:d32x3  bss(firstActiveRes)[V1385] : a32 /// $1953
-            // However, as CreateCondBr is generating terminator, we put the last send into a BB.
-            // Without swapping, each iteration, the load is loading some channels.
-            if (sendBB)
-            {
-                builder.CreateCondBr(cond, sendBB, nextBB);
-                builder.SetInsertPoint(sendBB);
-            }
-
             llvm::Instruction* predSendInstr = inst->clone();
             SetResourceOperand(predSendInstr, resourceNew, pairTextureNew, textureNew, samplerNew);
             predSendInstr->setName("resLoopSubIterSend");
             builder.Insert(predSendInstr);
 
-            if (sendBB)
-            {
-                builder.CreateBr(exitBB);
-            }
-            else
-            {
-                builder.CreateCondBr(cond, exitBB, nextBB);
-            }
-
             // add the cmp/instruction combo to our predication map
             m_pCodeGenContext->getModuleMetaData()->predicationMap[predSendInstr] = cond;
+
+            builder.CreateCondBr(cond, exitBB, nextBB);
 
             return predSendInstr;
         };
@@ -275,12 +255,10 @@ bool ResourceLoopUnroll::emitResourceLoop(llvm::CallInst* CI)
     {
         // Basicblocks for loop
         BasicBlock* partialCheckBB = BasicBlock::Create(context, "partial_check", BB->getParent(), before);
-        // Since it's created from the end, the i == 0 is the last loop
-        BasicBlock* lastSendBB = (i == 0) ? BasicBlock::Create(context, "last_send", BB->getParent(), before) : nullptr;
 
-        send = createResLoopIter(CI, partialCheckBB, lastSendBB, before, mergeBB);
+        send = createResLoopIter(CI, partialCheckBB, before, mergeBB);
 
-        PN->addIncoming(send, lastSendBB ? lastSendBB : partialCheckBB);
+        PN->addIncoming(send, partialCheckBB);
         before = partialCheckBB;
     }
 
@@ -366,7 +344,6 @@ bool ResourceLoopUnroll::ProcessFunction(llvm::Function& F)
 ////////////////////////////////////////////////////////////////////////
 void ResourceLoopUnroll::getAnalysisUsage(llvm::AnalysisUsage& AU) const
 {
-    //AU.setPreservesCFG(); //we modify cfg
     AU.addRequired<CodeGenContextWrapper>();
     AU.addRequired<WIAnalysis>();
 }

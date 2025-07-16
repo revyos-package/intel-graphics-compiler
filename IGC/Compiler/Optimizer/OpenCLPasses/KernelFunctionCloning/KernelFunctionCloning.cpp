@@ -10,8 +10,6 @@ SPDX-License-Identifier: MIT
 #include <llvm/Pass.h>
 #include <llvm/ADT/SmallVector.h>
 #include <llvmWrapper/IR/CallSite.h>
-#include <llvm/Support/Debug.h>
-#include <llvm/Support/raw_ostream.h>
 #include <llvm/Transforms/Utils/Cloning.h>
 #include "common/LLVMWarningsPop.hpp"
 #include "Compiler/CISACodeGen/ShaderCodeGen.hpp"
@@ -97,7 +95,6 @@ namespace IGC {
 
 char KernelFunctionCloning::ID = 0;
 
-#ifdef IGC_SCALAR_USE_KHRONOS_SPIRV_TRANSLATOR
 template <typename PatternTypeFirst, typename... PatternTypeRest>
 struct PatternChecker {
     template <typename Checker>
@@ -116,7 +113,6 @@ struct PatternChecker {
         return check(casted);
     }
 };
-#endif
 
 bool KernelFunctionCloning::runOnModule(Module& M) {
     MetaDataUtils* MDU = getAnalysis<MetaDataUtilsWrapper>().getMetaDataUtils();
@@ -129,7 +125,6 @@ bool KernelFunctionCloning::runOnModule(Module& M) {
             continue;
         // Check this kernell function is called.
         for (auto* U : F.users()) {
-#ifdef IGC_SCALAR_USE_KHRONOS_SPIRV_TRANSLATOR
             //
             // Ignore if it's a user semantic decoration on function.
             //
@@ -153,7 +148,6 @@ bool KernelFunctionCloning::runOnModule(Module& M) {
             if (user_semantic) {
                 continue;
             }
-#endif
             IGCLLVM::CallSite* call = nullptr;
 #if LLVM_VERSION_MAJOR < 11
             IGCLLVM::CallSite callSite(U);

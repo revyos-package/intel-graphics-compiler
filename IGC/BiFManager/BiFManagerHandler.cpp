@@ -35,7 +35,6 @@ SPDX-License-Identifier: MIT
 
 #include <Probe/Assertion.h>
 #include "inc/common/secure_string.h"
-#include <iostream>
 
 #define BIF_COMPILER_TIME_START(TYPE) \
     if (startTimer)\
@@ -131,6 +130,8 @@ void BiFManagerHandler::LinkBiF(llvm::Module& Module)
 
         if (CallbackLinker == nullptr)
         {
+            BiFSection->get()->setDataLayout(Module.getDataLayout());
+            BiFSection->get()->setTargetTriple(Module.getTargetTriple());
             if (ld.linkInModule(std::move(*BiFSection),
                 llvm::Linker::OverrideFromSrc))
             {

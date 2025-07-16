@@ -153,11 +153,13 @@ typedef struct GFX_GMD_ID_DEF
 #define GFX_GMD_ARCH_12_RELEASE_XE_LP_LG                 (71)
 #define GFX_GMD_ARCH_12_RELEASE_XE_LPG_PLUS_1274         (74)
 
-#define GFX_GMD_ARCH_20_RELEASE_XE2_HPG_X2               (1)
+#define GFX_GMD_ARCH_20_RELEASE_XE2_HPG_2001             (1)
+#define GFX_GMD_ARCH_20_RELEASE_XE2_HPG_2002             (2)
 #define GFX_GMD_ARCH_20_RELEASE_XE2_LPG                  (4)
 
 #define GFX_GMD_ARCH_30_RELEASE_XE3_LPG_3000             (0)
 #define GFX_GMD_ARCH_30_RELEASE_XE3_LPG_3001             (1)
+#define GFX_GMD_ARCH_30_RELEASE_XE3_LPG_3003             (3)
 
 #define GFX_GET_GMD_RELEASE_VERSION_RENDER(p)             ((p).sRenderBlockID.GmdID.GMDRelease)
 #define GFX_GET_GMD_RELEASE_VERSION_DISPLAY(p)            ((p).sDisplayBlockID.GmdID.GMDRelease)
@@ -758,6 +760,10 @@ typedef enum __NATIVEGTTYPE
 #define DEV_ID_E212                             0xE212
 #define DEV_ID_E215                             0xE215
 #define DEV_ID_E216                             0xE216
+#define DEV_ID_E220                             0xE220
+#define DEV_ID_E221                             0xE221
+#define DEV_ID_E222                             0xE222
+#define DEV_ID_E223                             0xE223
 
 // PTL
 #define DEV_ID_B080                             0xB080
@@ -768,6 +774,10 @@ typedef enum __NATIVEGTTYPE
 #define DEV_ID_B090                             0xB090
 #define DEV_ID_B0A0                             0xB0A0
 #define DEV_ID_B0B0                             0xB0B0
+
+// WCL
+#define DEV_ID_FD80                             0xFD80
+#define DEV_ID_FD81                             0xFD81
 
 #define GFX_IS_DG2_G11_CONFIG(d) ( ( d == DEV_ID_56A5 )             ||   \
                                  ( d == DEV_ID_56A6 )             ||   \

@@ -1,6 +1,6 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (C) 2017-2023 Intel Corporation
+Copyright (C) 2017-2025 Intel Corporation
 
 SPDX-License-Identifier: MIT
 
@@ -20,8 +20,8 @@ llvm::Pass* createRayTracingIntrinsicResolutionPass();
 llvm::Pass* createTraceRayInlinePrepPass();
 llvm::Pass* createTraceRayInlineLatencySchedulerPass();
 llvm::Pass* CreateTraceRayInlineLoweringPass();
+llvm::Pass* createInlineRaytracing();
 llvm::Pass* CreateDynamicRayManagementPass();
 llvm::Pass* CreateRTGlobalsPointerLoweringPass();
 llvm::Pass* createOverrideTMaxPass(unsigned OverrideValue);
-llvm::Pass* createMergeAllocas();
 }

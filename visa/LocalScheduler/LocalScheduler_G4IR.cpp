@@ -428,7 +428,7 @@ void DDD::getBucketsForIndirectOperand(G4_INST *inst,
 
   auto pointsToSet = pointsToAnalysis.getAllInPointsTo(addrdcl->getRegVar());
   for (auto &pt : *pointsToSet) {
-    uint32_t varID = pt.var->getId();
+    [[maybe_unused]] uint32_t varID = pt.var->getId();
     G4_Declare *dcl = pt.var->getDeclare()->getRootDeclare();
     G4_RegVar *var = dcl->getRegVar();
 
@@ -653,13 +653,13 @@ public:
              node_it != LB->nodeBucketsArray[bucket].bucketVec.end());
       return *this;
     }
-    bool operator==(const BN_iterator &it2) {
+    bool operator==(const BN_iterator &it2) const {
       vASSERT(LB == it2.LB && iterateAll == it2.iterateAll);
       // NOTE: order of comparisons matters: if different buckets
       //       then node_its are of different vectors
       return (bucket == it2.bucket && node_it == it2.node_it);
     }
-    bool operator!=(const BN_iterator &it2) {
+    bool operator!=(const BN_iterator &it2) const {
       vASSERT(LB == it2.LB && iterateAll == it2.iterateAll);
       return (!(*this == it2));
     }
@@ -1770,8 +1770,8 @@ void DDD::pairTypedWriteOrURBWriteNodes(G4_BB *bb) {
   for (auto &&pair : instrPairs) {
     Node *firstNode = pair.first;
     Node *secondNode = pair.second;
-    G4_INST *firstInstr = (*firstNode->getInstructions()).front();
-    G4_INST *secondInstr = (*secondNode->getInstructions()).front();
+    [[maybe_unused]] G4_INST *firstInstr = (*firstNode->getInstructions()).front();
+    [[maybe_unused]] G4_INST *secondInstr = (*secondNode->getInstructions()).front();
     vASSERT(firstNode->getInstructions()->size() == 1);
     vASSERT(secondNode->getInstructions()->size() == 1);
     vASSERT(*firstNode->getInstructions()->begin() == firstInstr);
@@ -2821,7 +2821,7 @@ uint32_t DDD::listSchedule(G4_BB_Schedule *schedule) {
       // Find candidate which is not send in the readyList. For none-candidates,
       // have to be popped to a temp list, which will be added back.
       std::vector<Node *> instList;
-      size_t readyListSize = readyList.size();
+      [[maybe_unused]] size_t readyListSize = readyList.size();
       while (!readyList.empty()) {
         Node *candidate = readyList.top();
         readyList.pop();
@@ -2985,6 +2985,9 @@ uint32_t DDD::getEdgeLatency_old(Node *node, DepType depT) const {
   }
 
   if (depT <= NODEP || depT >= CONTROL_FLOW_BARRIER) {
+    if (kernel->fg.builder->modelSendSrcReadLatency() && inst->isSend()) {
+      return LT.getSendSrcReadLatency(inst);
+    }
     return node->getOccupancy();
   }
 
@@ -3214,7 +3217,6 @@ bool Node::hasConflict(Node *node2) const {
   }
 
   int prevInstRegs[2][G4_MAX_SRCS] = {};
-  int currInstReg = 0;
   int prevInstExecSize[G4_MAX_SRCS] = {};
   int firstRegCandidate[G4_MAX_SRCS] = {};
   int candidateNum = 0;
@@ -3276,7 +3278,6 @@ bool Node::hasConflict(Node *node2) const {
   }
 
   // Get the src0 of the second instruction node2
-  currInstReg = -1;
   G4_Operand *srcOpnd = inst2->getSrc(0);
   if (srcOpnd) {
     if (srcOpnd->isSrcRegRegion() && srcOpnd->asSrcRegRegion()->getBase() &&

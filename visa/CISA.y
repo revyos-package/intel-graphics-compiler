@@ -30,10 +30,9 @@ void CISAerror(CISA_IR_Builder* builder, char const* msg);
 int yylex(CISA_IR_Builder *pBuilder);
 extern int CISAlineno;
 
-static bool streq(const char *sym0, const char *sym1);
+[[maybe_unused]] static bool streq(const char *sym0, const char *sym1);
 static bool ParseAlign(CISA_IR_Builder* pBuilder, const char *sym, VISA_Align &value);
 static VISA_Align AlignBytesToVisaAlignment(int bytes);
-static int DataTypeSizeOf(VISA_Type type);
 static bool ParseEMask(const char* sym, VISA_EMask_Ctrl &emask);
 
 //
@@ -89,7 +88,7 @@ std::vector<attr_gen_struct*> AttrOptVar;
         char *    decoded;
         size_t    len;
     } strlit;
-    char *                 string;
+    const char *           string;
 
     VISA_Type              type;
     ISA_Opcode             opcode;
@@ -149,7 +148,7 @@ std::vector<attr_gen_struct*> AttrOptVar;
     } regAccess;
 
     struct {
-        char *             aliasname;
+        const char *       aliasname;
         int                offset;
     } alias;
 
@@ -185,6 +184,7 @@ std::vector<attr_gen_struct*> AttrOptVar;
     ISA_Opcode              lsc_opcode;
     LSC_CACHE_OPTS          lsc_caching_opts;
     LSC_CACHE_OPT           lsc_caching_opt; // for lexer to parser
+    bool                    ov;
     LSC_FENCE_OP            lsc_fence_op;
     LSC_SCOPE               lsc_scope;
     LSC_SFID                lsc_sfid;
@@ -251,7 +251,7 @@ std::vector<attr_gen_struct*> AttrOptVar;
         int                    surfaceIndex;
     } lsc_addr_model;
     struct sampler_base_struct {
-        char                  *base;
+        const char            *base;
         unsigned int          offset;
     } sampler_base;
 
@@ -605,6 +605,10 @@ std::vector<attr_gen_struct*> AttrOptVar;
 // cache options
 %type  <lsc_caching_opts>      LscCacheOpts
 %token <lsc_caching_opt>       LSC_CACHING_OPT
+
+%token OV                  // .ov
+%type <ov>                 OVOpt
+
 %type <RawVar>                 LscPayloadReg
 %type <RawVar>                 LscPayloadNonNullReg
 // address syntax; e.g. bss(S2)[V12]:a64
@@ -1650,27 +1654,29 @@ LscInstruction:
 // ARG:
 //     lsc_load.ugm   V53:u8x8  arg[V52+0x100]:a32
 //
+
 LscUntypedLoad:
-//  1          2                  3                       4             5
-    Predicate  LSC_LOAD_MNEMONIC  LSC_SFID_UNTYPED_TOKEN  LscCacheOpts  ExecSize
-//  6               7
+//  1          2                  3                       4             5      6
+    Predicate  LSC_LOAD_MNEMONIC  LSC_SFID_UNTYPED_TOKEN  LscCacheOpts  OVOpt  ExecSize
+//  7               8
     LscDataOperand  LscUntypedAddrOperand
     {
-        $5.exec_size =
-            lscCheckExecSize(pBuilder, $3, $2, $6.shape.order, $5.exec_size);
+        $6.exec_size =
+            lscCheckExecSize(pBuilder, $3, $2, $7.shape.order, $6.exec_size);
         pBuilder->CISA_create_lsc_untyped_inst(
             $1,  // predicate
             $2,  // subop
             $3,  // sfid
             $4,  // caching settings
-            Get_VISA_Exec_Size_From_Raw_Size($5.exec_size),
-            $5.emask,
-            $7.addr,     // address
-            $6.shape,    // data
-            $7.surface,  // surface
-            $7.surfaceIndex, // surface index
-            $6.reg,      // dst
-            $7.regs[0],  // src0
+            $5,  // ov
+            Get_VISA_Exec_Size_From_Raw_Size($6.exec_size),
+            $6.emask,
+            $8.addr,     // address
+            $7.shape,    // data
+            $8.surface,  // surface
+            $8.surfaceIndex, // surface index
+            $7.reg,      // dst
+            $8.regs[0],  // src0
             nullptr,     // src1
             nullptr,     // src2
             CISAlineno);
@@ -1753,6 +1759,7 @@ LscUntypedStore:
             $2,  // subop
             $3,  // SFID
             $4,  // caching settings
+            false,  // ov
             Get_VISA_Exec_Size_From_Raw_Size($5.exec_size),
             $5.emask,
             $6.addr,     // address
@@ -1836,6 +1843,7 @@ LscUntypedAtomic:
             $2,                // op
             $3,                // sfid
             $4,                // caching settings
+            false,             // ov
             Get_VISA_Exec_Size_From_Raw_Size($5.exec_size),
             $5.emask,
             $7.addr,         // address info
@@ -2098,6 +2106,8 @@ LscSfid: LSC_SFID_UNTYPED_TOKEN | LSC_SFID_TYPED_TOKEN
 LscCacheOpts:
     %empty                          {$$ = pBuilder->CISA_create_caching_opts(CISAlineno);}
   | LSC_CACHING_OPT LSC_CACHING_OPT {$$ = pBuilder->CISA_create_caching_opts($1,$2, CISAlineno);}
+
+OVOpt: %empty {$$ = false;} | OV {$$ = true;}
 
 LscUntypedAddrOperand:
 //  1               2      3                  4

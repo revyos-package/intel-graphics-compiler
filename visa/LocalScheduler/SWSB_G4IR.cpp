@@ -18,6 +18,7 @@ SPDX-License-Identifier: MIT
 
 using namespace vISA;
 
+[[maybe_unused]]
 static uint8_t getDPASPipelineCycle(uint8_t repc) {
   switch (repc) {
   case REP_1:
@@ -35,6 +36,7 @@ static uint8_t getDPASPipelineCycle(uint8_t repc) {
   return 0;
 }
 
+[[maybe_unused]]
 static uint8_t getDPASGRFReadCycle(uint8_t repc) {
   switch (repc) {
   case REP_1:
@@ -83,6 +85,70 @@ static bool isSLMMsg(const G4_INST *inst) {
     return true;
   }
   return false;
+}
+
+
+static bool isRTQueryCheck(const G4_INST *send, const G4_INST *preInst) {
+  G4_Operand *preSrc0 = preInst->getSrc(0);
+  G4_Operand *preDst = preInst->getDst();
+  G4_Operand *sendSrc0 = send->getSrc(0);
+  G4_Operand *sendDst = send->getDst();
+  if (preInst->opcode() != G4_mov || !send->isSend()) {
+    return false;
+  }
+  if (preInst->getExecSize() != g4::SIMD1) {
+    return false;
+  }
+  if (!preSrc0 || preSrc0->isNullReg() || !preSrc0->isImm()) {
+    return false;
+  }
+
+  if (preSrc0->asImm()->getImm() != 3) {
+    return false;
+  }
+
+  if (!preDst || preDst->isNullReg() || preDst->getType() != Type_UD ||
+      !preDst->isDstRegRegion() ||
+      preDst->asDstRegRegion()->getSubRegOff() != 4) {
+    return false;
+  }
+
+  if (!sendSrc0 || sendSrc0->isNullReg() || !sendSrc0->isSrcRegRegion()) {
+    return false;
+  }
+
+  if (sendSrc0->getTopDcl() != preDst->getTopDcl()) {
+    return false;
+  }
+
+  if (sendDst && !sendDst->isNullReg()) {
+    return false;
+  }
+
+  const G4_SendDescRaw *msgDesc = send->getMsgDescRaw();
+  if (!msgDesc) {
+    return false;
+  }
+
+  if (!msgDesc->isRaw()) {
+    return false;
+  }
+
+  if (msgDesc->getSFID() != SFID::RTHW) {
+    return false;
+  }
+
+  unsigned descImm = msgDesc->getDesc();
+  if (descImm >> 14 & 0xF) { // [14:17] is 0
+    return false;
+  }
+
+  unsigned extDescValue = msgDesc->getExtendedDesc();
+  if (!(extDescValue & 0x8)) {
+    return false;
+  }
+
+  return true;
 }
 
 static bool isPrefetch(const G4_INST *inst) {
@@ -167,6 +233,7 @@ static bool WARDepRequired(const G4_INST *inst1, const G4_INST *inst2) {
 // we put them here instead of inside G4_Operand since this is only valid till
 // after RA It's the caller's responsibility to ensure that opnd1 and opnd2 are
 // both GRF allocated
+[[maybe_unused]]
 static bool operandOverlap(G4_Operand *opnd1, G4_Operand *opnd2) {
   return (opnd1->getLinearizedStart() <= opnd2->getLinearizedStart() &&
           opnd1->getLinearizedEnd() > opnd2->getLinearizedStart()) ||
@@ -1014,6 +1081,34 @@ void LiveGRFBuckets::killOperand(BN_iterator &bn_it) {
   }
 }
 
+//Only used for some ARF regsiters
+void LiveGRFBuckets::killBucket(BN_iterator &bn_it) {
+  SBBUCKET_VECTOR &vec = nodeBucketsArray[bn_it.bucket];
+  SBBUCKET_VECTOR_ITER &node_it = bn_it.node_it;
+  SBBucketNode *bucketNode = *node_it; // Get the node before it is destroyed
+  Gen4_Operand_Number opndNum = bucketNode->opndNum;
+
+  while (vec.size()) {
+    vec.pop_back();
+  }
+  node_it = vec.end();
+
+  SBFootprint *footprint =
+           bucketNode->node->getFirstFootprint(opndNum);
+  vASSERT(footprint->inst != nullptr);
+  const IR_Builder &irb = footprint->inst->getBuilder();
+  unsigned int startBucket = footprint->LeftB / irb.numEltPerGRF<Type_UB>();
+  unsigned int endBucket = footprint->RightB / irb.numEltPerGRF<Type_UB>();
+  for (unsigned int i = startBucket;
+       (i < endBucket + 1) && (i < nodeBucketsArray.size()); i++) {
+    if (i == bn_it.bucket) {
+      continue;
+    }
+    nodeBucketsArray[i].clear();
+  }
+}
+
+
 void LiveGRFBuckets::dumpLives() const {
   for (int curBucket = 0; curBucket < numOfBuckets; curBucket++) {
     if (!nodeBucketsArray[curBucket].empty()) {
@@ -1543,7 +1638,7 @@ void SWSB::SWSBDepDistanceGenerator(PointsToAnalysis &p, LiveGRFBuckets &LB,
   }
 }
 
-void SWSB::handleFuncCall() {
+void SWSB::handleSubRoutineCall() {
   for (G4_BB_SB *bb : BBVector) {
     if (bb->last_node == INVALID_ID) {
       continue;
@@ -1551,10 +1646,8 @@ void SWSB::handleFuncCall() {
 
     SBNode *node = SBNodes[bb->last_node];
 
-    if ((node->GetInstruction()->isCall() ||
-         node->GetInstruction()->isFCall()) ||
-        (node->GetInstruction()->isReturn() ||
-         node->GetInstruction()->isFReturn())) {
+    if (node->GetInstruction()->isCall() ||
+        node->GetInstruction()->isReturn()) {
 
       // Add dependencies for all after write dependencies live before call
       for (unsigned globalID : bb->send_live_out.dst) {
@@ -1652,6 +1745,33 @@ static BucketInfos generateBucketInfos(const LiveGRFBuckets &globalSendsLB){
   return bucketInfos;
 }
 
+void SWSB::TokenDepProfiling() {
+
+  calculateDist();
+
+  for (SBNode *node : SBSendNodes) {
+    for (auto node_it = node->succs.begin(); node_it != node->succs.end();) {
+      SBDEP_ITEM &dep = (*node_it);
+      SBNode *succNode = dep.node;
+      DepType type = dep.type;
+      if (type == RAW || type == WAW) {
+        int distance = (int)succNode->getNodeID() - (int)node->getNodeID();
+        if (!(node->getBBID() == succNode->getBBID() && distance > 0)) {
+          distance = BBVector[succNode->getBBID()]
+                         ->tokenLiveInDist[node->globalID] +
+                     succNode->getNodeID() - BBVector[succNode->getBBID()]->first_node;
+        }
+        std::stringstream ss;
+        ss << "AW Distance: " << distance;
+        node->GetInstruction()->addComment(ss.str());
+      }
+      node_it++;
+    }
+  }
+
+  return;
+}
+
 void SWSB::SWSBGlobalTokenGenerator(PointsToAnalysis &p, LiveGRFBuckets &LB,
                                     LiveGRFBuckets &globalSendsLB,
                                     LiveGRFBuckets &GRFAlignedGlobalSendsLB) {
@@ -1681,7 +1801,8 @@ void SWSB::SWSBGlobalTokenGenerator(PointsToAnalysis &p, LiveGRFBuckets &LB,
     bb->liveOutTokenNodes = BitSet(SBSendNodes.size(), false);
     bb->killedTokens = BitSet(totalTokenNum, false);
 
-    if (enableGlobalTokenAllocation || enableDistPropTokenAllocation) {
+    if (enableGlobalTokenAllocation || enableDistPropTokenAllocation ||
+        fg.builder->getOptions()->getOption(vISA_SendAWProfiling)) {
       bb->tokenLiveInDist =
           (unsigned *)SWSBMem.alloc(sizeof(unsigned) * globalSendNum);
       bb->tokenLiveOutDist =
@@ -1757,7 +1878,7 @@ void SWSB::SWSBGlobalTokenGenerator(PointsToAnalysis &p, LiveGRFBuckets &LB,
     addGlobalDependence(globalSendNum, &globalSendOpndList, SBNodes, p, true);
   }
 
-  handleFuncCall();
+  handleSubRoutineCall();
 
   for (G4_BB_SB *bb : BBVector) {
     bb->send_live_in_scalar = bb->send_live_in;
@@ -1770,6 +1891,10 @@ void SWSB::SWSBGlobalTokenGenerator(PointsToAnalysis &p, LiveGRFBuckets &LB,
 
   // Add dependence according to analysis result
   addGlobalDependence(globalSendNum, &globalSendOpndList, SBNodes, p, false);
+
+  if (fg.builder->getOptions()->getOption(vISA_SendAWProfiling)) {
+    TokenDepProfiling();
+  }
 
   // SWSB token allocation with linear scan algorithm.
   if (enableGlobalTokenAllocation) {
@@ -2093,7 +2218,7 @@ void SWSB::SWSBGenerator() {
   if (!SBSendNodes.empty()) {
     SWSBGlobalTokenGenerator(p, LB, globalSendsLB, GRFAlignedGlobalSendsLB);
   } else {
-    handleFuncCall();
+    handleSubRoutineCall();
     insertTokenSync();
   }
 
@@ -2916,7 +3041,9 @@ bool SWSB::propogateDist(G4_BB *bb) {
     return false;
   }
 
-  vASSERT(!BBVector[bbID]->send_live_in.isEmpty());
+  if (BBVector[bbID]->send_live_in.isEmpty()) {
+    return false;
+  }
 
   SBBitSets temp_live_in;
   temp_live_in = BBVector[bbID]->send_live_in;
@@ -4407,7 +4534,7 @@ bool SWSB::insertSyncPVC(G4_BB *bb, SBNode *node, G4_INST *inst,
         if (distType == G4_INST::DistanceType::DISTALL) {
           bool hasAfterWrite = false;
           for (int i = 0; i < (int)node->getDepTokenNum(); i++) {
-            unsigned short token = (unsigned short)-1;
+            [[maybe_unused]] unsigned short token = (unsigned short)-1;
             SWSBTokenType type = SWSBTokenType::TOKEN_NONE;
             token = node->getDepToken(i, type);
             if (type == SWSBTokenType::AFTER_WRITE) {
@@ -4542,6 +4669,7 @@ void SWSB::insertTokenSync() {
   for (G4_BB *bb : fg) {
     BitSet dstTokens(totalTokenNum, false);
     BitSet srcTokens(totalTokenNum, false);
+    unsigned short rayQueryCheckToken = (unsigned short)-1;
 
     std::list<G4_INST *>::iterator inst_it(bb->begin()), iInstNext(bb->begin());
     while (iInstNext != bb->end()) {
@@ -4570,6 +4698,43 @@ void SWSB::insertTokenSync() {
       SBNode *node = *node_it;
       vASSERT(node->GetInstruction() == inst);
 
+      if (rayQueryCheckToken != (unsigned short)-1) {
+        if (tokenHonourInstruction(
+                inst) || // Don't across any token instruction
+            inst->isCFInst() ||
+            inst->isLabel()) {
+          G4_INST *syncInst = insertSyncInstruction(bb, inst_it);
+          syncInst->setToken(rayQueryCheckToken);
+          syncInst->setTokenType(SWSBTokenType::AFTER_WRITE);
+          rayQueryCheckToken = (unsigned short)-1;
+        }
+      }
+
+      {
+        G4_INST *preInst = nullptr;
+        if (inst_it != bb->begin()) {
+          std::list<G4_INST *>::iterator pInst = inst_it;
+          pInst--;
+          preInst = *pInst;
+        }
+
+        if (inst->isSend() && preInst && preInst->isMov() &&
+            isRTQueryCheck(inst, preInst)) {
+          rayQueryCheckToken = inst->getSBIDSetToken();
+          if (iInstNext == bb->end()) { // In case the fence instruction is the
+                                        // last instruction of BB
+            G4_INST *syncInst = insertSyncInstructionAfter(bb, inst_it);
+            syncInst->setToken(rayQueryCheckToken);
+            syncInst->setTokenType(SWSBTokenType::AFTER_WRITE);
+          }
+        }
+      }
+      if (inst->isFCall() || inst->isFReturn()) {
+        G4_INST *synInst = insertSyncAllRDInstruction(bb, 0, inst_it);
+        synInst->setLexicalId(newInstID);
+        synInst = insertSyncAllWRInstruction(bb, 0, inst_it);
+        synInst->setLexicalId(newInstID);
+      }
       bool fusedSync = false;
       // HW W/A
       // For fused URB sends, or typed write, in HW, the dependence info of the
@@ -5797,7 +5962,7 @@ void G4_BB_SB::getGRFFootprintForIndirect(SBNode *node,
   while ((ptvar = p.getPointsTo(addrdcl->getRegVar(), vid++, offset)) !=
          nullptr) {
 
-    uint32_t varID = ptvar->getId();
+    [[maybe_unused]] uint32_t varID = ptvar->getId();
     G4_Declare *dcl = ptvar->getDeclare()->getRootDeclare();
     G4_RegVar *var = dcl->getRegVar();
 
@@ -7229,14 +7394,20 @@ void G4_BB_SB::SBDDD(G4_BB *bb, LiveGRFBuckets *&LB,
         }
 
         if (distanceHonourInstruction(liveInst)) {
-          if (dep == RAW &&
-              (curBucket < globalRegisterNum)) { // Only need track GRF
+          if (dep == RAW) {
+            if (curBucket < globalRegisterNum) { // Only need track GRF
                                                  // RAW dependence
-            LB->killOperand(bn_it);
-            setDistance(curFootprint, node, liveNode, false);
-            liveNode->setInstKilled(true); // Instrtuction level kill
-            instKill = true;
-            continue;
+              LB->killOperand(bn_it);
+              setDistance(curFootprint, node, liveNode, false);
+              liveNode->setInstKilled(true); // Instrtuction level kill
+              instKill = true;
+              continue;
+            } else if (builder.supports4GRFAlign()) {
+              // RAW will kill the propagation of dependence
+              // FIXME: can be applied to  other platforms
+              LB->killBucket(bn_it);
+              continue;
+            }
           }
 
           if (dep == WAW) {
@@ -8655,7 +8826,7 @@ void G4_BB_SB::createAddGRFEdge(SBNode *pred, SBNode *succ, DepType d,
       // Change the dependency type to d
       curSucc.type = d;
       curSucc.attr = a;
-      bool findPred = false;
+      [[maybe_unused]] bool findPred = false;
       for (int j = 0; j < (int)(succ->preds.size()); j++) {
         SBDEP_ITEM &curPred = succ->preds[j];
 
@@ -8945,7 +9116,7 @@ void SWSB::dumpImmDom(ImmDominator *dom) const {
     for (auto pred : bb->Preds) {
       printf("BB%d, ", pred->getId());
     }
-    auto &idomBB = dom->getIDoms()[bb->getId()];
+    [[maybe_unused]] auto &idomBB = dom->getIDoms()[bb->getId()];
     vASSERT(idomBB != nullptr);
     printf("\n\t iDOM: BB%d -- DOM SUCC: ",
            dom->getIDoms()[bb->getId()]->getId());

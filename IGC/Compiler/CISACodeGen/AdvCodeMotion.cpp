@@ -17,13 +17,10 @@ SPDX-License-Identifier: MIT
 #include <llvm/IR/PatternMatch.h>
 #include <llvm/IR/Verifier.h>
 #include <llvm/Pass.h>
-#include <llvm/Support/Debug.h>
 #include <llvm/Support/CommandLine.h>
-#include <llvm/Support/raw_ostream.h>
 #include <llvm/Transforms/Utils/Local.h>
 #include <llvmWrapper/Transforms/Utils/LoopUtils.h>
 #include "common/LLVMWarningsPop.hpp"
-#include "GenISAIntrinsics/GenIntrinsics.h"
 #include "Compiler/CISACodeGen/ShaderCodeGen.hpp"
 #include "Compiler/IGCPassSupport.h"
 #include "Compiler/MetaDataUtilsWrapper.h"
@@ -167,6 +164,8 @@ void WorkItemSetting::collect(Function* F) {
         if (Name == "r0")
             GroupId = getXYZ(&*AI, 1, 6, 7);
         else if (Name == "payloadHeader")
+            GlobalOffset = getXYZ(&*AI, 0, 1, 2);
+        else if (Name == "globalOffset")
             GlobalOffset = getXYZ(&*AI, 0, 1, 2);
         else if (Name == "globalSize")
             GlobalSize = getXYZ(&*AI, 0, 1, 2);

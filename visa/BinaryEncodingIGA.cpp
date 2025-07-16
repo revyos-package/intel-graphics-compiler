@@ -154,7 +154,9 @@ private:
 
   SendDesc getIGASendDesc(G4_InstSend *sendInst) const;
   SendExDescOpts getIGASendExDesc(G4_InstSend *sendInst) const;
-  void printSendDataToFile(const G4_SendDescRaw *descG4,
+  void printSendDataToFile(uint32_t src0Len,
+                           uint32_t src1Len,
+                           uint32_t dstLen,
                            const char *filePath) const;
   SendDesc encodeExDescImm(G4_INST *sendInst, SendExDescOpts &sdos) const;
   SendDesc encodeExDescRegA0(G4_INST *sendInst, SendExDescOpts &sdos) const;
@@ -333,8 +335,8 @@ private:
   static MathFC getMathFC(const G4_INST *inst);
   Type getIGAType(const G4_INST *I, Gen4_Operand_Number O, TARGET_PLATFORM P);
 
-  void *m_kernelBuffer;
-  uint32_t m_kernelBufferSize;
+  void *m_kernelBuffer = nullptr;
+  uint32_t m_kernelBufferSize = 0;
 }; // class BinaryEncodingIGA
 
 Platform
@@ -382,15 +384,15 @@ BinaryEncodingIGA::getIGAInternalPlatform(TARGET_PLATFORM genxPlatform) {
 }
 
 BinaryEncodingIGA::BinaryEncodingIGA(vISA::G4_Kernel &k, const std::string& fname)
-    : kernel(k), fileName(fname), m_kernelBuffer(nullptr),
-      m_kernelBufferSize(0), platform(k.fg.builder->getPlatform()) {
+    : kernel(k), fileName(fname), platform(k.fg.builder->getPlatform()) {
   platformModel = Model::LookupModel(getIGAInternalPlatform(platform));
   IGAKernel = new Kernel(*platformModel);
 }
 
 SWSB_ENCODE_MODE BinaryEncodingIGA::getIGASWSBEncodeMode() const {
 
-  if (platform == TARGET_PLATFORM::Xe_MTL)
+  if (platform == TARGET_PLATFORM::Xe_MTL ||
+      platform == TARGET_PLATFORM::Xe_ARL)
     return SWSB_ENCODE_MODE::ThreeDistPipeDPMath;
 
   return platformModel->getSWSBEncodeMode();
@@ -1022,7 +1024,7 @@ void BinaryEncodingIGA::getIGAFlagInfo(G4_INST *inst, const OpSpec *opSpec,
   G4_Predicate *predG4 = inst->getPredicate();
   G4_CondMod *condModG4 = inst->getCondMod();
   RegRef predFlag;
-  bool hasPredFlag = false;
+  [[maybe_unused]] bool hasPredFlag = false;
 
   if (opSpec->supportsPredication() && predG4 != nullptr) {
     pred = getIGAPredication(predG4, inst->getExecSize(), *kernel.fg.builder);
@@ -1430,10 +1432,14 @@ void BinaryEncodingIGA::translateInstructionSrcs(G4_INST *inst,
     // or imm32. So far, within vISA jitter, 'movi' is still
     // modeled as unary instruction, setting src1 to null for
     // platforms >= CNL.
+
+    // The byte/word level cross bar is removed from PVC+ so the movi cannot
+    // work for less than DW types.
+    iga::Type ty = platform >= Xe_PVC ? Type::UD : Type::UB;
     RegRef regTemp(0, 0);
     Region rgnTemp = Region::SRC110;
     igaInst->setDirectSource(SourceIndex::SRC1, SrcModifier::NONE,
-                             RegName::ARF_NULL, regTemp, rgnTemp, Type::UB);
+                             RegName::ARF_NULL, regTemp, rgnTemp, ty);
   }
   for (int i = 0; i < numSrcToEncode; i++) {
     SourceIndex opIx = SourceIndex::SRC0;
@@ -1587,11 +1593,10 @@ static SendDesc encodeExDescSendUnary(G4_InstSend *sendInst, int &xlen,
 
 // A helper function to print send src/dst length information to a file.
 // vISA_ShaderDataBaseStats key a requirement to use
-void BinaryEncodingIGA::printSendDataToFile(const G4_SendDescRaw *descG4,
+void BinaryEncodingIGA::printSendDataToFile(uint32_t src0Len,
+                                            uint32_t src1Len,
+                                            uint32_t dstLen,
                                             const char *filePath) const {
-  uint32_t src0Len = descG4->getSrc0LenRegs();
-  uint32_t src1Len = descG4->getSrc1LenRegs();
-  uint32_t dstLen = descG4->getDstLenRegs();
   FILE *f = fopen(filePath, "a");
   if (f) {
     uint32_t namePos = fileName.find_last_of('\\', fileName.size());
@@ -1615,7 +1620,13 @@ SendDesc BinaryEncodingIGA::encodeExDescImm(G4_INST *sendInst,
   const G4_SendDescRaw *descG4 = (G4_SendDescRaw *)sendInst->getMsgDesc();
   vISA_ASSERT(descG4 != nullptr, "expected raw descriptor");
   if (sendInst->getBuilder().getOption(vISA_ShaderDataBaseStats)) {
-    printSendDataToFile(descG4,
+    auto JitInfo = kernel.fg.builder->getJitInfo();
+    JitInfo->sendInfo.src0Vec.push_back(descG4->getSrc0LenRegs());
+    JitInfo->sendInfo.src1Vec.push_back(descG4->getSrc1LenRegs());
+    JitInfo->sendInfo.destVec.push_back(descG4->getDstLenRegs());
+    printSendDataToFile(descG4->getSrc0LenRegs(),
+                        descG4->getSrc1LenRegs(),
+                        descG4->getDstLenRegs(),
                         sendInst->getBuilder().getOptions()->getOptionCstr(
                             vISA_ShaderDataBaseStatsFilePath));
   }
@@ -1674,7 +1685,13 @@ SendDesc BinaryEncodingIGA::encodeExDescRegA0(G4_INST *sendInst,
   const G4_SendDescRaw *descG4 = sendInst->getMsgDescRaw();
   vISA_ASSERT(descG4 != nullptr, "expected raw descriptor");
   if (sendInst->getBuilder().getOption(vISA_ShaderDataBaseStats)) {
-    printSendDataToFile(descG4,
+    auto JitInfo = kernel.fg.builder->getJitInfo();
+    JitInfo->sendInfo.src0Vec.push_back(descG4->getSrc0LenRegs());
+    JitInfo->sendInfo.src1Vec.push_back(descG4->getSrc1LenRegs());
+    JitInfo->sendInfo.destVec.push_back(descG4->getDstLenRegs());
+    printSendDataToFile(descG4->getSrc0LenRegs(),
+                        descG4->getSrc1LenRegs(),
+                        descG4->getDstLenRegs(),
                         sendInst->getBuilder().getOptions()->getOptionCstr(
                             vISA_ShaderDataBaseStatsFilePath));
   }
@@ -1959,6 +1976,7 @@ Predication BinaryEncodingIGA::getIGAPredication(const G4_Predicate *predG4,
   // Xe_PVC+ has removed predCtrl width. Only .any, .all and .seq (default) are
   // supported. Try to translate PredCtrl values to compatible ones on Xe_PVC+
   // Return true on success, false on fail
+  [[maybe_unused]]
   auto translatePredCtrl = [&](G4_Predicate_Control &predCtrl) {
     if (builder.predCtrlHasWidth())
       return true;

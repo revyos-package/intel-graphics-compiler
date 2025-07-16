@@ -747,12 +747,12 @@ bool preRA_Scheduler::runWithGRFSelection(unsigned &KernelPressure) {
     KernelPressure = rp.getMaxRP();
   }
 
-  kernel.updateKernelByRegPressure(KernelPressure);
+  kernel.updateKernelByRegPressure(KernelPressure, true);
 
   return Changed;
 }
 
-bool BB_Scheduler::verifyScheduling() {
+[[maybe_unused]] bool BB_Scheduler::verifyScheduling() {
   std::set<G4_INST *> Insts;
   for (auto Inst : *(getBB()))
     Insts.insert(Inst);
@@ -1131,7 +1131,7 @@ void SethiUllmanQueue::formWorkingSet(preNode *seed,
 //
 bool BB_Scheduler::scheduleBlockForPressure(unsigned &MaxPressure,
                                             unsigned Threshold) {
-  auto tryRPReduction = [=]() {
+  auto tryRPReduction = [this, MaxPressure, Threshold]() {
     if (!config.UseMinReg)
       return false;
     if (MaxPressure < Threshold)
@@ -1667,7 +1667,7 @@ private:
 bool BB_Scheduler::scheduleBlockForLatency(unsigned &MaxPressure,
                                            bool ReassignID,
                                            unsigned UpperBoundGRF) {
-  auto tryLatencyHiding = [=](unsigned nr) {
+  auto tryLatencyHiding = [this, UpperBoundGRF, MaxPressure](unsigned nr) {
     if (!config.UseLatency)
       return false;
 
@@ -2853,7 +2853,7 @@ void preDDD::dumpDagTxt(RegisterPressure &rp) {
   ofile.close();
 }
 
-void preDDD::dumpDagDot() {
+[[maybe_unused]] void preDDD::dumpDagDot() {
   const char *asmFileName = "nullasm";
   getOptions()->getOption(VISA_AsmFileName, asmFileName);
   std::string fileName(asmFileName);
@@ -3008,7 +3008,7 @@ void BB_ACC_Scheduler::commit() {
   return;
 }
 
-bool BB_ACC_Scheduler::verifyScheduling() {
+[[maybe_unused]] bool BB_ACC_Scheduler::verifyScheduling() {
   std::set<G4_INST *> Insts;
   for (auto Inst : *(getBB()))
     Insts.insert(Inst);

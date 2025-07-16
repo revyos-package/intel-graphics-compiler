@@ -20,10 +20,10 @@
 
 ; CHECK: void @test_inline{{.*}}!dbg [[SCOPE:![0-9]*]]
 ; Value debug info made from global variable dbg
-; CHECK: void @llvm.dbg.declare(metadata i32 addrspace(3)* addrspace(3)* @c, metadata [[C_MD:![0-9]*]], metadata !DIExpression()), !dbg [[FIRST_LOC:![0-9]*]]
-; CHECK: void @llvm.dbg.value(metadata i32 addrspace(3)* undef, metadata [[BCASTA_MD:![0-9]*]], metadata !DIExpression()), !dbg [[FIRST_LOC]]
+; CHECK: void @llvm.dbg.value(metadata i32 addrspace(3)* undef, metadata [[BCASTA_MD:![0-9]*]], metadata !DIExpression()), !dbg [[FIRST_LOC:![0-9]*]]
 ; CHECK: void @llvm.dbg.value(metadata i32 addrspace(3)* undef, metadata [[BCASTB_MD:![0-9]*]], metadata !DIExpression()), !dbg [[BCASTB_LOC:![0-9]*]]
 ; CHECK: void @llvm.dbg.value(metadata i32 addrspace(3)* undef, metadata [[GEPB_MD:![0-9]*]], metadata !DIExpression()), !dbg [[GEPB_LOC:![0-9]*]]
+; CHECK: void @llvm.dbg.declare(metadata i32 addrspace(3)* addrspace(3)* @c, metadata [[C_MD:![0-9]*]], metadata !DIExpression()), !dbg [[FIRST_LOC]]
 ; CHECK: [[BCASTC_V:%[A-z0-9]*]] = {{.*}}, !dbg [[BCASTC_LOC:![0-9]*]]
 ; CHECK: void @llvm.dbg.value(metadata i32 addrspace(3)* [[BCASTC_V]], metadata [[BCASTC_MD:![0-9]*]], metadata !DIExpression()), !dbg [[BCASTC_LOC]]
 ; CHECK: [[PTOI_V:%[A-z0-9]*]] = {{.*}}, !dbg [[PTOI_LOC:![0-9]*]]

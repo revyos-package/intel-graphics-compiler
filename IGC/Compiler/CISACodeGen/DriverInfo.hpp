@@ -168,6 +168,9 @@ namespace IGC
         /// Configure vISA pre-RA scheduler. Not tested on all APIs
         virtual unsigned getVISAPreRASchedulerCtrl() const { return 4; }
 
+        /// VISA pre-RA scheduler configuration for kernels with dpas.
+        virtual unsigned getVISAPreRASchedulerCtrlDpas() const { return 4; }
+
         /// Make sure optimization are consistent to avoid Z-fighting issue
         virtual bool PreventZFighting() const { return false; }
 
@@ -210,6 +213,9 @@ namespace IGC
         {
             return 4000;
         }
+
+        /// Need HDC memory fence when raster order views are used
+        virtual bool NeedUavPixelSyncAddedInPSLowering() const { return true; }
 
         // ----------------------------------------------------------------------
         // Below are workaround for bugs in front end or IGC will be removed once
@@ -302,9 +308,6 @@ namespace IGC
             return 4 * sizeof(MEGABYTE);
         }
 
-        // Limits simple push constants based on pushed inputs
-        virtual bool EnableSimplePushRestriction() const { return false; }
-
         // Determines whether the PAYLOAD_HEADER implicit arg must be present
         virtual bool RequirePayloadHeader() const { return true; }
 
@@ -367,12 +370,6 @@ namespace IGC
         // Specifies alignment of indirect data
         virtual unsigned getCrossThreadDataAlignment() const { return 32; }
 
-        // Informs if LSC immediate global offset for A64 is supported
-        virtual bool supportsLSCImmediateGlobalBaseOffsetForA64() const { return true; }
-
-        // Informs if LSC immediate global offset for A32 is supported
-        virtual bool supportsLSCImmediateGlobalBaseOffsetForA32() const { return true; }
-
         // If enabled IGC must not hoist convergent instructions.
         virtual bool DisableConvergentInstructionsHoisting() const { return false; }
 
@@ -385,6 +382,7 @@ namespace IGC
 
         virtual bool supportLscSamplerRouting() const { return true; }
         virtual bool supportBarrierControlFlowOptimization() const { return false; }
+        virtual bool getLscStoresWithNonDefaultL1CacheControls() const { return true; }
 
         // Informs if the UMD understands atomic pull tile walk for raytracing
         virtual bool supportsAtomicPullSWTileWalk() const { return false; }
@@ -392,8 +390,10 @@ namespace IGC
         virtual bool supportsVRT() const { return true; }
 
         virtual bool supportsUniformPrivateMemorySpace() const { return false; }
+        virtual uint32_t maxNumCoherenceHintBitsForReorderThread() const { return 0; }
 
-        virtual bool allowStatefulStackForSyncRaytracing() const { return false; }
+        virtual bool UseNewTraceRayInlineLoweringInRaytracingShaders() const { return false; }
+        virtual bool UseNewTraceRayInlineLoweringInNonRaytracingShaders() const { return false; }
 protected:
     bool autoGRFSelection = false;
     };

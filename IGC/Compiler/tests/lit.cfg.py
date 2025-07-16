@@ -52,15 +52,12 @@ config.substitutions.append(('%LLVM_DEPENDENT_CHECK_PREFIX%', f'CHECK-LLVM-{llvm
 if llvm_version >= 14:
   config.available_features.add('llvm-14-plus')
 
+if llvm_version <= 15:
+  config.available_features.add('llvm-15-or-older')
+
 if llvm_version >= 16:
   config.available_features.add('llvm-16-plus')
 
-if config.use_khronos_spirv_translator_in_sc == "1":
-  config.substitutions.append(('%SPV_CHECK_PREFIX%', 'CHECK-KHR'))
-  config.available_features.add('khronos-translator')
-else:
-  config.substitutions.append(('%SPV_CHECK_PREFIX%', 'CHECK-LEGACY'))
-  config.available_features.add('legacy-translator')
 if not config.regkeys_disabled:
   config.available_features.add('regkeys')
 if config.opaque_pointers == '1':

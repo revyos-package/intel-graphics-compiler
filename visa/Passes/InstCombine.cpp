@@ -418,11 +418,29 @@ bool InstCombiner::tryInstPropagate(INST_LIST_ITER iitr, INST_LIST_ITER eitr) {
           builder.getuint32Option(vISA_lscEnableImmOffsFor);
       bool isEnabledAddrType =
           (enabledAddrTypes & (1 << getLscImmOffOpt(addrType))) != 0;
+
+      if (!builder.getOption(vISA_lscEnableImmOffsetForA32Stateful)) {
+        bool isLscA32Stateful = [](LSC_ADDR_TYPE AddrTy) {
+          switch (AddrTy) {
+          case LSC_ADDR_TYPE_BSS:
+          case LSC_ADDR_TYPE_SS:
+          case LSC_ADDR_TYPE_BTI:
+            return true;
+          default:
+            break;
+          }
+          return false;
+        } (addrType);
+
+        if (sdr->isSLM() || isLscA32Stateful)
+          isEnabledAddrType = false;
+      }
+
       if (!isEnabledAddrType) {
         return false;
       }
 
-      applyUses.emplace_back([=]() {
+      applyUses.emplace_back([this, copyOperand, varSrcIx, useSendInst, sdr, immOffset, varDeclNeedsGrfAlignment, varOffset]() {
         copyOperand(varSrcIx, useSendInst, Opnd_src0);
         sdr->setLscImmOff(immOffset);
         // this is really nuts:

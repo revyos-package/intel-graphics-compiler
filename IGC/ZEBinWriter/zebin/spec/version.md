@@ -1,13 +1,13 @@
 <!---======================= begin_copyright_notice ============================
 
-Copyright (C) 2022-2023 Intel Corporation
+Copyright (C) 2022-2025 Intel Corporation
 
 SPDX-License-Identifier: MIT
 
 ============================= end_copyright_notice ==========================-->
 
 # ZEBIN Version
-Version 1.51
+Version 1.58
 =======
 
 ## Versioning
@@ -16,7 +16,14 @@ Format: \<_Major number_\>.\<_Minor number_\>
 - Minor number: Increase when backward-compatible features are added. For example, add new attributes.
 
 ## Change Note
-- **Version 1.51**: Attribute size in payload_arguments now shows the the number of bytes needed for allocating the argument. It is no longer aligned to 4.
+- **Version 1.58**: Add new enum value NT_INTELGT_INDIRECT_ACCESS_BUFFER_VERSION
+- **Version 1.57**: Internal feature.
+- **Version 1.56**: Internal feature.
+- **Version 1.55**: Internal feature.
+- **Version 1.54**: Add execution env flag require_iab.
+- **Version 1.53**: Internal changes.
+- **Version 1.52**: Add has_lsc_stores_with_non_default_l1_cache_controls flag in zeinfo environment.
+- **Version 1.51**: Attribute size in payload_arguments now shows the number of bytes needed for allocating the argument. It is no longer aligned to 4.
 - **Version 1.50**: Add generateLocalID flag.
 - **Version 1.49**: Internal changes.
 - **Version 1.48**: Add relocation type "R_SYM_ADDR_16" and update supported relocation types.

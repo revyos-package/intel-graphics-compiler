@@ -1,5 +1,5 @@
 ; UNSUPPORTED: system-windows
-; REQUIRES: pvc-supported, regkeys
+; REQUIRES: regkeys
 
 ; RUN: igc_opt -S -dce -platformpvc -rev-id B -has-emulated-64-bit-insts -igc-emit-visa --regkey=DumpVISAASMToConsole=1 -simd-mode 16 < %s | FileCheck %s
 
@@ -48,16 +48,16 @@ attributes #0 = { nofree nosync nounwind readnone speculatable willreturn }
 !3 = !{!"implicit_arg_desc", !4, !5, !6, !7, !9, !11, !13, !15}
 !4 = !{i32 0}
 !5 = !{i32 1}
-!6 = !{i32 12}
-!7 = !{i32 14, !8}
+!6 = !{i32 13}
+!7 = !{i32 15, !8}
 !8 = !{!"explicit_arg_num", i32 0}
-!9 = !{i32 14, !10}
+!9 = !{i32 15, !10}
 !10 = !{!"explicit_arg_num", i32 1}
-!11 = !{i32 14, !12}
+!11 = !{i32 15, !12}
 !12 = !{!"explicit_arg_num", i32 2}
-!13 = !{i32 14, !14}
+!13 = !{i32 15, !14}
 !14 = !{!"explicit_arg_num", i32 4}
-!15 = !{i32 14, !16}
+!15 = !{i32 15, !16}
 !16 = !{!"explicit_arg_num", i32 5}
 !17 = !{!"sub_group_size", i32 16}
 !18 = !{!"ModuleMD", !19, !20, !128, !249, !280, !283, !284, !288, !291, !292, !293, !330, !358, !371, !372, !373, !389, !390, !391, !392, !393, !394, !395, !396, !397, !398, !402, !403, !410, !411, !412, !413, !414, !415, !416, !417, !418, !419, !420, !421, !423, !427, !428, !429, !430, !431, !432, !433, !434, !435, !436, !437, !438, !439, !440, !441, !442, !443, !444, !445, !193, !446, !447, !448, !450, !453, !454, !455, !457, !458, !459, !464, !465}
@@ -167,7 +167,7 @@ attributes #0 = { nofree nosync nounwind readnone speculatable willreturn }
 !123 = !{!"ForceLinearWalkOnLinearUAV", i1 false}
 !124 = !{!"DisableLscSamplerRouting", i1 false}
 !125 = !{!"UseBarrierControlFlowOptimization", i1 false}
-!126 = !{!"DisableDynamicRQManagement", i1 false}
+!126 = !{!"EnableDynamicRQManagement", i1 false}
 !127 = !{!"Quad8InputThreshold", i32 0}
 !128 = !{!"FuncMD", !129, !130}
 !129 = !{!"FuncMDMap[0]", void (half addrspace(1)*, half addrspace(1)*, half addrspace(1)*, float, i8 addrspace(1)*, float addrspace(1)*, <8 x i32>, <8 x i32>, i8*, i32, i32, i32, i32, i32)* @_attn_fwd}
@@ -371,7 +371,7 @@ attributes #0 = { nofree nosync nounwind readnone speculatable willreturn }
 !327 = !{!"WaDisableVRS", i1 false}
 !328 = !{!"RelaxMemoryVisibilityFromPSOrdering", i1 false}
 !329 = !{!"WaEnableVMaskUnderNonUnifromCF", i1 false}
-!330 = !{!"csInfo", !331, !332, !333, !334, !335, !32, !33, !336, !337, !338, !339, !340, !341, !342, !343, !344, !345, !346, !347, !348, !65, !349, !350, !351, !352, !353, !354, !355, !356, !357}
+!330 = !{!"csInfo", !331, !332, !333, !334, !335, !32, !33, !336, !337, !338, !339, !340, !341, !342, !343, !344, !345, !346, !347, !348, !65, !349, !350, !351, !352, !354, !355, !356, !357}
 !331 = !{!"maxWorkGroupSize", i32 0}
 !332 = !{!"waveSize", i32 0}
 !333 = !{!"ComputeShaderSecondCompile"}
@@ -394,7 +394,6 @@ attributes #0 = { nofree nosync nounwind readnone speculatable willreturn }
 !350 = !{!"walkOrderEnabled", i1 false}
 !351 = !{!"walkOrderOverride", i32 0}
 !352 = !{!"ResForHfPacking"}
-!353 = !{!"hasWaveMatrix", i1 false}
 !354 = !{!"constantFoldSimdSize", i1 false}
 !355 = !{!"isNodeShader", i1 false}
 !356 = !{!"threadGroupMergeSize", i32 0}

@@ -1,6 +1,6 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (C) 2017-2021 Intel Corporation
+Copyright (C) 2017 Intel Corporation
 
 SPDX-License-Identifier: MIT
 
@@ -90,7 +90,7 @@ using IGCLLVM::FixedVectorType;
 namespace
 {
     // AbstractLoadInst and AbstractStoreInst abstract away the differences
-    // between ldraw and Load and between storeraw and Store.
+    // between ldraw, Load and PredicatedLoad and between storeraw, Store and PredicatedStore.
     // Note on usage: The Value* passed as the ptr paramter to the Create method
     // should be either the result of the getPointerOperand() method or the
     // CreateConstScalarGEP() method. Do not attempt to do arithmetic
@@ -103,6 +103,8 @@ namespace
             m_inst(LI), DL(DL) {}
         AbstractLoadInst(LdRawIntrinsic* LdRI, const DataLayout& DL) :
             m_inst(LdRI), DL(DL) {}
+        AbstractLoadInst(PredicatedLoadIntrinsic* PLI, const DataLayout& DL) :
+            m_inst(PLI), DL(DL) {}
 
         LoadInst* getLoad() const
         {
@@ -112,6 +114,10 @@ namespace
         {
             return cast<LdRawIntrinsic>(m_inst);
         }
+        PredicatedLoadIntrinsic* getPredicatedLoad() const
+        {
+            return cast<PredicatedLoadIntrinsic>(m_inst);
+        }
     public:
         Instruction* getInst() const
         {
@@ -119,7 +125,11 @@ namespace
         }
         alignment_t getAlignment() const
         {
-            return isa<LoadInst>(m_inst) ? IGCLLVM::getAlignmentValue(getLoad()) : getLdRaw()->getAlignment();
+            if (isa<LoadInst>(m_inst))
+                return IGCLLVM::getAlignmentValue(getLoad());
+            if (isa<LdRawIntrinsic>(m_inst))
+                return getLdRaw()->getAlignment();
+            return getPredicatedLoad()->getAlignment();
         }
         void setAlignment(alignment_t alignment)
         {
@@ -127,24 +137,46 @@ namespace
             {
                 getLoad()->setAlignment(IGCLLVM::getCorrectAlign(alignment));
             }
-            else
+            else if (isa<LdRawIntrinsic>(m_inst))
             {
                 getLdRaw()->setAlignment(alignment);
+            }
+            else
+            {
+                getPredicatedLoad()->setAlignment(alignment);
             }
         }
         Value* getPointerOperand() const
         {
-            return isa<LoadInst>(m_inst) ? getLoad()->getPointerOperand() : getLdRaw()->getResourceValue();
+            if (isa<LoadInst>(m_inst))
+                return getLoad()->getPointerOperand();
+            if (isa<LdRawIntrinsic>(m_inst))
+                return getLdRaw()->getResourceValue();
+            return getPredicatedLoad()->getPointerOperand();
         }
         bool getIsVolatile() const
         {
-            return isa<LoadInst>(m_inst) ? getLoad()->isVolatile() : getLdRaw()->isVolatile();
+            if (isa<LoadInst>(m_inst))
+                return getLoad()->isVolatile();
+            if (isa<LdRawIntrinsic>(m_inst))
+                return getLdRaw()->isVolatile();
+            return getPredicatedLoad()->isVolatile();
         }
-        Instruction* Create(Type* returnType)
+        unsigned getPointerAddressSpace() const
         {
-            return Create(returnType, getPointerOperand(), getAlignment(), getIsVolatile());
+            return getPointerOperand()->getType()->getPointerAddressSpace();
         }
-        Instruction* Create(Type* returnType, Value* ptr, alignment_t alignment, bool isVolatile)
+        Value *getMergeValue() const
+        {
+            if(isa<PredicatedLoadIntrinsic>(m_inst))
+                return getPredicatedLoad()->getMergeValue();
+            return nullptr;
+        }
+        Instruction* Create(Type* returnType, Value* mergeValue = nullptr)
+        {
+            return Create(returnType, getPointerOperand(), getAlignment(), getIsVolatile(), mergeValue);
+        }
+        Instruction* Create(Type* returnType, Value* ptr, alignment_t alignment, bool isVolatile, Value* mergeValue = nullptr)
         {
             IGCLLVM::IRBuilder<> builder(m_inst);
             if (isa<LoadInst>(m_inst))
@@ -158,7 +190,7 @@ namespace
                 }
                 return newLI;
             }
-            else
+            if (isa<LdRawIntrinsic>(m_inst))
             {
                 LdRawIntrinsic* ldraw = getLdRaw();
                 bool hasComputedOffset = ptr != ldraw->getResourceValue();
@@ -170,12 +202,27 @@ namespace
                     GenISAIntrinsic::getDeclaration(ldraw->getModule(), ldraw->getIntrinsicID(), types);
                 return builder.CreateCall(newLdRawFunction, args);
             }
+
+            IGC_ASSERT(isa<PredicatedLoadIntrinsic>(m_inst));
+            IGC_ASSERT(mergeValue);
+            IGC_ASSERT(mergeValue->getType() == returnType);
+
+            PredicatedLoadIntrinsic* PLI = getPredicatedLoad();
+            Type* newPtrType = PointerType::get(returnType, ptr->getType()->getPointerAddressSpace());
+            ptr = builder.CreateBitCast(ptr, newPtrType);
+            Type* types[3] = { returnType, ptr->getType(), returnType };
+            Function *predLoadFunc = GenISAIntrinsic::getDeclaration(m_inst->getModule(), PLI->getIntrinsicID(), types);
+            Value *args[4] = { ptr, builder.getInt64((uint64_t)alignment), PLI->getPredicate(), mergeValue };
+            Instruction *PredLoad = builder.CreateCall(predLoadFunc, args);
+            if (MDNode* lscMetadata = m_inst->getMetadata("lsc.cache.ctrl"))
+                PredLoad->setMetadata("lsc.cache.ctrl", lscMetadata);
+            return PredLoad;
         }
         // Emulates a GEP on a pointer of the scalar type of returnType.
         Value* CreateConstScalarGEP(Type* returnType, Value* ptr, uint32_t offset)
         {
             IGCLLVM::IRBuilder<> builder(m_inst);
-            if (isa<LoadInst>(m_inst))
+            if (isa<LoadInst>(m_inst) || isa<PredicatedLoadIntrinsic>(m_inst))
             {
                 Type* ePtrType = PointerType::get(returnType->getScalarType(), ptr->getType()->getPointerAddressSpace());
                 ptr = builder.CreateBitCast(ptr, ePtrType);
@@ -199,6 +246,10 @@ namespace
             {
                 return AbstractLoadInst{ LdRI, DL };
             }
+            else if (PredicatedLoadIntrinsic *PLI = dyn_cast<PredicatedLoadIntrinsic>(value))
+            {
+                return AbstractLoadInst{ PLI, DL };
+            }
             else
             {
                 return std::nullopt;
@@ -207,7 +258,7 @@ namespace
     };
     static bool isAbstractLoadInst(llvm::Value* value)
     {
-        return isa<LoadInst>(value) || isa<LdRawIntrinsic>(value);
+        return isa<LoadInst>(value) || isa<LdRawIntrinsic>(value) || isa<PredicatedLoadIntrinsic>(value);
     }
 
     class AbstractStoreInst
@@ -218,6 +269,8 @@ namespace
             m_inst(SI), DL(DL) {}
         AbstractStoreInst(StoreRawIntrinsic* SRI, const DataLayout& DL) :
             m_inst(SRI), DL(DL) {}
+        AbstractStoreInst(PredicatedStoreIntrinsic* PSI, const DataLayout& DL) :
+            m_inst(PSI), DL(DL) {}
 
         StoreInst* getStore() const
         {
@@ -227,6 +280,10 @@ namespace
         {
             return cast<StoreRawIntrinsic>(m_inst);
         }
+        PredicatedStoreIntrinsic* getPredicatedStore() const
+        {
+            return cast<PredicatedStoreIntrinsic>(m_inst);
+        }
     public:
         Instruction* getInst() const
         {
@@ -234,7 +291,11 @@ namespace
         }
         alignment_t getAlignment() const
         {
-            return (isa<StoreInst>(m_inst) ? IGCLLVM::getAlignmentValue(getStore()) : getStoreRaw()->getAlignment());
+            if(isa<StoreInst>(m_inst))
+                return IGCLLVM::getAlignmentValue(getStore());
+            if (isa<StoreRawIntrinsic>(m_inst))
+                return getStoreRaw()->getAlignment();
+            return getPredicatedStore()->getAlignment();
         }
         void setAlignment(alignment_t alignment)
         {
@@ -242,18 +303,38 @@ namespace
             {
                 getStore()->setAlignment(IGCLLVM::getCorrectAlign(alignment));
             }
+            else if (isa<PredicatedStoreIntrinsic>(m_inst))
+            {
+                getPredicatedStore()->setAlignment(alignment);
+            }
         }
         Value* getValueOperand() const
         {
-            return isa<StoreInst>(m_inst) ? getStore()->getValueOperand() : getStoreRaw()->getArgOperand(2);
+            if (isa<StoreInst>(m_inst))
+                return getStore()->getValueOperand();
+            if (isa<StoreRawIntrinsic>(m_inst))
+                return getStoreRaw()->getArgOperand(2);
+            return getPredicatedStore()->getValueOperand();
         }
         Value* getPointerOperand() const
         {
-            return isa<StoreInst>(m_inst) ? getStore()->getPointerOperand() : getStoreRaw()->getArgOperand(0);
+            if(isa<StoreInst>(m_inst))
+                return getStore()->getPointerOperand();
+            if (isa<StoreRawIntrinsic>(m_inst))
+                return getStoreRaw()->getArgOperand(0);
+            return getPredicatedStore()->getPointerOperand();
         }
         bool getIsVolatile() const
         {
-            return isa<StoreInst>(m_inst) ? getStore()->isVolatile() : false;
+            if(isa<StoreInst>(m_inst))
+                return getStore()->isVolatile();
+            if (isa<PredicatedLoadIntrinsic>(m_inst))
+                return getPredicatedStore()->isVolatile();
+            return false;
+        }
+        unsigned getPointerAddressSpace() const
+        {
+            return getPointerOperand()->getType()->getPointerAddressSpace();
         }
         Instruction* Create(Value* storedValue, Value* ptr, alignment_t alignment, bool isVolatile)
         {
@@ -267,7 +348,7 @@ namespace
                     builder.CreateAlignedStore(storedValue, ptr, IGCLLVM::getAlign(alignment), isVolatile) :
                     builder.CreateStore(storedValue, ptr, isVolatile);
             }
-            else
+            if (isa<StoreRawIntrinsic>(m_inst))
             {
                 bool hasComputedOffset = ptr != getPointerOperand();
                 Value* offset = hasComputedOffset ? ptr : getStoreRaw()->getArgOperand(1);
@@ -278,6 +359,13 @@ namespace
                     GenISAIntrinsic::getDeclaration(getStoreRaw()->getModule(), getStoreRaw()->getIntrinsicID(), types);
                 return builder.CreateCall(newStoreRawFunction, args);
             }
+
+            Type *newPtrType = PointerType::get(newType, ptr->getType()->getPointerAddressSpace());
+            ptr = builder.CreateBitCast(ptr, newPtrType);
+            Type *types[2] = {ptr->getType(), newType};
+            Function *predStoreFunc = GenISAIntrinsic::getDeclaration(getPredicatedStore()->getModule(), getPredicatedStore()->getIntrinsicID(), types);
+            Value *args[4] = {ptr, storedValue, builder.getInt64((uint64_t)alignment), getPredicatedStore()->getPredicate()};
+            return builder.CreateCall(predStoreFunc, args);
         }
         Instruction* Create(Value* storedValue)
         {
@@ -287,7 +375,7 @@ namespace
         Value* CreateConstScalarGEP(Type* storedType, Value* ptr, uint32_t offset)
         {
             IGCLLVM::IRBuilder<> builder(m_inst);
-            if (isa<StoreInst>(m_inst))
+            if (isa<StoreInst>(m_inst) || isa<PredicatedStoreIntrinsic>(m_inst))
             {
                 Type* ePtrType = PointerType::get(storedType->getScalarType(), ptr->getType()->getPointerAddressSpace());
                 ptr = builder.CreateBitCast(ptr, ePtrType);
@@ -307,9 +395,13 @@ namespace
             {
                 return AbstractStoreInst{ SI, DL };
             }
-            else if (StoreRawIntrinsic* SRI = dyn_cast<StoreRawIntrinsic>(value))
+            if (StoreRawIntrinsic* SRI = dyn_cast<StoreRawIntrinsic>(value))
             {
                 return AbstractStoreInst{ SRI, DL };
+            }
+            if (PredicatedStoreIntrinsic* PSI = dyn_cast<PredicatedStoreIntrinsic>(value))
+            {
+                return AbstractStoreInst{ PSI, DL };
             }
             return std::nullopt;
         }
@@ -318,8 +410,10 @@ namespace
     static bool isAbstractStoreInst(llvm::Value* value)
     {
         GenIntrinsicInst* II = dyn_cast<GenIntrinsicInst>(value);
-        return isa<StoreInst>(value) || (II && (II->getIntrinsicID() == GenISAIntrinsic::GenISA_storeraw_indexed ||
-            II->getIntrinsicID() == GenISAIntrinsic::GenISA_storerawvector_indexed));
+        return isa<StoreInst>(value) ||
+               (II && (II->getIntrinsicID() == GenISAIntrinsic::GenISA_storeraw_indexed ||
+                       II->getIntrinsicID() == GenISAIntrinsic::GenISA_storerawvector_indexed ||
+                       II->getIntrinsicID() == GenISAIntrinsic::GenISA_PredicatedStore));
     }
 
     class VectorPreProcess : public FunctionPass
@@ -392,6 +486,12 @@ namespace
             uint32_t NElts,
             uint32_t SplitSize,
             SmallVector<std::pair<Type*, uint32_t>, 8>& SplitInfo);
+        // If predicated loads are split, we also need to split merge values
+        void createSplitMergeValues(
+            Instruction* Inst,
+            Value* OrigMergeVal,
+            const SmallVector<std::pair<Type*, uint32_t>, 8>& SplitInfo,
+            ValVector& NewMergeVals) const;
         bool processScalarLoadStore(Function& F);
 
     private:
@@ -594,37 +694,123 @@ void VectorPreProcess::createSplitVectorTypes(
     }
 }
 
+void VectorPreProcess::createSplitMergeValues(Instruction* Inst,
+                                              Value* OrigMergeVal,
+                                              const SmallVector<std::pair<Type*, uint32_t>, 8>& SplitInfo,
+                                              ValVector& NewMergeVals) const
+{
+    // if OrigMergeVal is a zeroinitializer, undef, or poison value, we just need to fill
+    // NewMergeVals with the same based on SplitInfo and return.
+    if (isa<ConstantAggregateZero>(OrigMergeVal) ||
+        isa<UndefValue>(OrigMergeVal) ||
+        isa<PoisonValue>(OrigMergeVal))
+    {
+        for (auto &SI : SplitInfo)
+        {
+            Type *Ty = SI.first;
+            IGCLLVM::FixedVectorType *VTy = dyn_cast<IGCLLVM::FixedVectorType>(Ty);
+            uint32_t N = SI.second;
+            for (uint32_t i = 0; i < N; ++i)
+            {
+                Value *NewMergeVal = nullptr;
+                if (isa<ConstantAggregateZero>(OrigMergeVal)) {
+                    if (VTy)
+                        NewMergeVal = ConstantAggregateZero::get(VTy);
+                    else
+                        NewMergeVal = Constant::getNullValue(Ty);
+                } else if (isa<PoisonValue>(OrigMergeVal)) {
+                    NewMergeVal = PoisonValue::get(SI.first);
+                } else {
+                    NewMergeVal = UndefValue::get(SI.first);
+                }
+                NewMergeVals.push_back(NewMergeVal);
+            }
+        }
+
+        return;
+    }
+
+    IRBuilder<> Builder(Inst);
+
+    // Case when we split vector merge value into subvectors. Element type is the same.
+    // Just one big vector is being split into subvectors.
+    if (IGCLLVM::FixedVectorType *OrigVTy = dyn_cast<IGCLLVM::FixedVectorType>(OrigMergeVal->getType()))
+    {
+        unsigned OrigVTyNEl = OrigVTy->getNumElements();
+        uint32_t idx = 0; // index counting elements of the the original vector merge value
+
+        // Split the merge value into subvectors
+        for (auto &SI : SplitInfo)
+        {
+            Type *Ty = SI.first;
+            IGCLLVM::FixedVectorType *VTy = dyn_cast<IGCLLVM::FixedVectorType>(Ty);
+            uint32_t N = SI.second;
+            for (uint32_t i = 0; i < N; ++i)
+            {
+                Value *NewMergeVal = UndefValue::get(Ty);
+                if (VTy)
+                {
+                    for (uint32_t j = 0, e = int_cast<uint32_t>(VTy->getNumElements()); j < e; ++j)
+                    {
+                        Value *Elt = (idx < OrigVTyNEl) ? Builder.CreateExtractElement(OrigMergeVal, Builder.getInt32(idx++)) :
+                                                          Constant::getNullValue(VTy->getElementType());
+                        NewMergeVal = Builder.CreateInsertElement(NewMergeVal, Elt, Builder.getInt32(j));
+                    }
+                }
+                else
+                {
+                    NewMergeVal = Builder.CreateExtractElement(OrigMergeVal, Builder.getInt32(idx++));
+                }
+                NewMergeVals.push_back(NewMergeVal);
+            }
+        }
+
+        return;
+    }
+
+    // Case when we change scalar value into vector with smaller element type.
+    IGC_ASSERT_MESSAGE(SplitInfo.size() == 1, "Unexpected split info!");
+    IGC_ASSERT_MESSAGE(SplitInfo[0].second == 1, "Unexpected split info!");
+    Value *NewMergeVal = Builder.CreateBitCast(OrigMergeVal, SplitInfo[0].first);
+    NewMergeVals.push_back(NewMergeVal);
+}
+
 uint32_t VectorPreProcess::getSplitByteSize(Instruction* I, WIAnalysisRunner& WI) const
 {
     uint32_t bytes = 0;
-    if (LoadInst* LI = dyn_cast<LoadInst>(I))
+    std::optional<AbstractLoadInst> ALI = AbstractLoadInst::get(I, *m_DL);
+    std::optional<AbstractStoreInst> ASI = AbstractStoreInst::get(I, *m_DL);
+
+    if (isa<LoadInst>(I) || isa<PredicatedLoadIntrinsic>(I))
     {
+        IGC_ASSERT(ALI.has_value());
         bytes = (uint32_t)VPConst::SPLIT_SIZE;
-        if (WI.isUniform(LI->getPointerOperand()) &&
+        if (WI.isUniform(ALI->getPointerOperand()) &&
             (m_CGCtx->platform.LSCEnabled() || IGC_GET_FLAG_VALUE(UniformMemOpt4OW)))
         {
-            if (IGCLLVM::getAlignmentValue(LI) >= 8)
+            if (ALI->getAlignment() >= 8)
                 bytes = (uint32_t)VPConst::LSC_D64_UNIFORM_SPLIT_SIZE;
-            else if (IGCLLVM::getAlignmentValue(LI) >= 4)
+            else if (ALI->getAlignment() >= 4)
                 bytes = (uint32_t)VPConst::LSC_D32_UNIFORM_SPLIT_SIZE;
         }
     }
-    else if (StoreInst* SI = dyn_cast<StoreInst>(I))
+    else if (isa<StoreInst>(I) || isa<PredicatedStoreIntrinsic>(I))
     {
+        IGC_ASSERT(ASI.has_value());
         bytes = (uint32_t)VPConst::SPLIT_SIZE;
-        Value* Addr = SI->getPointerOperand();
-        Value* Data = SI->getValueOperand();
+        Value* Addr = ASI->getPointerOperand();
+        Value* Data = ASI->getValueOperand();
         if (m_CGCtx->platform.LSCEnabled() && WI.isUniform(Addr) && WI.isUniform(Data))
         {
-            if (IGCLLVM::getAlignmentValue(SI) >= 8)
+            if (ASI->getAlignment() >= 8)
                 bytes = (uint32_t)VPConst::LSC_D64_UNIFORM_SPLIT_SIZE;
-            else if (IGCLLVM::getAlignmentValue(SI) >= 4)
+            else if (ASI->getAlignment() >= 4)
                 bytes = (uint32_t)VPConst::LSC_D32_UNIFORM_SPLIT_SIZE;
         }
     }
     else if (isa<LdRawIntrinsic>(I) || isa<StoreRawIntrinsic>(I))
     {
-        uint32_t alignment = isa<LdRawIntrinsic>(I) ? 
+        uint32_t alignment = isa<LdRawIntrinsic>(I) ?
             cast<LdRawIntrinsic>(I)->getAlignment() : cast<StoreRawIntrinsic>(I)->getAlignment();
         Value* bufferAddr = isa<LdRawIntrinsic>(I) ?
             cast<LdRawIntrinsic>(I)->getResourceValue() : cast<StoreRawIntrinsic>(I)->getResourceValue();
@@ -674,17 +860,20 @@ uint32_t VectorPreProcess::getSplitByteSize(Instruction* I, WIAnalysisRunner& WI
     {
         bytes = (uint32_t)VPConst::SPLIT_SIZE;
     }
-    if ((isa<LoadInst>(I) || isa<StoreInst>(I)) && WI.isUniform(I))
-    {
-        auto Alignment = isa<LoadInst>(I) ? IGCLLVM::getAlignmentValue(cast<LoadInst>(I))
-                                          : IGCLLVM::getAlignmentValue(cast<StoreInst>(I));
-        if (Alignment >= 16) {
-            Type* ETy = (isa<LoadInst>(I)) ?
-                cast<VectorType>(I->getType())->getElementType() :
-                cast<VectorType>(cast<StoreInst>(I)->getValueOperand()->getType())->getElementType();
 
-            bool SLM = getLoadStorePointerOperand(I)->getType()->getPointerAddressSpace()
-                == ADDRESS_SPACE_LOCAL;
+    if ((isa<LoadInst>(I) || isa<StoreInst>(I) ||
+         isa<PredicatedLoadIntrinsic>(I) || isa<PredicatedStoreIntrinsic>(I))
+         && WI.isUniform(I))
+    {
+        auto Alignment = ALI.has_value() ? ALI->getAlignment()
+                                          : ASI->getAlignment();
+        if (Alignment >= 16) {
+            Type* ETy = ALI.has_value() ?
+                cast<VectorType>(I->getType())->getElementType() :
+                cast<VectorType>(ASI->getValueOperand()->getType())->getElementType();
+
+            Value *Ptr = ALI.has_value() ? ALI->getPointerOperand() : ASI->getPointerOperand();
+            bool SLM = Ptr->getType()->getPointerAddressSpace() == ADDRESS_SPACE_LOCAL;
             uint32_t ebytes = int_cast<uint32_t>(m_DL->getTypeSizeInBits(ETy) / 8);
             // Limit to DW and QW element types to avoid generating vectors that
             // are too large (ideally, should be <= 32 elements currently).
@@ -708,7 +897,7 @@ bool VectorPreProcess::splitStore(
 
     // splitInfo: Keep track of all pairs of (sub-vec type, #sub-vec).
     SmallVector<std::pair<Type*, uint32_t>, 8> splitInfo;
-    bool isStoreInst = isa<StoreInst>(SI);
+    bool isStoreInst = isa<StoreInst>(SI) || isa<PredicatedStoreIntrinsic>(SI);
     uint32_t splitSize = getSplitByteSize(SI, WI);
     if (IGC_IS_FLAG_ENABLED(EnableSplitUnalignedVector))
     {
@@ -720,8 +909,7 @@ bool VectorPreProcess::splitStore(
             if (newAlign > alignment)
             {
                 // For the same reason as Load, use DW-aligned for OCL stateful.
-                StoreInst* aSI = dyn_cast<StoreInst>(SI);
-                if (aSI && newAlign > 4 && isStatefulAddrSpace(aSI->getPointerAddressSpace()))
+                if (newAlign > 4 && isStatefulAddrSpace(ASI.getPointerAddressSpace()))
                 {
                     newAlign = 4;
                 }
@@ -874,6 +1062,7 @@ bool VectorPreProcess::splitLoad(
 {
     Instruction* LI = ALI.getInst();
     bool isLdRaw = isa<LdRawIntrinsic>(LI);
+    bool isPredLd = isa<PredicatedLoadIntrinsic>(LI);
     IGCLLVM::FixedVectorType* VTy = cast<IGCLLVM::FixedVectorType>(LI->getType());
     Type* ETy = VTy->getElementType();
     uint32_t nelts = int_cast<uint32_t>(VTy->getNumElements());
@@ -901,8 +1090,7 @@ bool VectorPreProcess::splitLoad(
                 //       %5 = load <8 x i16>, <8 x i16> addrspace(131073) * %4, align 2
                 //  newAlign from getKnownAlignment() is 16. But we can only set align to 4 as
                 //  the base of this stateful could be just DW-aligned.
-                LoadInst* aLI = dyn_cast<LoadInst>(LI);
-                if (aLI && newAlign > 4 && isStatefulAddrSpace(aLI->getPointerAddressSpace()))
+                if (newAlign > 4 && isStatefulAddrSpace(ALI.getPointerAddressSpace()))
                 {
                     newAlign = 4;
                 }
@@ -922,12 +1110,17 @@ bool VectorPreProcess::splitLoad(
         return false;
     }
 
+    ValVector splitMergeValues;
+    if (isPredLd)
+        createSplitMergeValues(LI, cast<PredicatedLoadIntrinsic>(LI)->getMergeValue(), splitInfo, splitMergeValues);
+
     Value* Addr = ALI.getPointerOperand();
     auto Align = ALI.getAlignment();
     bool IsVolatile = ALI.getIsVolatile();
 
     uint32_t eOffset = 0;
     uint32_t EBytes = int_cast<unsigned int>(m_DL->getTypeAllocSize(ETy));
+    uint32_t mergeValueIdx = 0;
 
     // Create a map entry for LI
     ValVector& svals = vecToSubVec[LI][splitSize];
@@ -941,7 +1134,8 @@ bool VectorPreProcess::splitLoad(
         {
             alignment_t vAlign = (alignment_t)MinAlign(Align, (alignment_t)eOffset * EBytes);
             Value* offsetAddr = ALI.CreateConstScalarGEP(Ty1, Addr, eOffset);
-            Instruction* I = ALI.Create(Ty1, offsetAddr, vAlign, IsVolatile);
+            Value *MergeV = isPredLd ? splitMergeValues[mergeValueIdx++] : nullptr;
+            Instruction* I = ALI.Create(Ty1, offsetAddr, vAlign, IsVolatile, MergeV);
             eOffset += (VTy1 ? int_cast<uint32_t>(VTy1->getNumElements()) : 1);
 
             svals.push_back(I);
@@ -1084,6 +1278,7 @@ bool VectorPreProcess::splitVector3LoadStore(Instruction* Inst)
     bool isStoreRaw = II &&
         (II->getIntrinsicID() == GenISAIntrinsic::GenISA_storerawvector_indexed ||
             II->getIntrinsicID() == GenISAIntrinsic::GenISA_storeraw_indexed);
+    bool isPredLoad = isa<PredicatedLoadIntrinsic>(Inst);
 
     if (etyBytes == 1 || etyBytes == 2 ||
         (etyBytes == 8 && (isa<LdRawIntrinsic>(Inst) || isStoreRaw)))
@@ -1104,7 +1299,13 @@ bool VectorPreProcess::splitVector3LoadStore(Instruction* Inst)
             {
                 // Make it 4-element load
                 Type* newVTy = FixedVectorType::get(eTy, 4);
-                Value* V = ALI->Create(newVTy);
+
+                ValVector splitMergeValues;
+                if (isPredLoad)
+                    createSplitMergeValues(Inst, cast<PredicatedLoadIntrinsic>(Inst)->getMergeValue(),
+                                           { {newVTy, 1} }, splitMergeValues);
+
+                Value* V = ALI->Create(newVTy, isPredLoad ? splitMergeValues[0] : nullptr);
 
                 Elt0 = Builder.CreateExtractElement(V, Builder.getInt32(0), "elt0");
                 Elt1 = Builder.CreateExtractElement(V, Builder.getInt32(1), "elt1");
@@ -1115,12 +1316,18 @@ bool VectorPreProcess::splitVector3LoadStore(Instruction* Inst)
                 // One 2-element vector load + one scalar load
                 Type* newVTy = FixedVectorType::get(eTy, 2);
                 Value* offsetAddr = ALI->CreateConstScalarGEP(eTy, ALI->getPointerOperand(), 2);
-                Value* V2 = ALI->Create(newVTy);
+
+                ValVector splitMergeValues;
+                if (isPredLoad)
+                    createSplitMergeValues(Inst, cast<PredicatedLoadIntrinsic>(Inst)->getMergeValue(),
+                                           { {newVTy, 1}, {eTy, 1} }, splitMergeValues);
+
+                Value* V2 = ALI->Create(newVTy, isPredLoad ? splitMergeValues[0] : nullptr);
                 Elt0 = Builder.CreateExtractElement(V2, Builder.getInt32(0), "elt0");
                 Elt1 = Builder.CreateExtractElement(V2, Builder.getInt32(1), "elt1");
 
                 uint32_t newAlign = (uint32_t)MinAlign(ALI->getAlignment(), 2 * etyBytes);
-                Elt2 = ALI->Create(eTy, offsetAddr, newAlign, ALI->getIsVolatile());
+                Elt2 = ALI->Create(eTy, offsetAddr, newAlign, ALI->getIsVolatile(), isPredLoad ? splitMergeValues[1] : nullptr);
             }
 
             // A little optimization here
@@ -1291,10 +1498,12 @@ void VectorPreProcess::getOrGenScalarValues(
     {
         bool genExtract = false;
         Value* V = VecVal;
+        IGC_ASSERT(scalars.size() == nelts);
         for (uint32_t i = 0; i < nelts; ++i)
         {
             scalars[i] = nullptr;
         }
+        uint32_t numEltsFound = 0;
         while (InsertElementInst * IEI = dyn_cast<InsertElementInst>(V))
         {
             Value* ixVal = IEI->getOperand(2);
@@ -1305,10 +1514,19 @@ void VectorPreProcess::getOrGenScalarValues(
                 break;
             }
             uint32_t ix = int_cast<unsigned int>(CI->getZExtValue());
-            scalars[ix] = IEI->getOperand(1);
+            if (scalars[ix] == nullptr)
+            {
+                scalars[ix] = IEI->getOperand(1);
+                ++numEltsFound;
+            }
+            if (numEltsFound == nelts)
+            {
+                break;
+            }
             V = IEI->getOperand(0);
         }
-        if (!isa<UndefValue>(V))
+        // Generate extractelement instructions if not all elements were found.
+        if (!isa<UndefValue>(V) && numEltsFound != nelts)
         {
             genExtract = true;
         }
@@ -1563,7 +1781,14 @@ Instruction* VectorPreProcess::simplifyLoadStore(Instruction* Inst)
 
             Type* NewVecTy = FixedVectorType::get(cast<VectorType>(Inst->getType())->getElementType(),
                 MaxIndex + 1);
-            NewLI = ALI.Create(NewVecTy);
+
+            bool isPredLoad = isa<PredicatedLoadIntrinsic>(Inst);
+            ValVector splitMergeValues;
+            if (isPredLoad)
+                createSplitMergeValues(Inst, cast<PredicatedLoadIntrinsic>(Inst)->getMergeValue(),
+                                       { {NewVecTy, 1} }, splitMergeValues);
+
+            NewLI = ALI.Create(NewVecTy, isPredLoad ? splitMergeValues[0] : nullptr);
 
             if (optReportEnabled)
             {
@@ -1730,11 +1955,11 @@ Instruction* VectorPreProcess::simplifyLoadStore(Instruction* Inst)
 // with
 // store <3 x i8> %3, <3 x i8> addrspace(3)* %4, align 4
 // or
-// store <3 x i8> %16, <3 x i16> addrspace(3)* %4, align 4
+// store <3 x i16> %16, <3 x i16> addrspace(3)* %4, align 4
 //
 // to be split later in this pass.
 // Otherwise later TypeLegalizwe pass replaces these instructions with 3-element store.
-// The same is for i24 and i48 load instruxtions.
+// The same is for i24 and i48 load instructions.
 //
 bool VectorPreProcess::processScalarLoadStore(Function& F)
 {
@@ -1742,9 +1967,12 @@ bool VectorPreProcess::processScalarLoadStore(Function& F)
     for (inst_iterator I = inst_begin(F), E = inst_end(F); I != E; ++I)
     {
         Instruction* inst = &*I;
-        if (isa<StoreInst>(inst))
+        if (isa<StoreInst>(inst) || isa<PredicatedStoreIntrinsic>(inst))
         {
-            Type* Ty = inst->getOperand(0)->getType();
+            std::optional<AbstractStoreInst> optionalASI = AbstractStoreInst::get(inst, *m_DL);
+            auto ASI = optionalASI.value();
+
+            Type* Ty = ASI.getValueOperand()->getType();
             if (Ty->isVectorTy())
                 continue;
             unsigned bitSize = int_cast<unsigned>(
@@ -1754,16 +1982,14 @@ bool VectorPreProcess::processScalarLoadStore(Function& F)
             IRBuilder<> Builder(inst);
             Type* newScalTy = bitSize == 24 ? Type::getInt8Ty(inst->getContext()) : Type::getInt16Ty(inst->getContext());
             Type* newVecTy = IGCLLVM::FixedVectorType::get(newScalTy, 3);
-            Value* val = Builder.CreateBitCast(inst->getOperand(0), newVecTy);
-            Value* ptr = inst->getOperand(1);
-            Type* newPtrType = PointerType::get(newVecTy, ptr->getType()->getPointerAddressSpace());
-            Value* newPtr = Builder.CreateBitCast(ptr, newPtrType);
-            Builder.CreateAlignedStore(val, newPtr, IGCLLVM::getAlign(cast<StoreInst>(*inst)),
-                cast<StoreInst>(inst)->isVolatile());
+            ASI.Create(Builder.CreateBitCast(ASI.getValueOperand(), newVecTy));
             list_delete.push_back(inst);
         }
-        else if (isa<LoadInst>(inst))
+        else if (isa<LoadInst>(inst) || isa<PredicatedLoadIntrinsic>(inst))
         {
+            std::optional<AbstractLoadInst> optionalALI = AbstractLoadInst::get(inst, *m_DL);
+            auto ALI = optionalALI.value();
+
             Type* Ty = inst->getType();
             if (Ty->isVectorTy())
                 continue;
@@ -1774,11 +2000,15 @@ bool VectorPreProcess::processScalarLoadStore(Function& F)
             IRBuilder<> Builder(inst);
             Type* newScalTy = bitSize == 24 ? Type::getInt8Ty(inst->getContext()) : Type::getInt16Ty(inst->getContext());
             Type* newVecTy = IGCLLVM::FixedVectorType::get(newScalTy, 3);
-            Value* ptr = inst->getOperand(0);
-            Type* newPtrType = PointerType::get(newVecTy, ptr->getType()->getPointerAddressSpace());
-            Value* newPtr = Builder.CreateBitCast(ptr, newPtrType);
-            Value* newVecVal=  Builder.CreateAlignedLoad(newVecTy, newPtr, IGCLLVM::getAlign(cast<LoadInst>(*inst)),
-                cast<LoadInst>(inst)->isVolatile());
+
+            bool isPredLd = isa<PredicatedLoadIntrinsic>(inst);
+            ValVector splitMergeValues;
+            if (isPredLd)
+                createSplitMergeValues(inst, cast<PredicatedLoadIntrinsic>(inst)->getMergeValue(),
+                                       { {newVecTy, 1} }, splitMergeValues);
+            Value *MergeVal = isPredLd ? splitMergeValues[0] : nullptr;
+
+            Value* newVecVal = ALI.Create(newVecTy, MergeVal);
             Value* newVal = Builder.CreateBitCast(newVecVal, Ty);
             inst->replaceAllUsesWith(newVal);
             list_delete.push_back(inst);

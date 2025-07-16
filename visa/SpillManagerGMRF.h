@@ -658,6 +658,7 @@ private:
 
   bool checkUniqueDefAligned(G4_DstRegRegion *dst, G4_BB *defBB);
   bool checkDefUseDomRel(G4_DstRegRegion *dst, G4_BB *bb);
+  bool isFirstLexicalDef(G4_DstRegRegion *dst);
   void updateRMWNeeded();
 
   // Used for new fail safe RA mechanism.
@@ -713,7 +714,7 @@ static inline bool isPartialRegion(REGION_TYPE *region, unsigned execSize) {
 
 // Return true if inst is a simple mov with exec size == 1 and imm as src0.
 // Def of such instructions are trivially fillable.
-static bool immFillCandidate(G4_INST *inst) {
+[[maybe_unused]] static bool immFillCandidate(G4_INST *inst) {
   auto src0 = inst->getSrc(0);
   return inst->opcode() == G4_mov && inst->getExecSize() == g4::SIMD1 &&
          src0->isImm() && inst->isWriteEnableInst() && !inst->getPredicate() &&

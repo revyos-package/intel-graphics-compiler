@@ -9,12 +9,11 @@ SPDX-License-Identifier: MIT
 #include <GenISAIntrinsics/GenIntrinsicInst.h>
 #include "WaveShuffleIndexSinking.hpp"
 #include "Compiler/IGCPassSupport.h"
-#include "Compiler/InitializePasses.h"
 #include <igc_regkeys.hpp>
 #include "common/LLVMWarningsPush.hpp"
 #include <llvm/ADT/DenseMap.h>
-#include <llvm/ADT/SetVector.h>
 #include <llvm/ADT/SmallVector.h>
+#include <llvm/IR/Dominators.h>
 #include "common/LLVMWarningsPop.hpp"
 
 #define DEBUG_TYPE "igc-wave-shuffle-index-sinking"
@@ -209,18 +208,29 @@ namespace IGC
                 return numProfitableHoistable;
             }
 
-            void hoist() {
+            bool hoist(DenseMap<BasicBlock*, SmallVector<Instruction*, 4>>& MoveToCommonDominatorInstMap, DominatorTree& DT ) {
+                // If there is no common dominator abort hoisting
+                BasicBlock* CommonDominator = findCommonDominator( DT );
+                if ( !CommonDominator ) return false;
+
                 // Track the new source for all the ShuffleOps
                 auto* prev = ShuffleOps.front()->getSrc();
 
                 for( unsigned idx = 0; idx < HoistOrAnchorInstsIdx.size(); idx++ )
                 {
+                    bool moveToCommonDominator = false;
                     if( HoistOrAnchorInstsIdx[ idx ] )
                     {
                         // clone the inst to be hoisted
                         auto* hoistedInst = InstChains.front()[ idx ]->clone();
                         hoistedInst->setName( InstChains.front()[ idx ]->getName() + "_hoisted" );
                         hoistedInst->insertBefore( ShuffleOps.front() );
+
+                        if ( CommonDominator != hoistedInst->getParent() )
+                        {
+                            moveToCommonDominator = true;
+                            MoveToCommonDominatorInstMap[ CommonDominator ].emplace_back( hoistedInst );
+                        }
 
                         // Replace the correct operand
                         auto* hoistedOp0 = hoistedInst->getOperand( 0 );
@@ -290,6 +300,12 @@ namespace IGC
                                         InstChains[ i ][ anchorIdx ]->setOperand( 0, anchorHoistedInst );
                                     }
                                 }
+
+                                // If hoisted instruction is moved, it's safe to move anchor as well.
+                                if ( moveToCommonDominator )
+                                {
+                                    MoveToCommonDominatorInstMap[ CommonDominator ].emplace_back( anchorHoistedInst );
+                                }
                             }
                         }
                     }
@@ -323,7 +339,7 @@ namespace IGC
                         {
                             Instruction* lastAnchor = lastAnchorIdx == -1 ? cast<Instruction>(ShuffleOps[ i ]) : InstChains[ i ][ lastAnchorIdx ];
                             // operand to be replaced
-                            Instruction* rewirePrev = ( rewireIdx == 0 ) ? cast<Instruction>(ShuffleOps[ i ]) : InstChains[ i ][ rewireIdx - 1 ];
+                            Instruction* rewirePrev = InstChains[ i ][ rewireIdx - 1 ];
                             unsigned rewireOpIdx = InstChains[ i ][ rewireIdx ]->getOperand( 0 ) == rewirePrev ? 0 : 1;
                             InstChains[ i ][ rewireIdx ]->setOperand( rewireOpIdx, lastAnchor );
                             lastAnchorIdx = rewireIdx;
@@ -347,10 +363,24 @@ namespace IGC
                             instChain[ i ]->eraseFromParent();
                     }
                 }
+
+                return true;
             }
 
             SmallVector<WaveShuffleIndexIntrinsic*> ShuffleOps; // all the WaveShuffleIndex instructions in the group
         private:
+            BasicBlock* findCommonDominator( DominatorTree& DT )
+            {
+                BasicBlock* DomBB = ShuffleOps.front()->getParent();
+                for ( auto& inst : ShuffleOps )
+                {
+                    BasicBlock* UseBB = inst->getParent();
+                    DomBB = DT.findNearestCommonDominator( DomBB, UseBB );
+                }
+
+                return DomBB;
+            }
+
             SmallVector<SmallVector<BinaryOperator*>> InstChains; // all common instructions shared by the shuffle ops, some can be hoisted
             SmallVector<bool> HoistOrAnchorInstsIdx; // Type of each Binary Operator in each InstChain: true - Hoistable/Hoistable past previous Anchors, false - Anchor
         }; //ShuffleGroup
@@ -361,12 +391,15 @@ namespace IGC
     private:
         bool splitWaveShuffleIndexes();
         bool mergeWaveShuffleIndexes();
+        bool moveToCommonDominator();
         void gatherShuffleGroups();
         bool sinkShuffleGroups();
         static unsigned compareWaveShuffleIndexes( WaveShuffleIndexIntrinsic* waveShuffleIndex, WaveShuffleIndexIntrinsic* newWaveShuffleIndex, SmallVector<BinaryOperator*>& InstChain, SmallVector<BinaryOperator*>& newInstChain, SmallVector<bool>& hoistOrAnchor );
         static bool isHoistable( BinaryOperator* inst );
         static bool isHoistableOverAnchor( BinaryOperator* instToHoist, BinaryOperator* anchorInst );
         Function& F;
+        DominatorTree DT;
+        DenseMap<BasicBlock*, SmallVector<Instruction*, 4>> MoveToCommonDominatorInstMap;
         DenseMap<Value*, SmallVector<ShuffleGroup, 4>> ShuffleGroupMap;
         DenseSet<WaveShuffleIndexIntrinsic*> Visited;
     };
@@ -447,6 +480,25 @@ bool WaveShuffleIndexSinkingImpl::splitWaveShuffleIndexes()
     return Changed;
 }
 
+bool WaveShuffleIndexSinkingImpl::moveToCommonDominator()
+{
+    // hoisted intruction needs to be moved to common dominator BB.
+    // If instructions in shuffle group are from different basic blocks
+    // there is a risk of non-dominating all users.
+    bool Changed = false;
+    for ( auto& bb : MoveToCommonDominatorInstMap )
+    {
+        auto instrInsertPtr = ( &*bb.first->getFirstInsertionPt() );
+        for ( auto& inst : bb.second )
+        {
+            inst->moveBefore( instrInsertPtr );
+            Changed = true;
+        }
+    }
+
+    return Changed;
+}
+
 // Merge WaveShuffleIndex instructions that have the same source operand and the same constant lane/channel operand
 bool WaveShuffleIndexSinkingImpl::mergeWaveShuffleIndexes()
 {
@@ -478,11 +530,35 @@ bool WaveShuffleIndexSinkingImpl::mergeWaveShuffleIndexes()
             Changed = true;
             auto* mainShuffleIndex = duplicateInsts.front();
 
+            // Find common dominator for main WaveShuffleIndex
+            bool moveToCommonDominator = false;
+            BasicBlock* DomBB = mainShuffleIndex->getParent();
+
+            for ( unsigned i = 1; i < duplicateInsts.size(); i++ )
+            {
+                BasicBlock* UseBB = duplicateInsts[ i ]->getParent();
+                DomBB = DT.findNearestCommonDominator( DomBB, UseBB );
+            }
+
+            if ( !DomBB )
+            {
+                // Do not merge if Common Dominator is not found
+                Changed = false;
+                continue;
+            }
+
+            moveToCommonDominator = DomBB != mainShuffleIndex->getParent() ? true : false;
+
             // replace uses of other WaveShuffleIndex with the first one
             for( unsigned i = 1; i < duplicateInsts.size(); i++ )
             {
                 duplicateInsts[ i ]->replaceAllUsesWith( mainShuffleIndex );
                 duplicateInsts[ i ]->eraseFromParent();
+            }
+
+            if (moveToCommonDominator)
+            {
+                MoveToCommonDominatorInstMap[ DomBB ].emplace_back( mainShuffleIndex );
             }
         }
     }
@@ -546,8 +622,7 @@ bool WaveShuffleIndexSinkingImpl::sinkShuffleGroups()
             if( numProfitableToHoist > 0 )
             {
                 // Pre-process found profitable instructions left to hoist
-                shuffleGroup.hoist();
-                Changed = true;
+                Changed |= shuffleGroup.hoist( MoveToCommonDominatorInstMap, DT );
             }
             else
             {
@@ -699,6 +774,7 @@ bool WaveShuffleIndexSinkingImpl::isHoistableOverAnchor( BinaryOperator* instToH
 
 bool WaveShuffleIndexSinkingImpl::run()
 {
+    DT.recalculate(F);
     bool Changed = splitWaveShuffleIndexes();
 
     unsigned numIters = 0;
@@ -718,6 +794,7 @@ bool WaveShuffleIndexSinkingImpl::run()
         ShuffleGroupMap.clear();
     }
     Changed |= mergeWaveShuffleIndexes();
+    Changed |= moveToCommonDominator();
     return Changed;
 }
 

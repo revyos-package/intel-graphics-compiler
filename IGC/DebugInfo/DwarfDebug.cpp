@@ -232,6 +232,7 @@ void DbgVariable::emitExpression(CompileUnit *CU, IGC::DIEBlock *Block) const {
 
   if (isStackValueNeeded) {
     CU->addUInt(Block, dwarf::DW_FORM_data1, dwarf::DW_OP_stack_value);
+    CU->stackValueOffset = 1;
   }
 }
 
@@ -3424,7 +3425,7 @@ void DwarfDebug::writeFDEStackCall(VISAModule *m) {
     // set holds any callee save GRF that has been saved already to stack.
     // this is required because of some differences between dbginfo structure
     // reporting callee save and dwarf's debug_frame section requirements.
-    std::unordered_set<uint32_t> calleeSaveRegsSaved;
+    std::set<uint32_t> calleeSaveRegsSaved;
     for (auto &item : CFI.calleeSaveEntry) {
       for (unsigned int idx = 0; idx != item.data.size(); ++idx) {
         auto regNum = (uint32_t)item.data[idx].srcRegOff /

@@ -115,8 +115,9 @@ namespace IGC
     class CEncoder
     {
     public:
-        void InitEncoder(bool canAbortOnSpill, bool hasStackCall, bool hasInlineAsmCall, bool hasAdditionalVisaAsmToLink, int numThreadsPerEU, uint lowerBoundGRF, VISAKernel* prevKernel);
-        void InitBuildParams(llvm::SmallVector<std::unique_ptr< char, std::function<void(char*)>>, 10> & params);
+        void InitEncoder(bool canAbortOnSpill, bool hasStackCall, bool hasInlineAsmCall, bool hasAdditionalVisaAsmToLink, int numThreadsPerEU,
+            uint lowerBoundGRF, uint upperBoundGRF, VISAKernel* prevKernel);
+        void InitBuildParams(llvm::SmallVector<std::unique_ptr<const char, std::function<void(const char*)>>, 10> & params);
         void InitVISABuilderOptions(TARGET_PLATFORM VISAPlatform, bool canAbortOnSpill, bool hasStackCall, bool enableVISA_IR);
         SEncoderState CopyEncoderState();
         void SetEncoderState(SEncoderState& newState);
@@ -582,7 +583,7 @@ namespace IGC
         VISA_VectorOpnd* GetUniformSource(CVariable* var);
         VISA_StateOpndHandle* GetBTIOperand(uint bindingTableIndex);
         VISA_StateOpndHandle* GetSamplerOperand(CVariable* sampleIdx);
-        VISA_StateOpndHandle* GetSamplerOperand(const SamplerDescriptor& sampler, bool& isIdxLT16);
+        VISA_StateOpndHandle* GetSamplerOperand(const SamplerDescriptor& sampler);
         void GetRowAndColOffset(CVariable* var, unsigned int subVar, unsigned int subreg, unsigned char& rowOff, unsigned char& colOff);
 
         VISA_GenVar* GetVISAVariable(CVariable* var);
@@ -629,6 +630,7 @@ namespace IGC
         VISA_Exec_Size  GetAluExecSize(CVariable* dst) const;
         VISA_EMask_Ctrl GetAluEMask(CVariable* dst);
         bool IsSat();
+        bool isSamplerIdxLT16(const SamplerDescriptor& sampler);
 
         // Variable splitting facilities (if crosses 2 GRF boundary).
         bool NeedSplitting(CVariable* var, const SModifier& mod,
@@ -740,7 +742,6 @@ namespace IGC
         void SetBuilderOptions(VISABuilder* pbuilder);
 
         unsigned int GetSpillThreshold(SIMDMode simdmode);
-
     private:
         // helper functions for compile flow
         /// shaderOverrideVISAFirstPass - pre-process shader overide dir for visa shader override.

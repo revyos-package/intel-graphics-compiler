@@ -1,10 +1,11 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (C) 2017-2021 Intel Corporation
+Copyright (C) 2017 Intel Corporation
 
 SPDX-License-Identifier: MIT
 
 ============================= end_copyright_notice ===========================*/
+
 
 #include "Compiler/CISACodeGen/VectorProcess.hpp"
 #include "Compiler/CISACodeGen/ShaderCodeGen.hpp"
@@ -18,7 +19,6 @@ SPDX-License-Identifier: MIT
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/InstIterator.h>
-#include <llvm/Support/MathExtras.h>
 #include "common/LLVMWarningsPop.hpp"
 #include "Probe/Assertion.h"
 
@@ -154,6 +154,8 @@ namespace
     private:
         bool reLayoutLoadStore(Instruction* Inst);
         bool optimizeBitCast(BitCastInst* BC);
+        Value* ProcessMergeValue(Instruction *Inst, Value* V, Type* NewTy,
+                                 Type* NewIntETy, Type* NewIntTy) const;
 
     private:
         const DataLayout* m_DL;
@@ -210,18 +212,29 @@ bool VectorProcess::reLayoutLoadStore(Instruction* Inst)
         Ptr = II->getOperand(0);
 
         if (II->getIntrinsicID() == GenISAIntrinsic::GenISA_ldrawvector_indexed ||
-            II->getIntrinsicID() == GenISAIntrinsic::GenISA_ldraw_indexed)
+            II->getIntrinsicID() == GenISAIntrinsic::GenISA_ldraw_indexed ||
+            II->getIntrinsicID() == GenISAIntrinsic::GenISA_PredicatedLoad)
         {
             Ty = II->getType();
         }
-        else
+        else if (II->getIntrinsicID() == GenISAIntrinsic::GenISA_storerawvector_indexed ||
+                 II->getIntrinsicID() == GenISAIntrinsic::GenISA_storeraw_indexed)
         {
-            IGC_ASSERT(II->getIntrinsicID() == GenISAIntrinsic::GenISA_storerawvector_indexed ||
-                       II->getIntrinsicID() == GenISAIntrinsic::GenISA_storeraw_indexed);
             IGC_ASSERT(2 < IGCLLVM::getNumArgOperands(II));
             IGC_ASSERT(nullptr != II->getArgOperand(2));
 
             Ty = II->getArgOperand(2)->getType();
+        }
+        else if (II->getIntrinsicID() == GenISAIntrinsic::GenISA_PredicatedStore)
+        {
+            IGC_ASSERT(1 < IGCLLVM::getNumArgOperands(II));
+            IGC_ASSERT(nullptr != II->getArgOperand(1));
+
+            Ty = II->getArgOperand(1)->getType();
+        }
+        else
+        {
+            IGC_ASSERT_MESSAGE(0, "Internal Error: unknown intrinsic");
         }
     }
 
@@ -295,6 +308,14 @@ bool VectorProcess::reLayoutLoadStore(Instruction* Inst)
         {
             align = IGCLLVM::getAlignmentValue(SI);
         }
+        else if (II && II->getIntrinsicID() == GenISAIntrinsic::GenISA_PredicatedLoad)
+        {
+            align = cast<ConstantInt>(II->getArgOperand(1))->getZExtValue();
+        }
+        else if (II && II->getIntrinsicID() == GenISAIntrinsic::GenISA_PredicatedStore)
+        {
+            align = cast<ConstantInt>(II->getArgOperand(2))->getZExtValue();
+        }
         else
         {
             align = 1;
@@ -350,13 +371,36 @@ bool VectorProcess::reLayoutLoadStore(Instruction* Inst)
         newPtr = Builder.CreateBitCast(Ptr, newPtrTy, "vptrcast");
     }
 
-    if (LI)
+    // These types are needed when we are dealing with pointers
+    // and using ptrtoint and inttoptr.
+    Type* int_eTy = Type::getIntNTy(*m_C, eTyBits);
+    Type* new_intTy = VTy ? FixedVectorType::get(int_eTy, nelts) : int_eTy;
+
+    if (LI || (II && II->getIntrinsicID() == GenISAIntrinsic::GenISA_PredicatedLoad))
     {
-        LoadInst* load = Builder.CreateAlignedLoad(newVTy, newPtr,
+        Instruction* oldLoad = LI ? cast<Instruction>(LI) : cast<Instruction>(II);
+        Instruction* load;
+        if (LI) {
+          load = Builder.CreateAlignedLoad(newVTy, newPtr,
             IGCLLVM::getCorrectAlign(IGCLLVM::getAlignmentValue(LI)),
             LI->isVolatile(),
             "vCastload");
-        load->copyMetadata(*LI);
+        } else {
+            Type* types[] =
+            {
+                newVTy,
+                newPtrTy,
+                newVTy
+            };
+
+            Function* F = GenISAIntrinsic::getDeclaration(
+                II->getParent()->getParent()->getParent(),
+                GenISAIntrinsic::GenISA_PredicatedLoad,
+                types);
+            load = Builder.CreateCall4(F, newPtr, II->getOperand(1), II->getOperand(2),
+                                       ProcessMergeValue(Inst, II->getOperand(3), newVTy, int_eTy, new_intTy));
+        }
+        load->copyMetadata(*oldLoad);
 
         Value* V = load;
 
@@ -367,8 +411,6 @@ bool VectorProcess::reLayoutLoadStore(Instruction* Inst)
             //        the original vector type with ptr element type replaced
             //        with int-element type.
             // second, IntToPtr cast to the original vector type.
-            Type* int_eTy = Type::getIntNTy(*m_C, eTyBits);
-            Type* new_intTy = VTy ? FixedVectorType::get(int_eTy, nelts) : int_eTy;
             V = Builder.CreateBitCast(V, new_intTy);
             if (VTy)
             {
@@ -392,13 +434,14 @@ bool VectorProcess::reLayoutLoadStore(Instruction* Inst)
             // TODO: if Ty is Aggregate type then this bitCast conradicts to LLVM spec
             V = Builder.CreateBitCast(V, Ty);
         }
-        LI->replaceAllUsesWith(V);
-        LI->eraseFromParent();
+        oldLoad->replaceAllUsesWith(V);
+        oldLoad->eraseFromParent();
     }
     else
-        if (SI)
+        if (SI || (II && II->getIntrinsicID() == GenISAIntrinsic::GenISA_PredicatedStore))
         {
-            Value* StoreVal = SI->getValueOperand();
+            Instruction *oldStore = SI ? cast<Instruction>(SI) : cast<Instruction>(II);
+            Value* StoreVal = SI ? SI->getValueOperand() : II->getArgOperand(1);
             Value* V;
             if (eTy->isPointerTy())
             {
@@ -453,17 +496,32 @@ bool VectorProcess::reLayoutLoadStore(Instruction* Inst)
             {
                 V = Builder.CreateBitCast(StoreVal, newVTy);
             }
-            StoreInst* store = nullptr;
-            if (IGCLLVM::getAlignmentValue(SI) == 0)
+
+            Instruction* store = nullptr;
+            if (SI && IGCLLVM::getAlignmentValue(SI) == 0)
             {
                 store = Builder.CreateStore(V, newPtr, SI->isVolatile());
             }
-            else
+            else if (SI)
             {
                 store = Builder.CreateAlignedStore(V, newPtr, IGCLLVM::getAlign(*SI), SI->isVolatile());
             }
-            store->copyMetadata(*SI);
-            SI->eraseFromParent();
+            else
+            {
+                Type* types[] =
+                {
+                    newPtrTy,
+                    newVTy
+                };
+
+                Function* F = GenISAIntrinsic::getDeclaration(
+                    II->getParent()->getParent()->getParent(),
+                    GenISAIntrinsic::GenISA_PredicatedStore,
+                    types);
+                store = Builder.CreateCall4(F, newPtr, V, II->getOperand(2), II->getOperand(3));
+            }
+            store->copyMetadata(*oldStore);
+            oldStore->eraseFromParent();
         }
         else if (II->getIntrinsicID() == GenISAIntrinsic::GenISA_ldrawvector_indexed ||
                  II->getIntrinsicID() == GenISAIntrinsic::GenISA_ldraw_indexed)
@@ -598,7 +656,9 @@ bool VectorProcess::runOnFunction(Function& F)
                 if (intrin->getIntrinsicID() == GenISAIntrinsic::GenISA_ldrawvector_indexed ||
                     intrin->getIntrinsicID() == GenISAIntrinsic::GenISA_ldraw_indexed ||
                     intrin->getIntrinsicID() == GenISAIntrinsic::GenISA_storerawvector_indexed ||
-                    intrin->getIntrinsicID() == GenISAIntrinsic::GenISA_storeraw_indexed)
+                    intrin->getIntrinsicID() == GenISAIntrinsic::GenISA_storeraw_indexed ||
+                    intrin->getIntrinsicID() == GenISAIntrinsic::GenISA_PredicatedLoad ||
+                    intrin->getIntrinsicID() == GenISAIntrinsic::GenISA_PredicatedStore)
                 {
                     m_WorkList.push_back(inst);
                 }
@@ -665,6 +725,54 @@ bool VectorProcess::runOnFunction(Function& F)
     return changed;
 }
 
+Value* VectorProcess::ProcessMergeValue(Instruction *Inst, Value* V, Type* NewTy, Type* NewIntEType, Type* NewIntTy) const
+{
+    // if V is a zero initializer, undef or poison value, we just need to create
+    // corresponding value of NewTy.
+    if (isa<ConstantAggregateZero>(V)) {
+        if(IGCLLVM::FixedVectorType *NewVTy = dyn_cast<IGCLLVM::FixedVectorType>(NewTy))
+            return ConstantAggregateZero::get(NewVTy);
+        else
+            return Constant::getNullValue(NewTy);
+    }
+
+    if (isa<PoisonValue>(V))
+        return PoisonValue::get(NewTy);
+
+    if (isa<UndefValue>(V))
+        return UndefValue::get(NewTy);
+
+    IRBuilder<> Builder(Inst);
+
+    Type *Ty = V->getType();
+    IGCLLVM::FixedVectorType* const VTy = dyn_cast<IGCLLVM::FixedVectorType>(Ty);
+    uint32_t nelts = VTy ? int_cast<uint32_t>(VTy->getNumElements()) : 1;
+    Type* eTy = VTy ? VTy->getElementType() : Ty;
+
+    if (eTy->isPointerTy())
+    {
+        // cannot bitcast ptr to int; First, PtrToInt cast
+        // then bitcast int (scalar or vector) to the new type.
+        if (VTy)
+        {
+            // need a vector ptrtoint, scalarize:
+            auto* oldV = V;
+            V = UndefValue::get(NewIntTy);
+            for (unsigned i = 0; i < nelts; ++i)
+            {
+                auto* EE = Builder.CreateExtractElement(oldV, i);
+                auto* PTI = Builder.CreatePtrToInt(EE, NewIntEType);
+                V = Builder.CreateInsertElement(V, PTI, i);
+            }
+        }
+        else
+        {
+            V = Builder.CreatePtrToInt(V, NewIntTy);
+        }
+    }
+
+    return Builder.CreateBitCast(V, NewTy);
+}
 
 //
 // getInfo maps vector to the right messages. It assume that a vector

@@ -1,19 +1,14 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (C) 2017-2023 Intel Corporation
+Copyright (C) 2017-2025 Intel Corporation
 
 SPDX-License-Identifier: MIT
 
 ============================= end_copyright_notice ===========================*/
 
 #include "common/LLVMWarningsPush.hpp"
-#include <llvm/Support/ScaledNumber.h>
 #include "llvm/IR/DataLayout.h"
 #include "llvm/ADT/StringExtras.h"
-#include "llvm/Option/ArgList.h"
-#include "llvm/Support/StringSaver.h"
-#include "llvm/Support/CommandLine.h"
-#include "llvmWrapper/Option/OptTable.h"
 #include "common/LLVMWarningsPop.hpp"
 #include "AdaptorCommon/ImplicitArgs.hpp"
 #include "Compiler/CISACodeGen/ShaderCodeGen.hpp"
@@ -21,14 +16,10 @@ SPDX-License-Identifier: MIT
 #include "Compiler/CISACodeGen/messageEncoding.hpp"
 #include "Compiler/CISACodeGen/DebugInfo.hpp"
 #include "Compiler/CISACodeGen/CSWalkOrder.hpp"
-#include "Compiler/Optimizer/OpenCLPasses/ResourceAllocator/ResourceAllocator.hpp"
-#include "Compiler/Optimizer/OpenCLPasses/ProgramScopeConstants/ProgramScopeConstantAnalysis.hpp"
-#include "Compiler/Optimizer/OpenCLPasses/LocalBuffers/InlineLocalsResolution.hpp"
 #include "Compiler/Optimizer/OpenCLPasses/KernelArgs/KernelArgs.hpp"
 #include "Compiler/CISACodeGen/EmitVISAPass.hpp"
 #include "Compiler/Optimizer/OCLBIUtils.h"
 #include "AdaptorOCL/OCL/KernelAnnotations.hpp"
-#include "common/allocator.h"
 #include "common/igc_regkeys.hpp"
 #include "common/Stats.hpp"
 #include "common/SystemThread.h"
@@ -38,7 +29,6 @@ SPDX-License-Identifier: MIT
 #include "Probe/Assertion.h"
 #include <fstream>
 #include "ZEBinWriter/zebin/source/ZEELFObjectBuilder.hpp"
-#include "igc/Options/Options.h"
 
 /***********************************************************************************
 This file contains the code specific to opencl kernels
@@ -85,6 +75,10 @@ namespace IGC
     }
 
     uint32_t OpenCLProgramContext::getExpGRFSize() const {
+        if (IGC_GET_FLAG_VALUE(TotalGRFNum))
+        {
+            return IGC_GET_FLAG_VALUE(TotalGRFNum);
+        }
         if (m_InternalOptions.IntelExpGRFSize) {
             return m_InternalOptions.expGRFSize;
         }
@@ -123,8 +117,8 @@ namespace IGC
             (m_DriverInfo.supportsAutoGRFSelection() ||
                 m_InternalOptions.IntelEnableAutoLargeGRF ||
                 m_Options.IntelEnableAutoLargeGRF)
-            || platform.supportsVRT() && IGC_IS_FLAG_ENABLED(EnableVRT)
-            ) && !m_InternalOptions.Intel128GRFPerThread &&
+            || supportsVRT())
+            && !m_InternalOptions.Intel128GRFPerThread &&
             !m_Options.Intel128GRFPerThread &&
             !m_InternalOptions.Intel256GRFPerThread &&
             !m_Options.Intel256GRFPerThread
@@ -138,8 +132,7 @@ namespace IGC
 
     bool OpenCLProgramContext::forceGlobalMemoryAllocation() const
     {
-        return m_InternalOptions.ForceGlobalMemoryAllocation ||
-            (m_hasGlobalInPrivateAddressSpace && enableZEBinary());
+        return m_InternalOptions.ForceGlobalMemoryAllocation || m_hasGlobalInPrivateAddressSpace;
     }
 
     bool OpenCLProgramContext::allocatePrivateAsGlobalBuffer() const
@@ -221,7 +214,7 @@ namespace IGC
                 auto& annotatnions = funcMD.UserAnnotations;
                 auto output = shader->ProgramOutput();
 
-                if (hasSpills(output->m_scratchSpaceUsedBySpills) &&
+                if (hasSpills(output->m_scratchSpaceUsedBySpills, output->m_numGRFTotal) &&
                     std::find(annotatnions.begin(), annotatnions.end(), "igc-do-not-spill") != annotatnions.end())
                 {
                     std::string msg =
@@ -494,47 +487,8 @@ namespace IGC
         return (ResourceExtensionTypeEnum)argAlloc->extensionType;
     }
 
-    void COpenCLKernel::CreateInlineSamplerAnnotations()
-    {
-        if (m_Context->getModuleMetaData()->FuncMD.find(entry) != m_Context->getModuleMetaData()->FuncMD.end())
-        {
-            FunctionMetaData funcMD = m_Context->getModuleMetaData()->FuncMD.find(entry)->second;
-
-            ResourceAllocMD resAllocMD = funcMD.resAllocMD;
-
-            for (const auto &inlineSamplerMD : resAllocMD.inlineSamplersMD)
-            {
-                auto samplerInput = std::make_unique<iOpenCL::SamplerInputAnnotation>();
-
-                samplerInput->SamplerType = iOpenCL::SAMPLER_OBJECT_TEXTURE;
-                samplerInput->SamplerTableIndex = inlineSamplerMD.index;
-
-                samplerInput->TCXAddressMode = iOpenCL::SAMPLER_TEXTURE_ADDRESS_MODE(inlineSamplerMD.TCXAddressMode);
-                samplerInput->TCYAddressMode = iOpenCL::SAMPLER_TEXTURE_ADDRESS_MODE(inlineSamplerMD.TCYAddressMode);
-                samplerInput->TCZAddressMode = iOpenCL::SAMPLER_TEXTURE_ADDRESS_MODE(inlineSamplerMD.TCZAddressMode);
-                samplerInput->NormalizedCoords = inlineSamplerMD.NormalizedCoords != 0 ? true : false;
-
-                samplerInput->MagFilterType = iOpenCL::SAMPLER_MAPFILTER_TYPE(inlineSamplerMD.MagFilterType);
-                samplerInput->MinFilterType = iOpenCL::SAMPLER_MAPFILTER_TYPE(inlineSamplerMD.MinFilterType);
-                samplerInput->MipFilterType = iOpenCL::SAMPLER_MIPFILTER_TYPE(inlineSamplerMD.MipFilterType);
-                samplerInput->CompareFunc = iOpenCL::SAMPLER_COMPARE_FUNC_TYPE(inlineSamplerMD.CompareFunc);
-
-                samplerInput->BorderColorR = inlineSamplerMD.BorderColorR;
-                samplerInput->BorderColorG = inlineSamplerMD.BorderColorG;
-                samplerInput->BorderColorB = inlineSamplerMD.BorderColorB;
-                samplerInput->BorderColorA = inlineSamplerMD.BorderColorA;
-
-                m_kernelInfo.m_samplerInput.push_back(std::move(samplerInput));
-            }
-
-            m_kernelInfo.m_HasInlineVmeSamplers = funcMD.hasInlineVmeSamplers;
-        }
-    }
-
     void COpenCLKernel::CreateZEInlineSamplerAnnotations()
     {
-        IGC_ASSERT(m_Context->enableZEBinary());
-
         auto getZESamplerAddrMode = [](int addrMode)
         {
             switch (addrMode) {
@@ -596,7 +550,7 @@ namespace IGC
         Type* argType = entry->getFunctionType()->getParamType(argIndex);
         if (argumentIter->hasByValAttr())
         {
-            argType = argType->getContainedType(0);
+            argType = argumentIter->getParamByValType();
         }
 
         result += utostr(m_DL->getTypeAllocSize(argType));
@@ -683,132 +637,6 @@ namespace IGC
         return maxPressure;
     }
 
-    void COpenCLKernel::CreateKernelArgInfo()
-    {
-        auto funcMDIt = m_Context->getModuleMetaData()->FuncMD.find(entry);
-        if (funcMDIt == m_Context->getModuleMetaData()->FuncMD.end())
-            return;
-
-        FunctionMetaData& funcMD = (*funcMDIt).second;
-        uint count = funcMD.m_OpenCLArgAccessQualifiers.size();
-        for (uint i = 0; i < count; ++i)
-        {
-            auto kernelArgInfo = std::make_unique<iOpenCL::KernelArgumentInfoAnnotation>();
-
-            kernelArgInfo->AccessQualifier = getKernelArgAccessQualifier(funcMD, i);
-            kernelArgInfo->AddressQualifier = getKernelArgAddressQualifier(funcMD, i);
-            // ArgNames is not guaranteed to be present if -cl-kernel-arg-info
-            // is not passed in.
-            if (funcMD.m_OpenCLArgNames.size() > i)
-            {
-                kernelArgInfo->ArgumentName = funcMD.m_OpenCLArgNames[i];
-            }
-            kernelArgInfo->TypeName = getKernelArgTypeName(funcMD, i);
-            kernelArgInfo->TypeQualifier = getKernelArgTypeQualifier(funcMD, i);
-
-            m_kernelInfo.m_kernelArgInfo.push_back(std::move(kernelArgInfo));
-        }
-    }
-
-    void COpenCLKernel::CreateKernelAttributeInfo()
-    {
-        FunctionInfoMetaDataHandle funcInfoMD = m_pMdUtils->getFunctionsInfoItem(entry);
-
-        // We need to concatenate 2 things:
-        // (a) LLVM attributes, except nounwind. Why? Because that's how IGIL does it.
-        // (b) The attributes that get translated into SPIR metadata:
-        //     (*) vec_type_hint
-        //     (*) reqd_work_group_size
-        //     (*) work_group_size_hint
-        //
-
-        // Get LLVM function attributes, and erase "nounwind" if necessary
-        m_kernelInfo.m_kernelAttributeInfo = entry->getAttributes().getAsString(-1);
-        size_t nounwindLoc = m_kernelInfo.m_kernelAttributeInfo.find("nounwind");
-        if (nounwindLoc != std::string::npos)
-        {
-            //8 is the length of "nounwind".
-            //If this is not the first attribute, it has a leading space, which we also want to delete.
-            int eraseLen = 8;
-            if (nounwindLoc != 0)
-            {
-                nounwindLoc--;
-                eraseLen++;
-            }
-            m_kernelInfo.m_kernelAttributeInfo.erase(nounwindLoc, eraseLen);
-        }
-
-        // Now fill in the special OCL attributes from the MD
-        VectorTypeHintMetaDataHandle vecTypeHintInfo = funcInfoMD->getOpenCLVectorTypeHint();
-        if (vecTypeHintInfo->hasValue())
-        {
-            m_kernelInfo.m_kernelAttributeInfo += " " + getVecTypeHintString(vecTypeHintInfo);
-        }
-        SubGroupSizeMetaDataHandle subGroupSize = funcInfoMD->getSubGroupSize();
-        if (subGroupSize->hasValue())
-        {
-            m_kernelInfo.m_kernelAttributeInfo += " " + getSubGroupSizeString(subGroupSize);
-        }
-
-        auto it = m_Context->getModuleMetaData()->FuncMD.find(entry);
-        if (it != m_Context->getModuleMetaData()->FuncMD.end())
-        {
-            WorkGroupWalkOrderMD workgroupWalkOrder = it->second.workGroupWalkOrder;
-            if (workgroupWalkOrder.dim0 || workgroupWalkOrder.dim1 || workgroupWalkOrder.dim2)
-            {
-                m_kernelInfo.m_kernelAttributeInfo += " " + getWorkgroupWalkOrderString(workgroupWalkOrder);
-            }
-        }
-
-        ThreadGroupSizeMetaDataHandle threadGroupSize = funcInfoMD->getThreadGroupSize();
-        if (threadGroupSize->hasValue())
-        {
-            m_kernelInfo.m_kernelAttributeInfo += " " + getThreadGroupSizeString(threadGroupSize, false);
-        }
-
-        ThreadGroupSizeMetaDataHandle threadGroupSizeHint = funcInfoMD->getThreadGroupSizeHint();
-        if (threadGroupSizeHint->hasValue())
-        {
-            m_kernelInfo.m_kernelAttributeInfo += " " + getThreadGroupSizeString(threadGroupSizeHint, true);
-        }
-    }
-
-    std::string COpenCLKernel::getThreadGroupSizeString(ThreadGroupSizeMetaDataHandle& threadGroupSize, bool isHint)
-    {
-        std::string threadGroupSizeString = "";
-        if (isHint)
-        {
-            threadGroupSizeString = "work_group_size_hint(";
-        }
-        else
-        {
-            threadGroupSizeString = "reqd_work_group_size(";
-        }
-
-        threadGroupSizeString += utostr(threadGroupSize->getXDim()) + ",";
-        threadGroupSizeString += utostr(threadGroupSize->getYDim()) + ",";
-        threadGroupSizeString += utostr(threadGroupSize->getZDim());
-
-        threadGroupSizeString += ")";
-        return threadGroupSizeString;
-    }
-    std::string COpenCLKernel::getSubGroupSizeString(SubGroupSizeMetaDataHandle& subGroupSize)
-    {
-        std::string subTypeString = "intel_reqd_sub_group_size(";
-        subTypeString += utostr(subGroupSize->getSIMDSize());
-        subTypeString += ")";
-        return subTypeString;
-    }
-    std::string COpenCLKernel::getWorkgroupWalkOrderString(const IGC::WorkGroupWalkOrderMD& workgroupWalkOrder)
-    {
-        std::string subTypeString = "intel_reqd_workgroup_walk_order(";
-        subTypeString += utostr(workgroupWalkOrder.dim0) + ",";
-        subTypeString += utostr(workgroupWalkOrder.dim1) + ",";
-        subTypeString += utostr(workgroupWalkOrder.dim2) + ",";
-        subTypeString += ")";
-        return subTypeString;
-    }
-
     std::string COpenCLKernel::getVecTypeHintTypeString(const VectorTypeHintMetaDataHandle& vecTypeHintInfo) const
     {
         std::string vecTypeString;
@@ -872,14 +700,6 @@ namespace IGC
         return vecTypeString;
     }
 
-    std::string COpenCLKernel::getVecTypeHintString(const VectorTypeHintMetaDataHandle& vecTypeHintInfo) const
-    {
-        std::string vecTypeString = "vec_type_hint(";
-        vecTypeString += getVecTypeHintTypeString(vecTypeHintInfo);
-        vecTypeString += ")";
-        return vecTypeString;
-    }
-
     void COpenCLKernel::CreatePrintfStringAnnotations()
     {
         auto printfStrings = GetPrintfStrings(*entry->getParent());
@@ -919,9 +739,7 @@ namespace IGC
                 zebin::PreDefinedAttrGetter::ArgType::local_size, cur_pos, size);
             break;
         }
-        case KernelArg::ArgType::IMPLICIT_PAYLOAD_HEADER_SHORT: {
-            // PayloadHeader contains global work offset x,y,z
-            // global work offset size is int32x3
+        case KernelArg::ArgType::IMPLICIT_GLOBAL_OFFSET: {
             uint32_t size = iOpenCL::DATA_PARAMETER_DATA_SIZE * 3;
             zebin::ZEInfoBuilder::addPayloadArgumentImplicit(m_kernelInfo.m_zePayloadArgs,
                 zebin::PreDefinedAttrGetter::ArgType::global_id_offset, payloadPosition, size);
@@ -1478,661 +1296,6 @@ namespace IGC
         return true;
     }
 
-    void COpenCLKernel::CreateAnnotations(KernelArg* kernelArg, uint payloadPosition)
-    {
-        KernelArg::ArgType type = kernelArg->getArgType();
-
-        DWORD constantType = iOpenCL::DATA_PARAMETER_TOKEN_UNKNOWN;
-        iOpenCL::POINTER_ADDRESS_SPACE addressSpace = iOpenCL::KERNEL_ARGUMENT_ADDRESS_SPACE_INVALID;
-        FunctionInfoMetaDataHandle funcInfoMD = m_pMdUtils->getFunctionsInfoItem(entry);
-
-        static const DWORD DEFAULT_ARG_NUM = 0;
-        const llvm::Argument* arg = kernelArg->getArg();
-
-        switch (type) {
-
-        case KernelArg::ArgType::IMPLICIT_R0:
-            for (Value::const_user_iterator U = arg->user_begin(), UE = arg->user_end(); U != UE; ++U)
-            {
-                const ExtractElementInst* EEI = dyn_cast<ExtractElementInst>(*U);
-
-                if (EEI)
-                {
-                    const ConstantInt* index = dyn_cast<ConstantInt>(EEI->getIndexOperand());
-                    if (index)
-                    {
-                        uint64_t value = index->getZExtValue();
-                        if (value == 1 || value == 6 || value == 7)
-                        {
-                            // group ids x/y/z
-                            ModuleMetaData* modMD = m_Context->getModuleMetaData();
-                            auto it = modMD->FuncMD.find(entry);
-                            if (it != modMD->FuncMD.end())
-                            {
-                                if (it->second.groupIDPresent == true)
-                                    m_kernelInfo.m_threadPayload.HasGroupID = true;
-                            }
-                            break;
-                        }
-                    }
-                }
-            }
-            break;
-
-        case KernelArg::ArgType::IMPLICIT_PAYLOAD_HEADER:
-        case KernelArg::ArgType::IMPLICIT_PAYLOAD_HEADER_SHORT:
-            // PayloadHeader contains global work offset x,y,z and local size x,y,z -->
-            // total of 6 annotations, 3 of each type
-            // Short PayloadHeader reduces it to only global work offset
-            for (int i = 0; i < (type == KernelArg::ArgType::IMPLICIT_PAYLOAD_HEADER ? 6 : 3); ++i)
-            {
-                auto constInput = std::make_unique<iOpenCL::ConstantInputAnnotation>();
-
-                DWORD sizeInBytes = iOpenCL::DATA_PARAMETER_DATA_SIZE;
-
-                constInput->ConstantType = (i < 3 ?
-                    iOpenCL::DATA_PARAMETER_GLOBAL_WORK_OFFSET :
-                    iOpenCL::DATA_PARAMETER_LOCAL_WORK_SIZE);
-                constInput->Offset = (i % 3) * sizeInBytes;
-                constInput->PayloadPosition = payloadPosition;
-                constInput->PayloadSizeInBytes = sizeInBytes;
-                constInput->ArgumentNumber = DEFAULT_ARG_NUM;
-                m_kernelInfo.m_constantInputAnnotation.push_back(std::move(constInput));
-
-                payloadPosition += sizeInBytes;
-            }
-
-            for (Value::const_user_iterator U = arg->user_begin(), UE = arg->user_end(); U != UE; ++U)
-            {
-                const ExtractElementInst* EEI = dyn_cast<ExtractElementInst>(*U);
-
-                if (EEI)
-                {
-                    const ConstantInt* index = dyn_cast<ConstantInt>(EEI->getIndexOperand());
-                    if (index)
-                    {
-                        uint64_t value = index->getZExtValue();
-                        if (value == 0 || value == 1 || value == 2)
-                        {
-                            // global offset x/y/z
-                            ModuleMetaData* modMD = m_Context->getModuleMetaData();
-                            auto it = modMD->FuncMD.find(entry);
-                            if (it != modMD->FuncMD.end())
-                            {
-                                if (it->second.globalIDPresent)
-                                    m_kernelInfo.m_threadPayload.HasGlobalIDOffset = true;
-                            }
-                            break;
-                        }
-                    }
-                }
-            }
-            break;
-
-        case KernelArg::ArgType::IMPLICIT_BINDLESS_OFFSET:
-            {
-                int argNo = kernelArg->getAssociatedArgNo();
-                if (m_kernelInfo.m_argOffsetMap.find(argNo) != m_kernelInfo.m_argOffsetMap.end())
-                {
-                    std::shared_ptr<iOpenCL::PointerArgumentAnnotation> ptrAnnotation = m_kernelInfo.m_argOffsetMap[argNo];
-                    ptrAnnotation->BindingTableIndex = payloadPosition;
-                    ptrAnnotation->SecondPayloadSizeInBytes = kernelArg->getAllocateSize();
-                }
-            }
-            break;
-
-        case KernelArg::ArgType::PTR_GLOBAL:
-            if (addressSpace == iOpenCL::KERNEL_ARGUMENT_ADDRESS_SPACE_INVALID) {
-                addressSpace = iOpenCL::KERNEL_ARGUMENT_ADDRESS_SPACE_GLOBAL;
-            }
-            // Fall through until PTR_CONSTANT
-        case KernelArg::ArgType::PTR_CONSTANT:
-            if (addressSpace == iOpenCL::KERNEL_ARGUMENT_ADDRESS_SPACE_INVALID) {
-                addressSpace = iOpenCL::KERNEL_ARGUMENT_ADDRESS_SPACE_CONSTANT;
-            }
-            // may reach here from PTR_GLOBAL, PTR_CONSTANT
-            IGC_ASSERT(addressSpace != iOpenCL::KERNEL_ARGUMENT_ADDRESS_SPACE_INVALID);
-
-            {
-                int argNo = kernelArg->getAssociatedArgNo();
-                SOpenCLKernelInfo::SResourceInfo resInfo = getResourceInfo(argNo);
-                unsigned bti = getBTI(resInfo);
-                m_kernelInfo.m_argIndexMap[argNo] = bti;
-                CodeGenContext* pCtx = GetContext();
-                ModuleMetaData* modMD = pCtx->getModuleMetaData();
-                FunctionMetaData* funcMD = &modMD->FuncMD[entry];
-                ResourceAllocMD* resAllocMD = &funcMD->resAllocMD;
-                IGC_ASSERT_MESSAGE(resAllocMD->argAllocMDList.size() > 0, "ArgAllocMDList is empty.");
-                ArgAllocMD* argAlloc = &resAllocMD->argAllocMDList[argNo];
-
-                auto ptrAnnotation = std::make_shared<iOpenCL::PointerArgumentAnnotation>();
-
-                if (argAlloc->type == ResourceTypeEnum::BindlessUAVResourceType)
-                {
-                    ptrAnnotation->IsStateless = false;
-                    ptrAnnotation->IsBindlessAccess = true;
-                }
-                else
-                {
-                    ptrAnnotation->IsStateless = true;
-                    ptrAnnotation->IsBindlessAccess = false;
-                }
-
-                m_kernelInfo.m_argOffsetMap[argNo] = ptrAnnotation;
-
-                ptrAnnotation->HasStatefulAccess = hasStatefulAccess(bti);
-                ptrAnnotation->AddressSpace = addressSpace;
-                ptrAnnotation->ArgumentNumber = argNo;
-                ptrAnnotation->BindingTableIndex = bti;
-                ptrAnnotation->PayloadPosition = payloadPosition;
-                ptrAnnotation->PayloadSizeInBytes = kernelArg->getAllocateSize();
-                ptrAnnotation->LocationIndex = kernelArg->getLocationIndex();
-                ptrAnnotation->LocationCount = kernelArg->getLocationCount();
-                ptrAnnotation->IsEmulationArgument = kernelArg->isEmulationArgument();
-                m_kernelInfo.m_pointerArgument.push_back(ptrAnnotation);
-            }
-            break;
-
-        case KernelArg::ArgType::PTR_LOCAL:
-        {
-            auto locAnnotation = std::make_unique<iOpenCL::LocalArgumentAnnotation>();
-
-            locAnnotation->Alignment = (DWORD)kernelArg->getAlignment();
-            locAnnotation->PayloadPosition = payloadPosition;
-            locAnnotation->PayloadSizeInBytes = kernelArg->getAllocateSize();
-            locAnnotation->ArgumentNumber = kernelArg->getAssociatedArgNo();
-            locAnnotation->LocationIndex = kernelArg->getLocationIndex();
-            locAnnotation->LocationCount = kernelArg->getLocationCount();
-            m_kernelInfo.m_localPointerArgument.push_back(std::move(locAnnotation));
-        }
-        break;
-
-        case KernelArg::ArgType::PTR_DEVICE_QUEUE:
-        {
-            m_kernelInfo.m_executionEnvironment.HasDeviceEnqueue = true;
-            unsigned int argNo = kernelArg->getAssociatedArgNo();
-            SOpenCLKernelInfo::SResourceInfo resInfo = getResourceInfo(argNo);
-            unsigned bti = getBTI(resInfo);
-            m_kernelInfo.m_argIndexMap[argNo] = bti;
-
-            auto ptrAnnotation = std::make_shared<iOpenCL::PointerArgumentAnnotation>();
-
-            ptrAnnotation->HasStatefulAccess = hasStatefulAccess(bti);
-            ptrAnnotation->AddressSpace = iOpenCL::KERNEL_ARGUMENT_ADDRESS_SPACE_DEVICE_QUEUE;
-            ptrAnnotation->ArgumentNumber = argNo;
-            ptrAnnotation->BindingTableIndex = bti;
-            ptrAnnotation->IsStateless = true;
-            ptrAnnotation->PayloadPosition = payloadPosition;
-            ptrAnnotation->PayloadSizeInBytes = kernelArg->getAllocateSize();
-            m_kernelInfo.m_pointerArgument.push_back(ptrAnnotation);
-        }
-        break;
-        case KernelArg::ArgType::CONSTANT_REG:
-        {
-            uint sourceOffsetBase = 0;
-
-            // aggregate arguments may have additional source offsets
-            if (kernelArg->getStructArgOffset() != -1)
-            {
-                sourceOffsetBase = kernelArg->getStructArgOffset();
-            }
-
-            auto constInput = std::make_unique<iOpenCL::ConstantArgumentAnnotation>();
-
-            DWORD sizeInBytes = kernelArg->getAllocateSize();
-
-            constInput->Offset = sourceOffsetBase;
-            constInput->PayloadPosition = payloadPosition;
-            constInput->PayloadSizeInBytes = sizeInBytes;
-            constInput->ArgumentNumber = kernelArg->getAssociatedArgNo();
-            constInput->LocationIndex = kernelArg->getLocationIndex();
-            constInput->LocationCount = kernelArg->getLocationCount();
-            constInput->IsEmulationArgument = kernelArg->isEmulationArgument();
-            m_kernelInfo.m_constantArgumentAnnotation.push_back(std::move(constInput));
-
-            payloadPosition += sizeInBytes;
-        }
-        break;
-
-        case KernelArg::ArgType::IMPLICIT_CONSTANT_BASE:
-        {
-            int argNo = kernelArg->getAssociatedArgNo();
-            SOpenCLKernelInfo::SResourceInfo resInfo = getResourceInfo(argNo);
-            unsigned bti = getBTI(resInfo);;
-            m_kernelInfo.m_argIndexMap[argNo] = bti;
-
-            auto ptrAnnotation = std::make_unique<iOpenCL::PointerInputAnnotation>();
-            ptrAnnotation->HasStatefulAccess = hasStatefulAccess(bti);
-            ptrAnnotation->AddressSpace = iOpenCL::KERNEL_ARGUMENT_ADDRESS_SPACE_CONSTANT;
-            ptrAnnotation->BindingTableIndex = 0xffffffff;
-            ptrAnnotation->IsStateless = true;
-            ptrAnnotation->PayloadPosition = payloadPosition;
-            ptrAnnotation->PayloadSizeInBytes = kernelArg->getAllocateSize();
-            ptrAnnotation->ArgumentNumber = argNo;
-            m_kernelInfo.m_pointerInput.push_back(std::move(ptrAnnotation));
-        }
-        break;
-
-        case KernelArg::ArgType::IMPLICIT_GLOBAL_BASE:
-        {
-            int argNo = kernelArg->getAssociatedArgNo();
-            SOpenCLKernelInfo::SResourceInfo resInfo = getResourceInfo(argNo);
-            unsigned bti = getBTI(resInfo);
-            m_kernelInfo.m_argIndexMap[argNo] = bti;
-
-            auto ptrAnnotation = std::make_unique<iOpenCL::PointerInputAnnotation>();
-            ptrAnnotation->HasStatefulAccess = hasStatefulAccess(bti);
-            ptrAnnotation->AddressSpace = iOpenCL::KERNEL_ARGUMENT_ADDRESS_SPACE_GLOBAL;
-            ptrAnnotation->BindingTableIndex = 0xffffffff;
-            ptrAnnotation->IsStateless = true;
-            ptrAnnotation->PayloadPosition = payloadPosition;
-            ptrAnnotation->PayloadSizeInBytes = kernelArg->getAllocateSize();
-            ptrAnnotation->ArgumentNumber = argNo;
-            m_kernelInfo.m_pointerInput.push_back(std::move(ptrAnnotation));
-        }
-        break;
-
-        case KernelArg::ArgType::IMPLICIT_PRIVATE_BASE:
-        {
-            int argNo = kernelArg->getAssociatedArgNo();
-            SOpenCLKernelInfo::SResourceInfo resInfo = getResourceInfo(argNo);
-            unsigned bti = getBTI(resInfo);
-            m_kernelInfo.m_argIndexMap[argNo] = bti;
-
-            auto ptrAnnotation = std::make_unique<iOpenCL::PrivateInputAnnotation>();
-
-            ptrAnnotation->HasStatefulAccess = hasStatefulAccess(bti);
-            ptrAnnotation->AddressSpace = iOpenCL::KERNEL_ARGUMENT_ADDRESS_SPACE_PRIVATE;
-            ptrAnnotation->ArgumentNumber = argNo;
-            // PerThreadPrivateMemorySize is defined as "Total private memory requirements for each OpenCL work-item."
-            ptrAnnotation->PerThreadPrivateMemorySize = m_perWIStatelessPrivateMemSize;
-            ptrAnnotation->BindingTableIndex = bti;
-            ptrAnnotation->IsStateless = true;
-            ptrAnnotation->PayloadPosition = payloadPosition;
-            ptrAnnotation->PayloadSizeInBytes = kernelArg->getAllocateSize();
-            m_kernelInfo.m_pointerInput.push_back(std::move(ptrAnnotation));
-        }
-        break;
-
-        case KernelArg::ArgType::IMPLICIT_ARG_BUFFER:
-        {
-            constantType = kernelArg->getDataParamToken();
-            IGC_ASSERT(constantType != iOpenCL::DATA_PARAMETER_TOKEN_UNKNOWN);
-
-            auto constInput = std::make_unique<iOpenCL::ConstantInputAnnotation>();
-
-            DWORD sizeInBytes = kernelArg->getAllocateSize();
-            constInput->ConstantType = constantType;
-            constInput->Offset = sizeInBytes;
-            constInput->PayloadPosition = payloadPosition;
-            constInput->PayloadSizeInBytes = sizeInBytes;
-            constInput->ArgumentNumber = DEFAULT_ARG_NUM;
-            m_kernelInfo.m_constantInputAnnotation.push_back(std::move(constInput));
-
-            break;
-        }
-
-        case KernelArg::ArgType::IMPLICIT_NUM_GROUPS:
-        case KernelArg::ArgType::IMPLICIT_GLOBAL_SIZE:
-        case KernelArg::ArgType::IMPLICIT_LOCAL_SIZE:
-        case KernelArg::ArgType::IMPLICIT_ENQUEUED_LOCAL_WORK_SIZE:
-        case KernelArg::ArgType::IMPLICIT_STAGE_IN_GRID_ORIGIN:
-        case KernelArg::ArgType::IMPLICIT_STAGE_IN_GRID_SIZE:
-
-            constantType = kernelArg->getDataParamToken();
-            IGC_ASSERT(constantType != iOpenCL::DATA_PARAMETER_TOKEN_UNKNOWN);
-
-            for (int i = 0; i < 3; ++i)
-            {
-                auto constInput = std::make_unique<iOpenCL::ConstantInputAnnotation>();
-
-                DWORD sizeInBytes = iOpenCL::DATA_PARAMETER_DATA_SIZE;
-
-                constInput->ConstantType = constantType;
-                constInput->Offset = i * sizeInBytes;
-                constInput->PayloadPosition = payloadPosition;
-                constInput->PayloadSizeInBytes = sizeInBytes;
-                constInput->ArgumentNumber = DEFAULT_ARG_NUM;
-                m_kernelInfo.m_constantInputAnnotation.push_back(std::move(constInput));
-
-                payloadPosition += sizeInBytes;
-            }
-
-            if (type == KernelArg::ArgType::IMPLICIT_STAGE_IN_GRID_ORIGIN)
-                m_kernelInfo.m_threadPayload.HasStageInGridOrigin = true;
-            else if (type == KernelArg::ArgType::IMPLICIT_STAGE_IN_GRID_SIZE)
-                m_kernelInfo.m_threadPayload.HasStageInGridSize = true;
-
-            break;
-
-        case KernelArg::ArgType::IMPLICIT_IMAGE_HEIGHT:
-        case KernelArg::ArgType::IMPLICIT_IMAGE_WIDTH:
-        case KernelArg::ArgType::IMPLICIT_IMAGE_DEPTH:
-        case KernelArg::ArgType::IMPLICIT_IMAGE_NUM_MIP_LEVELS:
-        case KernelArg::ArgType::IMPLICIT_IMAGE_CHANNEL_DATA_TYPE:
-        case KernelArg::ArgType::IMPLICIT_IMAGE_CHANNEL_ORDER:
-        case KernelArg::ArgType::IMPLICIT_IMAGE_SRGB_CHANNEL_ORDER:
-        case KernelArg::ArgType::IMPLICIT_IMAGE_ARRAY_SIZE:
-        case KernelArg::ArgType::IMPLICIT_IMAGE_NUM_SAMPLES:
-        case KernelArg::ArgType::IMPLICIT_SAMPLER_ADDRESS:
-        case KernelArg::ArgType::IMPLICIT_SAMPLER_NORMALIZED:
-        case KernelArg::ArgType::IMPLICIT_SAMPLER_SNAP_WA:
-        case KernelArg::ArgType::IMPLICIT_FLAT_IMAGE_BASEOFFSET:
-        case KernelArg::ArgType::IMPLICIT_FLAT_IMAGE_HEIGHT:
-        case KernelArg::ArgType::IMPLICIT_FLAT_IMAGE_WIDTH:
-        case KernelArg::ArgType::IMPLICIT_FLAT_IMAGE_PITCH:
-        case KernelArg::ArgType::IMPLICIT_DEVICE_ENQUEUE_DATA_PARAMETER_OBJECT_ID:
-        case KernelArg::ArgType::IMPLICIT_DEVICE_ENQUEUE_DISPATCHER_SIMD_SIZE:
-        case KernelArg::ArgType::IMPLICIT_BUFFER_OFFSET:
-        case KernelArg::ArgType::IMPLICIT_BUFFER_SIZE:
-            constantType = kernelArg->getDataParamToken();
-            IGC_ASSERT(constantType != iOpenCL::DATA_PARAMETER_TOKEN_UNKNOWN);
-            {
-                auto constInput = std::make_unique<iOpenCL::ConstantInputAnnotation>();
-
-                constInput->ConstantType = constantType;
-                constInput->Offset = 0;
-                constInput->PayloadPosition = payloadPosition;
-                constInput->PayloadSizeInBytes = iOpenCL::DATA_PARAMETER_DATA_SIZE;
-                constInput->ArgumentNumber = kernelArg->getAssociatedArgNo();
-                m_kernelInfo.m_constantInputAnnotation.push_back(std::move(constInput));
-            }
-            break;
-
-        case KernelArg::ArgType::IMAGE_1D:
-        case KernelArg::ArgType::BINDLESS_IMAGE_1D:
-        case KernelArg::ArgType::IMAGE_1D_BUFFER:
-        case KernelArg::ArgType::BINDLESS_IMAGE_1D_BUFFER:
-        case KernelArg::ArgType::IMAGE_2D:
-        case KernelArg::ArgType::BINDLESS_IMAGE_2D:
-        case KernelArg::ArgType::IMAGE_3D:
-        case KernelArg::ArgType::BINDLESS_IMAGE_3D:
-        case KernelArg::ArgType::IMAGE_CUBE:
-        case KernelArg::ArgType::BINDLESS_IMAGE_CUBE:
-        case KernelArg::ArgType::IMAGE_CUBE_DEPTH:
-        case KernelArg::ArgType::BINDLESS_IMAGE_CUBE_DEPTH:
-        case KernelArg::ArgType::IMAGE_1D_ARRAY:
-        case KernelArg::ArgType::BINDLESS_IMAGE_1D_ARRAY:
-        case KernelArg::ArgType::IMAGE_2D_ARRAY:
-        case KernelArg::ArgType::BINDLESS_IMAGE_2D_ARRAY:
-        case KernelArg::ArgType::IMAGE_2D_DEPTH:
-        case KernelArg::ArgType::BINDLESS_IMAGE_2D_DEPTH:
-        case KernelArg::ArgType::IMAGE_2D_DEPTH_ARRAY:
-        case KernelArg::ArgType::BINDLESS_IMAGE_2D_DEPTH_ARRAY:
-        case KernelArg::ArgType::IMAGE_2D_MSAA:
-        case KernelArg::ArgType::BINDLESS_IMAGE_2D_MSAA:
-        case KernelArg::ArgType::IMAGE_2D_MSAA_ARRAY:
-        case KernelArg::ArgType::BINDLESS_IMAGE_2D_MSAA_ARRAY:
-        case KernelArg::ArgType::IMAGE_2D_MSAA_DEPTH:
-        case KernelArg::ArgType::BINDLESS_IMAGE_2D_MSAA_DEPTH:
-        case KernelArg::ArgType::IMAGE_2D_MSAA_DEPTH_ARRAY:
-        case KernelArg::ArgType::BINDLESS_IMAGE_2D_MSAA_DEPTH_ARRAY:
-        case KernelArg::ArgType::IMAGE_CUBE_ARRAY:
-        case KernelArg::ArgType::BINDLESS_IMAGE_CUBE_ARRAY:
-        case KernelArg::ArgType::IMAGE_CUBE_DEPTH_ARRAY:
-        case KernelArg::ArgType::BINDLESS_IMAGE_CUBE_DEPTH_ARRAY:
-        {
-            int argNo = kernelArg->getAssociatedArgNo();
-            SOpenCLKernelInfo::SResourceInfo resInfo = getResourceInfo(argNo);
-            m_kernelInfo.m_argIndexMap[argNo] = getBTI(resInfo);
-
-            auto imageInput = std::make_unique<iOpenCL::ImageArgumentAnnotation>();
-
-            imageInput->ArgumentNumber = argNo;
-            imageInput->IsFixedBindingTableIndex = true;
-            imageInput->BindingTableIndex = getBTI(resInfo);
-            imageInput->ImageType = getImageTypeFromKernelArg(*kernelArg);
-            IGC_ASSERT(imageInput->ImageType != iOpenCL::IMAGE_MEMORY_OBJECT_INVALID);
-            imageInput->LocationIndex = kernelArg->getLocationIndex();
-            imageInput->LocationCount = kernelArg->getLocationCount();
-            imageInput->IsEmulationArgument = kernelArg->isEmulationArgument();
-
-            imageInput->AccessedByFloatCoords = kernelArg->getImgAccessedFloatCoords();
-            imageInput->AccessedByIntCoords = kernelArg->getImgAccessedIntCoords();
-            imageInput->IsBindlessAccess = kernelArg->needsAllocation();
-            imageInput->PayloadPosition = payloadPosition;
-
-            switch (resInfo.Type)
-            {
-            case SOpenCLKernelInfo::SResourceInfo::RES_UAV:
-                if (kernelArg->getAccessQual() == IGC::KernelArg::AccessQual::READ_ONLY)
-                    imageInput->Writeable = false;
-                else
-                    imageInput->Writeable = true;
-                break;
-            case SOpenCLKernelInfo::SResourceInfo::RES_SRV:
-                imageInput->Writeable = false;
-                break;
-            default:
-                IGC_ASSERT_MESSAGE(0, "Unknown resource type");
-                break;
-            }
-            m_kernelInfo.m_imageInputAnnotations.push_back(std::move(imageInput));
-
-            if (kernelArg->getAccessQual() == IGC::KernelArg::AccessQual::READ_WRITE)
-            {
-                m_kernelInfo.m_executionEnvironment.HasReadWriteImages = true;
-            }
-        }
-        break;
-
-        case KernelArg::ArgType::SAMPLER:
-        case KernelArg::ArgType::BINDLESS_SAMPLER:
-        {
-            int argNo = kernelArg->getAssociatedArgNo();
-            SOpenCLKernelInfo::SResourceInfo resInfo = getResourceInfo(argNo);
-            m_kernelInfo.m_argIndexMap[argNo] = resInfo.Index;
-
-            auto samplerArg = std::make_unique<iOpenCL::SamplerArgumentAnnotation>();
-            samplerArg->SamplerType = getSamplerTypeFromKernelArg(*kernelArg);
-            samplerArg->ArgumentNumber = argNo;
-            samplerArg->SamplerTableIndex = resInfo.Index;
-            samplerArg->LocationIndex = kernelArg->getLocationIndex();
-            samplerArg->LocationCount = kernelArg->getLocationCount();
-            samplerArg->IsBindlessAccess = kernelArg->needsAllocation();
-            samplerArg->IsEmulationArgument = kernelArg->isEmulationArgument();
-            samplerArg->PayloadPosition = payloadPosition;
-
-            m_kernelInfo.m_samplerArgument.push_back(std::move(samplerArg));
-        }
-        break;
-
-        case KernelArg::ArgType::IMPLICIT_LOCAL_IDS:
-        {
-            m_kernelInfo.m_threadPayload.HasLocalIDx = true;
-            m_kernelInfo.m_threadPayload.HasLocalIDy = true;
-            m_kernelInfo.m_threadPayload.HasLocalIDz = true;
-
-            ModuleMetaData* modMD = m_Context->getModuleMetaData();
-            auto it = modMD->FuncMD.find(entry);
-            if (it != modMD->FuncMD.end())
-            {
-                if (it->second.localIDPresent == true)
-                    m_kernelInfo.m_threadPayload.HasLocalID = true;
-            }
-        }
-        break;
-        case KernelArg::ArgType::RT_STACK_ID:
-        {
-            m_kernelInfo.m_threadPayload.HasRTStackID = true;
-        }
-        break;
-
-        case KernelArg::ArgType::R1:
-            m_kernelInfo.m_threadPayload.UnusedPerThreadConstantPresent = true;
-            break;
-
-        case KernelArg::ArgType::IMPLICIT_SYNC_BUFFER:
-        {
-            int argNo = kernelArg->getAssociatedArgNo();
-            SOpenCLKernelInfo::SResourceInfo resInfo = getResourceInfo(argNo);
-            unsigned bti = getBTI(resInfo);
-            m_kernelInfo.m_argIndexMap[argNo] = bti;
-
-            auto syncBuffer = std::make_unique<iOpenCL::SyncBufferAnnotation>();
-
-            syncBuffer->HasStatefulAccess = hasStatefulAccess(bti);
-            syncBuffer->ArgumentNumber = argNo;
-            syncBuffer->PayloadPosition = payloadPosition;
-            syncBuffer->DataSize = kernelArg->getAllocateSize();
-
-            m_kernelInfo.m_syncBufferAnnotation = std::move(syncBuffer);
-        }
-        break;
-
-        case KernelArg::ArgType::IMPLICIT_RT_GLOBAL_BUFFER:
-        {
-            int argNo = kernelArg->getAssociatedArgNo();
-            SOpenCLKernelInfo::SResourceInfo resInfo = getResourceInfo(argNo);
-            unsigned bti = getBTI(resInfo);
-            m_kernelInfo.m_argIndexMap[argNo] = bti;
-
-            auto rtGlobalBuffer = std::make_unique<iOpenCL::RTGlobalBufferAnnotation>();
-
-            rtGlobalBuffer->HasStatefulAccess = hasStatefulAccess(bti);
-            rtGlobalBuffer->ArgumentNumber = argNo;
-            rtGlobalBuffer->PayloadPosition = payloadPosition;
-            rtGlobalBuffer->DataSize = kernelArg->getAllocateSize();
-
-            m_kernelInfo.m_rtGlobalBufferAnnotation = std::move(rtGlobalBuffer);
-        }
-        break;
-
-        case KernelArg::ArgType::IMPLICIT_PRINTF_BUFFER:
-        {
-            auto printfBuffer = std::make_unique<iOpenCL::PrintfBufferAnnotation>();
-
-            printfBuffer->ArgumentNumber = kernelArg->getAssociatedArgNo();
-            printfBuffer->PayloadPosition = payloadPosition;
-            printfBuffer->DataSize = kernelArg->getAllocateSize();
-            printfBuffer->Index = 0; // This value is not used by Runtime.
-
-            m_kernelInfo.m_printfBufferAnnotation = std::move(printfBuffer);
-        }
-        break;
-
-        case KernelArg::ArgType::IMPLICIT_DEVICE_ENQUEUE_DEFAULT_DEVICE_QUEUE:
-        {
-            m_kernelInfo.m_executionEnvironment.HasDeviceEnqueue = true;
-            int argNo = kernelArg->getAssociatedArgNo();
-            SOpenCLKernelInfo::SResourceInfo resInfo = getResourceInfo(argNo);
-            unsigned bti = getBTI(resInfo);
-            m_kernelInfo.m_argIndexMap[argNo] = bti;
-
-            auto ptrAnnotation = std::make_unique<iOpenCL::PointerInputAnnotation>();
-
-            ptrAnnotation->HasStatefulAccess = hasStatefulAccess(bti);
-            ptrAnnotation->AddressSpace = iOpenCL::ADDRESS_SPACE_INTERNAL_DEFAULT_DEVICE_QUEUE;
-            ptrAnnotation->BindingTableIndex = bti;
-            ptrAnnotation->IsStateless = true;
-            ptrAnnotation->PayloadPosition = payloadPosition;
-            ptrAnnotation->PayloadSizeInBytes = kernelArg->getAllocateSize();
-            ptrAnnotation->ArgumentNumber = argNo;
-            m_kernelInfo.m_pointerInput.push_back(std::move(ptrAnnotation));
-        }
-        break;
-
-        case KernelArg::ArgType::IMPLICIT_DEVICE_ENQUEUE_EVENT_POOL:
-        {
-            m_kernelInfo.m_executionEnvironment.HasDeviceEnqueue = true;
-            int argNo = kernelArg->getAssociatedArgNo();
-            SOpenCLKernelInfo::SResourceInfo resInfo = getResourceInfo(argNo);
-            unsigned bti = getBTI(resInfo);
-            m_kernelInfo.m_argIndexMap[argNo] = bti;
-
-            auto ptrAnnotation = std::make_unique<iOpenCL::PointerInputAnnotation>();
-            ptrAnnotation->HasStatefulAccess = hasStatefulAccess(bti);
-            ptrAnnotation->AddressSpace = iOpenCL::ADDRESS_SPACE_INTERNAL_EVENT_POOL;
-            ptrAnnotation->BindingTableIndex = bti;
-            ptrAnnotation->IsStateless = true;
-            ptrAnnotation->PayloadPosition = payloadPosition;
-            ptrAnnotation->PayloadSizeInBytes = kernelArg->getAllocateSize();
-            ptrAnnotation->ArgumentNumber = argNo;
-            m_kernelInfo.m_pointerInput.push_back(std::move(ptrAnnotation));
-        }
-        break;
-
-        case KernelArg::ArgType::IMPLICIT_WORK_DIM:
-        case KernelArg::ArgType::IMPLICIT_VME_MB_BLOCK_TYPE:
-        case KernelArg::ArgType::IMPLICIT_VME_SUBPIXEL_MODE:
-        case KernelArg::ArgType::IMPLICIT_VME_SAD_ADJUST_MODE:
-        case KernelArg::ArgType::IMPLICIT_VME_SEARCH_PATH_TYPE:
-        case KernelArg::ArgType::IMPLICIT_DEVICE_ENQUEUE_MAX_WORKGROUP_SIZE:
-        case KernelArg::ArgType::IMPLICIT_DEVICE_ENQUEUE_PARENT_EVENT:
-        case KernelArg::ArgType::IMPLICIT_DEVICE_ENQUEUE_PREFERED_WORKGROUP_MULTIPLE:
-            constantType = kernelArg->getDataParamToken();
-            {
-                auto constInput = std::make_unique<iOpenCL::ConstantInputAnnotation>();
-
-                DWORD sizeInBytes = iOpenCL::DATA_PARAMETER_DATA_SIZE;
-
-                constInput->ConstantType = constantType;
-                constInput->Offset = 0;
-                constInput->PayloadPosition = payloadPosition;
-                constInput->PayloadSizeInBytes = sizeInBytes;
-                constInput->ArgumentNumber = DEFAULT_ARG_NUM;
-                m_kernelInfo.m_constantInputAnnotation.push_back(std::move(constInput));
-
-                payloadPosition += sizeInBytes;
-            }
-            break;
-        case KernelArg::ArgType::IMPLICIT_LOCAL_MEMORY_STATELESS_WINDOW_START_ADDRESS:
-        {
-            auto GASStart = std::make_unique<iOpenCL::StartGASAnnotation>();
-            GASStart->Offset = payloadPosition;
-            GASStart->gpuPointerSizeInBytes = kernelArg->getAllocateSize();
-            m_kernelInfo.m_startGAS = std::move(GASStart);
-        }
-        break;
-        case KernelArg::ArgType::IMPLICIT_LOCAL_MEMORY_STATELESS_WINDOW_SIZE:
-        {
-            auto winSizeGAS = std::make_unique<iOpenCL::WindowSizeGASAnnotation>();
-
-            winSizeGAS->Offset = payloadPosition;
-            m_kernelInfo.m_WindowSizeGAS = std::move(winSizeGAS);
-        }
-        break;
-        case KernelArg::ArgType::IMPLICIT_PRIVATE_MEMORY_STATELESS_SIZE:
-        {
-            auto privateMemSize = std::make_unique<iOpenCL::PrivateMemSizeAnnotation>();
-
-            privateMemSize->Offset = payloadPosition;
-            m_kernelInfo.m_PrivateMemSize = std::move(privateMemSize);
-        }
-        break;
-        default:
-            // Do nothing
-            break;
-        }
-
-
-        // DATA_PARAMETER_BUFFER_STATEFUL
-        //   ( SPatchDataParameterBuffer for this token only uses one field: ArgumentNumber )
-        //   Used to indicate that all memory references via a gobal/constant ptr argument are
-        //   converted to stateful (by StatelessToStateful optimization). Thus, the ptr itself
-        //   is no longer referenced at all.
-        //
-        if (IGC_IS_FLAG_ENABLED(EnableStatelessToStateful) &&
-            IGC_IS_FLAG_ENABLED(EnableStatefulToken) &&
-            m_DriverInfo->SupportStatefulToken() &&
-            !m_Context->getModuleMetaData()->compOpt.GreaterThan4GBBufferRequired &&
-            arg &&
-            ((type == KernelArg::ArgType::PTR_GLOBAL &&
-            (arg->use_empty() || !GetHasGlobalStatelessAccess())) ||
-                (type == KernelArg::ArgType::PTR_CONSTANT &&
-                (arg->use_empty() || !GetHasConstantStatelessAccess()))))
-        {
-            auto constInput = std::make_unique<iOpenCL::ConstantInputAnnotation>();
-
-            constInput->ConstantType = iOpenCL::DATA_PARAMETER_BUFFER_STATEFUL;
-            constInput->Offset = 0;
-            constInput->PayloadPosition = payloadPosition;
-            constInput->PayloadSizeInBytes = iOpenCL::DATA_PARAMETER_DATA_SIZE;
-            constInput->ArgumentNumber = kernelArg->getAssociatedArgNo(); // used only for this token.
-            m_kernelInfo.m_constantInputAnnotation.push_back(std::move(constInput));
-        }
-    }
-
    iOpenCL::IMAGE_MEMORY_OBJECT_TYPE COpenCLKernel::getImageTypeFromKernelArg(const KernelArg& kernelArg)
    {
        switch(kernelArg.getArgType()) {
@@ -2448,20 +1611,7 @@ namespace IGC
             prevOffset = offset;
 
             // skip unused arguments
-            bool IsUnusedArg =
-                (arg.getArgType() == KernelArg::ArgType::IMPLICIT_BUFFER_OFFSET ||
-                arg.getArgType() == KernelArg::ArgType::IMPLICIT_BINDLESS_OFFSET ||
-                arg.getArgType() == KernelArg::ArgType::IMPLICIT_BUFFER_SIZE) &&
-                arg.getArg()->use_empty();
-
-            if (IGC_IS_FLAG_ENABLED(RemoveUnusedIdImplicitArguments))
-            {
-                IsUnusedArg |=
-                    (arg.getArgType() == KernelArg::ArgType::IMPLICIT_PAYLOAD_HEADER || // contains global_id_offset
-                    arg.getArgType() == KernelArg::ArgType::IMPLICIT_PAYLOAD_HEADER_SHORT ||
-                    arg.getArgType() == KernelArg::ArgType::IMPLICIT_ENQUEUED_LOCAL_WORK_SIZE) &&
-                    arg.getArg()->use_empty();
-            }
+            bool IsUnusedArg = isUnusedArg(arg);
 
             // Runtime Values should not be processed any further. No annotations shall be created for them.
             // Only added to KernelArgs to enforce correct allocation order.
@@ -2607,17 +1757,15 @@ namespace IGC
 
                 const uint offsetInPayload = offset - constantBufferStart - offsetCorrection;
 
-                // Create annotations for the kernel argument
-                // If an arg is unused, don't generate patch token for it.
-                CreateAnnotations(&arg, offsetInPayload);
-
-                if (m_Context->enableZEBinary()) {
-                    // FIXME: once we transit to zebin completely, we don't need to do
-                    // CreateAnnotations above. Only CreateZEPayloadArguments is required
-                    bool Res = CreateZEPayloadArguments(&arg, offsetInPayload, ptrArgsAttrMap);
-                    IGC_ASSERT_MESSAGE(Res, "ZEBin: unsupported KernelArg Type");
-                    (void) Res;
+                if (arg.getArgType() == KernelArg::ArgType::IMPLICIT_LOCAL_IDS) {
+                    m_kernelInfo.m_threadPayload.HasLocalIDx = true;
+                    m_kernelInfo.m_threadPayload.HasLocalIDy = true;
+                    m_kernelInfo.m_threadPayload.HasLocalIDz = true;
                 }
+
+                bool Res = CreateZEPayloadArguments(&arg, offsetInPayload, ptrArgsAttrMap);
+                IGC_ASSERT_MESSAGE(Res, "ZEBin: unsupported KernelArg Type");
+                (void) Res;
 
                 if (arg.needsAllocation())
                 {
@@ -2670,24 +1818,33 @@ namespace IGC
 
         m_State.m_ConstantBufferLength = iSTD::Align(m_State.m_ConstantBufferLength, getGRFSize());
 
-        // FIXME: skip this function when EnableZEBinary
-        CreateInlineSamplerAnnotations();
-        if (m_Context->enableZEBinary())
-        {
-            CreateZEInlineSamplerAnnotations();
-            // Currently we don't support inline vme sampler in zebin.
-            // assertion tests if we force to EnableZEBinary but encounter inline vme sampler.
-            IGC_ASSERT_MESSAGE(!m_kernelInfo.m_HasInlineVmeSamplers, "ZEBin: Inline vme sampler unsupported");
-        }
-
-        // Handle kernel reflection for patch-token format
-        if (!m_Context->enableZEBinary()) {
-            CreateKernelArgInfo();
-            CreateKernelAttributeInfo();
-        }
+        CreateZEInlineSamplerAnnotations();
+        // Currently we don't support inline vme sampler in zebin.
+        // Assertion tests if we encounter inline vme sampler.
+        IGC_ASSERT_MESSAGE(!m_kernelInfo.m_HasInlineVmeSamplers, "ZEBin: Inline vme sampler unsupported");
 
         // Create annotations for printf string.
         CreatePrintfStringAnnotations();
+    }
+
+    bool COpenCLKernel::isUnusedArg(KernelArg& arg) const
+    {
+        if (!arg.getArg() || !arg.getArg()->use_empty())
+            return false;
+
+        // Implicit arguments related to buffers can be always removed if unused.
+        if (arg.getArgType() == KernelArg::ArgType::IMPLICIT_BUFFER_OFFSET ||
+            arg.getArgType() == KernelArg::ArgType::IMPLICIT_BINDLESS_OFFSET ||
+            arg.getArgType() == KernelArg::ArgType::IMPLICIT_BUFFER_SIZE)
+            return true;
+
+        // When removing unused implicit arguments, assume subroutine calls use implicit arguments.
+        if (!AllowRemovingUnusedImplicitArguments(m_Context) || HasSubroutines())
+            return false;
+
+        return arg.getArgType() == KernelArg::ArgType::IMPLICIT_PAYLOAD_HEADER || // contains global_id_offset
+               arg.getArgType() == KernelArg::ArgType::IMPLICIT_GLOBAL_OFFSET ||
+               arg.getArgType() == KernelArg::ArgType::IMPLICIT_ENQUEUED_LOCAL_WORK_SIZE;
     }
 
     bool COpenCLKernel::passNOSInlineData()
@@ -2864,7 +2021,7 @@ namespace IGC
 
         // TODO: need to change misleading HasBarriers to NumberofBarriers
         m_kernelInfo.m_executionEnvironment.HasBarriers = m_State.GetBarrierNumber();
-        m_kernelInfo.m_executionEnvironment.HasSample = m_State.GetHasSample();
+        m_kernelInfo.m_executionEnvironment.HasSample = m_State.GetHasSampleGather4();
         m_kernelInfo.m_executionEnvironment.DisableMidThreadPreemption = GetDisableMidThreadPreemption();
         m_kernelInfo.m_executionEnvironment.SubgroupIndependentForwardProgressRequired =
             m_Context->getModuleMetaData()->compOpt.SubgroupIndependentForwardProgressRequired;
@@ -2934,10 +2091,14 @@ namespace IGC
         m_kernelInfo.m_executionEnvironment.UseBindlessMode = m_Context->m_InternalOptions.UseBindlessMode;
         m_kernelInfo.m_executionEnvironment.HasStackCalls = HasStackCalls();
 
-        if (m_Context->enableZEBinary()) {
-            FillZEKernelArgInfo();
-            FillZEUserAttributes(funcInfoMD);
+
+        if (m_Context->m_DriverInfo.getLscStoresWithNonDefaultL1CacheControls())
+        {
+            m_kernelInfo.m_executionEnvironment.HasLscStoresWithNonDefaultL1CacheControls = m_State.GetHasLscStoresWithNonDefaultL1CacheControls();
         }
+
+        FillZEKernelArgInfo();
+        FillZEUserAttributes(funcInfoMD);
     }
 
     void COpenCLKernel::RecomputeBTLayout()
@@ -3039,12 +2200,6 @@ namespace IGC
         }
     }
 
-    bool COpenCLKernel::hasStatefulAccess(unsigned bti)
-    {
-        bool btiAssigned = (bti != 0xffffffff);
-        return btiAssigned;
-    }
-
     void CollectProgramInfo(OpenCLProgramContext* ctx)
     {
         MetaDataUtils mdUtils(ctx->getModule());
@@ -3068,20 +2223,17 @@ namespace IGC
 
             ctx->m_programInfo.m_initConstantAnnotation = std::move(initConstant);
 
-            if (ctx->enableZEBinary())
-            {
-                // String literals
-                auto& ipsbStringMDHandle = modMD->inlineBuffers[InlineProgramScopeBufferType::ConstantStrings];
-                std::unique_ptr<iOpenCL::InitConstantAnnotation> initStringConstant(new iOpenCL::InitConstantAnnotation());
-                initStringConstant->Alignment = ipsbStringMDHandle.alignment;
-                initStringConstant->AllocSize = ipsbStringMDHandle.allocSize;
+            // String literals
+            auto& ipsbStringMDHandle = modMD->inlineBuffers[InlineProgramScopeBufferType::ConstantStrings];
+            std::unique_ptr<iOpenCL::InitConstantAnnotation> initStringConstant(new iOpenCL::InitConstantAnnotation());
+            initStringConstant->Alignment = ipsbStringMDHandle.alignment;
+            initStringConstant->AllocSize = ipsbStringMDHandle.allocSize;
 
-                bufferSize = (ipsbStringMDHandle.Buffer).size();
-                initStringConstant->InlineData.resize(bufferSize);
-                memcpy_s(initStringConstant->InlineData.data(), bufferSize, ipsbStringMDHandle.Buffer.data(), bufferSize);
+            bufferSize = (ipsbStringMDHandle.Buffer).size();
+            initStringConstant->InlineData.resize(bufferSize);
+            memcpy_s(initStringConstant->InlineData.data(), bufferSize, ipsbStringMDHandle.Buffer.data(), bufferSize);
 
-                ctx->m_programInfo.m_initConstantStringAnnotation = std::move(initStringConstant);
-            }
+            ctx->m_programInfo.m_initConstantStringAnnotation = std::move(initStringConstant);
         }
 
         if (modMD->inlineBuffers[InlineProgramScopeBufferType::Globals].allocSize)
@@ -3275,7 +2427,7 @@ namespace IGC
             return RetryType::NO_Retry_Pick_Prv;
         }
         else if (
-            !ctx->hasSpills(pOutput->m_scratchSpaceUsedBySpills) ||
+            !ctx->hasSpills(pOutput->m_scratchSpaceUsedBySpills, pOutput->m_numGRFTotal) ||
             ctx->getModuleMetaData()->compOpt.OptDisable ||
             ctx->m_retryManager.IsLastTry() ||
             (!ctx->m_retryManager.kernelSkip.empty() &&
@@ -3469,7 +2621,14 @@ namespace IGC
 
         if (ctx->platform.getMinDispatchMode() == SIMDMode::SIMD16)
         {
-            bool abortOnSpills = IGC_GET_FLAG_VALUE(AllowSIMD16DropForXE2) && ctx->platform.isCoreXE2() && (ctx->getModuleMetaData()->csInfo.forcedSIMDSize != 32);
+            bool abortOnSpills =
+                IGC_GET_FLAG_VALUE(AllowSIMD16DropForXE2) &&
+                ctx->platform.isCoreXE2() &&
+                (ctx->getModuleMetaData()->csInfo.forcedSIMDSize != 32);
+            abortOnSpills |=
+                IGC_GET_FLAG_VALUE(AllowSIMD16DropForXE3) &&
+                ctx->platform.isCoreXE3() &&
+                (ctx->getModuleMetaData()->csInfo.forcedSIMDSize != 32);
             AddCodeGenPasses(*ctx, shaders, Passes, SIMDMode::SIMD32, abortOnSpills);
             AddCodeGenPasses(*ctx, shaders, Passes, SIMDMode::SIMD16, false);
             ctx->SetSIMDInfo(SIMD_SKIP_HW, SIMDMode::SIMD8, ShaderDispatchMode::NOT_APPLICABLE);
@@ -3498,10 +2657,6 @@ namespace IGC
         if (ctx->m_retryManager.IsFirstTry())
         {
             CollectProgramInfo(ctx);
-            if (!ctx->enableZEBinary())
-            {
-                ctx->m_programOutput.CreateProgramScopePatchStream(ctx->m_programInfo);
-            }
         }
 
         MetaDataUtils* pMdUtils = ctx->getMetaDataUtils();
@@ -3713,8 +2868,21 @@ namespace IGC
         // 1. Compile only that SIMD mode and nothing else
         // 2. Compile that SIMD mode even if it is not profitable, i.e. even if compileThisSIMD() returns false for it.
         //    So, don't bother checking profitability for it
-        if (m_Context->getModuleMetaData()->csInfo.forcedSIMDSize != 0)
+
+        unsigned char forcedSIMDSize = m_Context->getModuleMetaData()->csInfo.forcedSIMDSize;
+
+        if (forcedSIMDSize != 0)
         {
+            // Check if forced SIMD width is smaller than required by used platform. Emit error when true.
+            if (m_Context->platform.getMinDispatchMode() == SIMDMode::SIMD16 && forcedSIMDSize < 16)
+            {
+                m_Context->EmitError((std::string("SIMD size of ") +
+                    std::to_string(forcedSIMDSize) +
+                    std::string(" has been forced when SIMD size of at least 16") +
+                    std::string(" is required on this platform")).c_str(),
+                    &F);
+                return false;
+            }
             // Entered here means driver has requested a specific SIMD mode, which was forced in the regkey ForceOCLSIMDWidth.
             // We return the condition can we compile the given forcedSIMDSize with this simdMode?
             return (
@@ -3727,9 +2895,10 @@ namespace IGC
         }
 
         SIMDStatus simdStatus = SIMDStatus::SIMD_FUNC_FAIL;
+
         if (m_Context->platform.getMinDispatchMode() == SIMDMode::SIMD16)
         {
-            simdStatus = checkSIMDCompileCondsPVC(simdMode, EP, F, hasSyncRTCalls);
+            simdStatus = checkSIMDCompileCondsForMin16(simdMode, EP, F, hasSyncRTCalls);
         }
         else
         {
@@ -3767,7 +2936,7 @@ namespace IGC
         return simdStatus == SIMDStatus::SIMD_PASS;
     }
 
-    SIMDStatus COpenCLKernel::checkSIMDCompileCondsPVC(SIMDMode simdMode, EmitPass& EP, llvm::Function& F, bool hasSyncRTCalls)
+    SIMDStatus COpenCLKernel::checkSIMDCompileCondsForMin16(SIMDMode simdMode, EmitPass& EP, llvm::Function& F, bool hasSyncRTCalls)
     {
         if (simdMode == SIMDMode::SIMD8)
         {
@@ -3793,10 +2962,10 @@ namespace IGC
 
         MetaDataUtils* pMdUtils = EP.getAnalysis<MetaDataUtilsWrapper>().getMetaDataUtils();
         FunctionInfoMetaDataHandle funcInfoMD = pMdUtils->getFunctionsInfoItem(&F);
-        uint32_t simd_size = getReqdSubGroupSize(F, pMdUtils);
+        uint32_t requiredSimdSize = getReqdSubGroupSize(F, pMdUtils);
 
         // there is a requirement for specific compilation size, we can't abort on simd32
-        if (simd_size != 0)
+        if (requiredSimdSize != 0)
             EP.m_canAbortOnSpill = false;
 
         bool hasSubGroupForce = hasSubGroupIntrinsicPVC(F);
@@ -3808,7 +2977,7 @@ namespace IGC
         bool hasSubroutine = FG && !FG->isSingleIgnoringStackOverflowDetection() && !hasStackCall && !isIndirectGroup;
         bool forceLowestSIMDForStackCalls = IGC_IS_FLAG_ENABLED(ForceLowestSIMDForStackCalls) && (hasStackCall || isIndirectGroup);
 
-        if (simd_size == 0)
+        if (requiredSimdSize == 0)
         {
             if (maxPressure >= IGC_GET_FLAG_VALUE(ForceSIMDRPELimit) &&
                 simdMode != SIMDMode::SIMD16)
@@ -3833,7 +3002,7 @@ namespace IGC
 
         bool optDisable = this->GetContext()->getModuleMetaData()->compOpt.OptDisable;
 
-        if (optDisable && simd_size == 0) // if simd size not requested in MD
+        if (optDisable && requiredSimdSize == 0) // if simd size not requested in MD
         {
             if (simdMode == SIMDMode::SIMD32)
             {
@@ -3852,30 +3021,12 @@ namespace IGC
             return SIMDStatus::SIMD_PASS;
         }
 
-        if (simd_size)
+        if (requiredSimdSize)
         {
-            if (simd_size != numLanes(simdMode))
+            if (requiredSimdSize != numLanes(simdMode))
             {
-                if (simd_size == 8 && simdMode == SIMDMode::SIMD32)
-                {
-                    // allow for now to avoid NEO build failures
-                    // ToDo: remove once NEO removes all SIMD8 kernel ULTs from driver build
-                    return SIMDStatus::SIMD_PASS;
-                }
                 pCtx->SetSIMDInfo(SIMD_SKIP_HW, simdMode, ShaderDispatchMode::NOT_APPLICABLE);
                 return SIMDStatus::SIMD_FUNC_FAIL;
-            }
-            switch (simd_size)
-            {
-            case 8:
-                //IGC_ASSERT_MESSAGE(0, "Unsupported required sub group size for PVC");
-                break;
-            case 16:
-            case 32:
-                break;
-            default:
-                IGC_ASSERT_MESSAGE(0, "Unsupported required sub group size");
-                break;
             }
         }
         else
@@ -3898,10 +3049,13 @@ namespace IGC
                 return SIMDStatus::SIMD_PASS;
             }
 
-            if (simdMode == SIMDMode::SIMD16 && !pCtx->platform.isCoreXE2() && !hasSubGroupForce && !forceLowestSIMDForStackCalls && !hasSubroutine)
+            if (simdMode == SIMDMode::SIMD16 &&
+                (!pCtx->platform.isCoreXE2() && !pCtx->platform.isCoreXE3()) &&
+                !hasSubGroupForce && !forceLowestSIMDForStackCalls &&
+                !hasSubroutine)
             {
-                pCtx->SetSIMDInfo(SIMD_SKIP_PERF, simdMode, ShaderDispatchMode::NOT_APPLICABLE);
-                return SIMDStatus::SIMD_FUNC_FAIL;
+              pCtx->SetSIMDInfo(SIMD_SKIP_PERF, simdMode, ShaderDispatchMode::NOT_APPLICABLE);
+              return SIMDStatus::SIMD_FUNC_FAIL;
             }
 
             if (simdMode == SIMDMode::SIMD32 && hasSubGroupForce)

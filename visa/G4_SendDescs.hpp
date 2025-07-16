@@ -280,10 +280,10 @@ protected:
 
 public:
   G4_SendDesc(Kind k, SFID _sfid, const IR_Builder &builder)
-      : kind(k), sfid(_sfid), execSize(g4::SIMD_UNDEFINED), irb(builder) {}
+      : kind(k), irb(builder), sfid(_sfid), execSize(g4::SIMD_UNDEFINED) {}
   G4_SendDesc(Kind k, SFID _sfid, G4_ExecSize _execSize,
               const IR_Builder &builder)
-      : kind(k), sfid(_sfid), execSize(_execSize), irb(builder) {}
+      : kind(k), irb(builder), sfid(_sfid), execSize(_execSize) {}
 
   SFID getSFID() const { return sfid; }
 
@@ -297,6 +297,7 @@ public:
   bool isGTWY() const {return getSFID() == SFID::GATEWAY;}
   //
   virtual bool isSLM() const = 0;
+  virtual bool isBTS() const = 0; // BTS stateful
   virtual bool isTyped() const = 0;
   virtual bool isAtomic() const = 0;
   virtual bool isBarrier() const = 0;
@@ -680,6 +681,7 @@ public:
   virtual std::optional<ImmOff> getOffset() const override;
 
   virtual bool isSLM() const override { return isSLMMessage(); }
+  virtual bool isBTS() const override;
   virtual bool isAtomic() const override { return isAtomicMessage(); }
   virtual bool isBarrier() const override;
   virtual bool isFence() const override;

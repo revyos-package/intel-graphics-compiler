@@ -416,7 +416,7 @@ bool HWConformity::reduceExecSize(INST_LIST_ITER iter, G4_BB *bb) {
                     // we ignore it
                     G4_DstRegRegion *newDst =
                         insertMovAfter(iter, dst, dst->getType(), bb);
-                    bool alignTmpDst =
+                    [[maybe_unused]] bool alignTmpDst =
                         builder.tryToAlignOperand(newDst, dstOffset, 16);
                     vISA_ASSERT(alignTmpDst,
                                  "must be able to oword align tmp dst");
@@ -1221,6 +1221,22 @@ bool HWConformity::evenlySplitInst(INST_LIST_ITER iter, G4_BB *bb,
         } else if (srcs[j]->isScalarSrc() || (j == 0 && op == G4_line)) {
           // no need to split, but need to duplicate
           newInst->setSrc(builder.duplicateOperand(srcs[j]), j);
+        } else if (op == G4_movi) {
+          // we create temp region which is in VxH format
+          RegionDesc VxHregionDesc = RegionDesc(UNDEFINED_SHORT, 1, 0);
+
+          auto tempRegion = G4_SrcRegRegion(*srcs[j]->asSrcRegRegion());
+          tempRegion.setRegion(builder, &VxHregionDesc);
+
+          newInst->setSrc(builder.createSubSrcOperand(
+                              &tempRegion, (uint16_t)i, currExSize,
+                              (uint8_t)(tempRegion.getRegion()->vertStride),
+                              (uint8_t)(tempRegion.getRegion()->width)),
+                          j);
+
+          // restore the original region
+          const RegionDesc *rd = builder.getRegionStride1();
+          newInst->getSrc(j)->asSrcRegRegion()->setRegion(builder, rd);
         } else {
           newInst->setSrc(
               builder.createSubSrcOperand(
@@ -1243,7 +1259,7 @@ bool HWConformity::evenlySplitInst(INST_LIST_ITER iter, G4_BB *bb,
       G4_InstOption newMask =
           G4_INST::offsetToMask(currExSize, newMaskOffset, nibOk);
       if (newMask == InstOpt_NoOpt) {
-        bool useMask = inst->getPredicate() || inst->getCondModBase() ||
+        [[maybe_unused]] bool useMask = inst->getPredicate() || inst->getCondModBase() ||
                        (!bb->isAllLaneActive() && !inst->isWriteEnableInst());
         vISA_ASSERT(!useMask,
                      "no legal emask found for the split instruction");

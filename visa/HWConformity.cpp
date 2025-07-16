@@ -1154,26 +1154,7 @@ bool HWConformity::fixOpndType(INST_LIST_ITER it, G4_BB *bb) {
       }
     }
   }
-  if (inst->opcode() == G4_bfn) {
-    // BFN requires its operands to be UD/UW
-    // ToDo: anyway to generalize this to all instructions requiring
-    // signed/unsigned int type? IGA doesn't seem to have API to query supported
-    // types
-    auto dst = inst->getDst();
-    if (dst->getType() == Type_D || dst->getType() == Type_W) {
-      dst->setType(builder, dst->getType() == Type_D ? Type_UD : Type_UW);
-    }
-    auto changeSrcToUnsigned = [this](G4_Operand *opnd) {
-      if (opnd->isSrcRegRegion() &&
-          (opnd->getType() == Type_D || opnd->getType() == Type_W)) {
-        opnd->asSrcRegRegion()->setType(
-            builder, opnd->getType() == Type_D ? Type_UD : Type_UW);
-      }
-    };
-    changeSrcToUnsigned(inst->getSrc(0));
-    changeSrcToUnsigned(inst->getSrc(1));
-    changeSrcToUnsigned(inst->getSrc(2));
-  }
+
   return changed;
 }
 
@@ -1938,6 +1919,20 @@ bool HWConformity::fixIndirectSrcForCompressedInst(INST_LIST_ITER i, G4_BB *bb) 
 }
 
 /*
+ * This function evenly splits movi from simd16 to simd8.
+ */
+bool HWConformity::fixIndirectMoviSimd16ToSimd8(INST_LIST_ITER i, G4_BB *bb) {
+  G4_INST *inst = *i;
+  if (inst->opcode() != G4_movi)
+    return false;
+  if (inst->getExecSize() == g4::SIMD16) {
+    // split the instruction
+    evenlySplitInst(i, bb);
+  }
+  return true;
+}
+
+/*
  * This function checks to see if the instruction's indirect operands
  * potentially require totally more than 8 distinct addr reg sub-registers, and
  * then determines which of the operands to spill into temporary GRFs so
@@ -1956,7 +1951,6 @@ bool HWConformity::fixIndirectOpnd(INST_LIST_ITER i, G4_BB *bb) {
   bool null_src1 = !src1 || (inst->isMath() && src1->isNullReg());
 
   const int addr_reg_max_count = 16;
-  const int addr_reg_size = TypeSize(Type_UW);
   int src_uniq_count = 0;
   int src1_count = 0;
   int src0_count = 0;
@@ -1964,7 +1958,7 @@ bool HWConformity::fixIndirectOpnd(INST_LIST_ITER i, G4_BB *bb) {
   int dst_count = 0;
   bool nospill_src1 = false;
   bool nospill_src0 = false;
-  bool nospill_dst = false;
+  [[maybe_unused]] bool nospill_dst = false;
   bool spill_src1 = false;
   bool spill_src0 = false;
   bool spill_dst = false;
@@ -2343,7 +2337,6 @@ bool HWConformity::fixMULInst(INST_LIST_ITER &i, G4_BB *bb) {
   G4_INST *inst = *i;
   G4_DstRegRegion *dst = inst->getDst();
   G4_ExecSize execSize = inst->getExecSize();
-  bool srcExchanged = false;
 
   if (dst->isAccReg()) {
     return false;
@@ -2362,7 +2355,6 @@ bool HWConformity::fixMULInst(INST_LIST_ITER &i, G4_BB *bb) {
 
   if (src0->isImm() && !src1->isImm()) {
     inst->swapSrc(0, 1);
-    srcExchanged = true;
   }
 
   if (!builder.supportSrcModforMul() &&
@@ -3010,7 +3002,7 @@ bool HWConformity::emulate64bMov(INST_LIST_ITER iter, G4_BB *bb) {
       rgnToUse = builder.getRegionScalar();
     else if (!src0RR->isIndirect()) {
       uint16_t stride = 0;
-      bool legal =
+      [[maybe_unused]] bool legal =
           src0RR->getRegion()->isSingleStride(inst->getExecSize(), stride);
       vISA_ASSERT(legal, "unsupported region");
       if (stride == 1)
@@ -5729,6 +5721,8 @@ void HWConformity::conformBB(G4_BB *bb) {
 
     fixIndirectSrcForCompressedInst(i, bb);
 
+    fixIndirectMoviSimd16ToSimd8(i, bb);
+
 #ifdef _DEBUG
     verifyG4Kernel(kernel, Optimizer::PI_HWConformityChk, false);
 #endif
@@ -6467,6 +6461,12 @@ void HWConformity::chkHWConformity() {
 #ifdef _DEBUG
     verifyG4Kernel(kernel, Optimizer::PI_HWConformityChk, false);
 #endif
+
+    fixBfnInst(bb);
+#ifdef _DEBUG
+    verifyG4Kernel(kernel, Optimizer::PI_HWConformityChk, false);
+#endif
+
     // fix source operand first to avoid redundant MOVs if this fix is done
     // after reducing execution size. used by 3d. Mainly to fix sel with two imm
     // sources
@@ -9597,7 +9597,7 @@ INST_LIST_ITER HWConformity::fixMadwInst(INST_LIST_ITER it, G4_BB *bb) {
     }
     G4_INST *hiMovInst = builder.createMov(execSize, dstHi, hiMovSrc,
                                            madwInst->getMaskOption(), false);
-    hiMovInst->setPredicate(madwInst->getPredicate());
+    hiMovInst->setPredicate(builder.duplicateOperand(madwInst->getPredicate()));
     hiMovInst->setSaturate(madwInst->getSaturate());
     bb->insertAfter(insertIter, hiMovInst);
     maintainDU4TempMov(madwInst, hiMovInst);
@@ -9653,9 +9653,10 @@ INST_LIST_ITER HWConformity::fixMadwInst(INST_LIST_ITER it, G4_BB *bb) {
     // 1, create a new mul inst
     G4_DstRegRegion *accDstOpnd =
         builder.createDst(builder.phyregpool.getAcc0Reg(), 0, 0, 1, tmpType);
-    auto newMul = builder.createBinOp(
-        G4_mul, execSize, accDstOpnd, builder.duplicateOperand(src0),
-        builder.duplicateOperand(src1), origOptions, false);
+    auto newMul =
+        builder.createBinOp(origPredicate, G4_mul, execSize, accDstOpnd,
+                            builder.duplicateOperand(src0),
+                            builder.duplicateOperand(src1), origOptions, false);
     auto startIter = bb->insertBefore(it, newMul);
     madwInst->copyDefsTo(newMul, false);
     // change src1 type to uw type
@@ -9670,7 +9671,7 @@ INST_LIST_ITER HWConformity::fixMadwInst(INST_LIST_ITER it, G4_BB *bb) {
     G4_INST *machInst = builder.createMach(
         execSize, dstHi32, builder.duplicateOperand(src0),
         builder.duplicateOperand(src1), origOptions, tmpType);
-    machInst->setPredicate(origPredicate);
+    machInst->setPredicate(builder.duplicateOperand(origPredicate));
     *it = machInst;
     madwInst->transferUse(machInst);
     madwInst->removeAllDefs();
@@ -9689,21 +9690,27 @@ INST_LIST_ITER HWConformity::fixMadwInst(INST_LIST_ITER it, G4_BB *bb) {
                             tmpType);
       auto movInst = builder.createMov(execSize, dstLo32, accSrcOpndMov,
                                        origOptions, false);
-      movInst->setPredicate(origPredicate);
+      movInst->setPredicate(builder.duplicateOperand(origPredicate));
       endIter = bb->insertAfter(endIter, movInst);
     } else {
       // 3, create a addc inst
+      //    addc instruction can be :ud data type
       auto dstLo32 = builder.createDst(dst->getBase(), dst->getRegOff(),
-                                       dst->getSubRegOff(), 1, tmpType);
+                                       dst->getSubRegOff(), 1,
+                                       getUnsignedType(TypeSize(tmpType)));
       auto accSrcOpnd =
           builder.createSrc(builder.phyregpool.getAcc0Reg(), 0, 0,
                             execSize == g4::SIMD1 ? builder.getRegionScalar()
                                                   : builder.getRegionStride1(),
-                            tmpType);
+                            getUnsignedType(TypeSize(tmpType)));
+      auto addcSrc1 = builder.duplicateOperand(src2);
+      if (addcSrc1->isImm())
+        addcSrc1 = builder.createImm(addcSrc1->asImm()->getImm(), Type_UD);
+      else
+        addcSrc1->asSrcRegRegion()->setType(builder, Type_UD);
       auto addcInst = builder.createBinOp(
-          G4_addc, execSize, dstLo32, accSrcOpnd,
-          builder.duplicateOperand(src2), origOptions, false);
-      addcInst->setPredicate(origPredicate);
+          G4_addc, execSize, dstLo32, accSrcOpnd, addcSrc1, origOptions, false);
+      addcInst->setPredicate(builder.duplicateOperand(origPredicate));
       addcInst->setImplAccDst(builder.duplicateOperand(accDstOpnd));
       addcInst->setOptionOn(InstOpt_AccWrCtrl);
       endIter = bb->insertAfter(endIter, addcInst);
@@ -9717,7 +9724,7 @@ INST_LIST_ITER HWConformity::fixMadwInst(INST_LIST_ITER it, G4_BB *bb) {
       auto addInst = builder.createBinOp(
           G4_add, execSize, builder.duplicateOperand(dstHi32),
           builder.duplicateOperand(accSrcOpnd), src1Add, origOptions, false);
-      addInst->setPredicate(origPredicate);
+      addInst->setPredicate(builder.duplicateOperand(origPredicate));
       endIter = bb->insertAfter(endIter, addInst);
     }
 
@@ -9942,5 +9949,49 @@ void HWConformity::fixImmAddrOffsetOOB(INST_LIST_ITER it, G4_BB *bb) {
     bb->insertAfter(it,
                     generateAddrAddInst(srcRR, srcRR->getSubRegOff(),
                                         -immAddrOff, G4_ExecSize(execSize)));
+  }
+}
+
+void HWConformity::fixBfnInst(G4_BB* bb) {
+  INST_LIST_ITER it = bb->begin();
+
+  for (auto iterEnd = bb->end(); it != iterEnd; ++it) {
+    G4_INST *inst = *it;
+    if (inst->opcode() != G4_bfn) {
+      continue;
+    }
+
+    // BFN requires its operands to be UD/UW
+    // ToDo: anyway to generalize this to all instructions requiring
+    // signed/unsigned int type? IGA doesn't seem to have API to query supported
+    // types
+    auto dst = inst->getDst();
+    if (dst->getType() == Type_D || dst->getType() == Type_W) {
+      dst->setType(builder, dst->getType() == Type_D ? Type_UD : Type_UW);
+    }
+
+    // When create visa immediate operand, we will lower immediate type.
+    // For example:
+    // bfn.xd8 (M1_NM, 1) V0042(0,0)<1> 0xffff8089:d 0xffffb4d8:d 0xffff895b:d
+    // lower to:
+    // (W) bfn.0xD8 (1) V0042(0,0)<1>:d  0x8089:w  0xb4d8:w  0x895b:w
+    // In this case, the dst is dword type, the immediate source operand should
+    // be dword as well. Since HW can only support 16b immediate value, we need
+    // to insert mov instruction to resolve it.
+    for (int i = 0; i < inst->getNumSrc(); i++)
+      if (inst->getSrc(i)->isImm() && IS_DTYPE(inst->getDst()->getType()) &&
+          inst->getSrc(i)->getType() == Type_W)
+        inst->setSrc(insertMovBefore(it, i, Type_D, bb), i);
+
+    auto changeSrcToUnsigned = [this](G4_Operand *opnd) {
+      if (opnd->isSrcRegRegion() &&
+          (opnd->getType() == Type_D || opnd->getType() == Type_W)) {
+        opnd->asSrcRegRegion()->setType(
+            builder, opnd->getType() == Type_D ? Type_UD : Type_UW);
+      }
+    };
+    changeSrcToUnsigned(inst->getSrc(0));
+    changeSrcToUnsigned(inst->getSrc(1));
+    changeSrcToUnsigned(inst->getSrc(2));
   }
 }

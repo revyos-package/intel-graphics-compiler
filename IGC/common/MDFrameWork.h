@@ -1,6 +1,6 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (C) 2017-2023 Intel Corporation
+Copyright (C) 2017-2025 Intel Corporation
 
 SPDX-License-Identifier: MIT
 
@@ -22,6 +22,8 @@ SPDX-License-Identifier: MIT
 #include <llvm/ADT/SetVector.h>
 #include "common/LLVMWarningsPop.hpp"
 
+#include "AdaptorCommon/RayTracing/HitGroups.h" // ^MDFramework^: ../AdaptorCommon/RayTracing
+#include "AdaptorCommon/RayTracing/ConstantsEnums.h" // ^MDFramework^: ../AdaptorCommon/RayTracing
 #include "AdaptorCommon/RayTracing/API/MemoryStyleEnum.h" // ^MDFramework^: ../AdaptorCommon/RayTracing/API
 
 namespace llvm
@@ -111,6 +113,16 @@ enum class ShaderTypeMD
         unsigned int QHeight = 0;
         unsigned int MipCount = 0;
     };
+
+// The real declaration is in CodeGenPublicEnums.h.
+// This declaration exists to fool the autogeneration script into generating the relevant parsing code.
+#if 0
+    enum Float_DenormMode
+    {
+        FLOAT_DENORM_FLUSH_TO_ZERO = 0,
+        FLOAT_DENORM_RETAIN,
+    };
+#endif
 
     struct ArgDependencyInfoMD
     {
@@ -256,6 +268,10 @@ enum class ShaderTypeMD
         // existence of this value indicates we are opting into atomic pull tile walk
         // this field carries the uber tile dimensions, which needs to be passed on to the UMD.
         std::optional<std::array<uint32_t, 2>> uberTileDimensions;
+
+        // this fields marks how many hw stacks are needed to satisfy every shader in the module
+        // its std::max of numSyncRTStacks in all shaders
+        uint32_t numSyncRTStacks = 0;
     };
 
     // Info specific to each raytracing shader
@@ -300,6 +316,13 @@ enum class ShaderTypeMD
         // Shaders that satisfy `isPrimaryShaderIdentifier()` can also have
         // a collection of other names that they go by.
         std::vector<std::string> Aliases;
+
+        // this fields marks how many hw stacks the shader needs for its rayqueries
+        // some optimizations might want to know that
+        uint32_t numSyncRTStacks = 0;
+
+        // for continuations used in ReorderThread, this field indicates the maximum value of the coherence hint
+        uint32_t NumCoherenceHintBits = 0;
     };
 
     struct ConstantAddress
@@ -376,6 +399,11 @@ enum class ShaderTypeMD
         bool MadEnable                                  = false;
         bool NoSignedZeros                              = false;
         bool NoNaNs                                     = false;
+        // float 16, float32 and float64 denorm mode
+        Float_DenormMode FloatDenormMode16              = FLOAT_DENORM_FLUSH_TO_ZERO;
+        Float_DenormMode FloatDenormMode32              = FLOAT_DENORM_FLUSH_TO_ZERO;
+        Float_DenormMode FloatDenormMode64              = FLOAT_DENORM_FLUSH_TO_ZERO;
+        Float_DenormMode FloatDenormModeBFTF            = FLOAT_DENORM_FLUSH_TO_ZERO;
 
         // default rounding modes
         unsigned FloatRoundingMode                      = IGC::ROUND_TO_NEAREST_EVEN;
@@ -384,8 +412,9 @@ enum class ShaderTypeMD
         int LoadCacheDefault                            = -1;
         int StoreCacheDefault                           = -1;
 
-        unsigned VISAPreSchedRPThreshold           = 0;
-        unsigned SetLoopUnrollThreshold            = 0;
+        unsigned VISAPreSchedRPThreshold                = 0;
+        unsigned VISAPreSchedCtrl                       = 0;
+        unsigned SetLoopUnrollThreshold                 = 0;
         bool UnsafeMathOptimizations                    = false;
         bool disableCustomUnsafeOpts                    = false;
         bool disableReducePow                           = false;
@@ -450,6 +479,8 @@ enum class ShaderTypeMD
         bool WaEnableALTModeVisaWA                      = false;
         bool EnableLdStCombineforLoad                   = false;
         bool EnableLdStCombinewithDummyLoad             = false;
+        bool ForceUniformBuffer                         = false;
+        bool ForceUniformSurfaceSampler                 = false;
         bool EnableIndependentSharedMemoryFenceFunctionality = false;
         bool NewSpillCostFunction                       = false;
         bool EnableVRT                                  = false;
@@ -465,9 +496,13 @@ enum class ShaderTypeMD
         bool ForceLinearWalkOnLinearUAV                 = false;
         bool DisableLscSamplerRouting                   = false;
         bool UseBarrierControlFlowOptimization          = false;
-        bool DisableDynamicRQManagement                 = false;
+        bool EnableDynamicRQManagement                  = false;
+        bool WaDisablePayloadCoalescing                 = false;
         unsigned Quad8InputThreshold                    = 0;
         bool UseResourceLoopUnrollNested                = false;
+        bool DisableLoopUnroll                          = false;
+        unsigned ForcePushConstantMode                  = 0;
+        bool UseInstructionHoistingOptimization         = false;
     };
 
     enum class ThreadIDLayout
@@ -488,6 +523,7 @@ enum class ShaderTypeMD
         unsigned char forcedSIMDSize = 0;  // 0 means not forced
         unsigned int forceTotalGRFNum = 0; // 0 means not forced
         unsigned int VISAPreSchedRPThreshold = 0; // 0 means use the default
+        unsigned int VISAPreSchedCtrl = 0; // 0 means use the default
         unsigned int SetLoopUnrollThreshold = 0; // 0 means use the default
         bool forceSpillCompression = false;
         bool allowLowerSimd = false;
@@ -495,8 +531,6 @@ enum class ShaderTypeMD
         bool disableSplitOnSpill = false;
         bool enableNewSpillCostFunction = false;
         bool forceVISAPreSched = false;
-        bool forceUniformBuffer = false;
-        bool forceUniformSurfaceSampler = false;
         // disables dispatch along y and tiled order optimizations
         bool disableLocalIdOrderOptimizations = false;
         // force disables dispatch along y optimization
@@ -706,8 +740,20 @@ enum class ShaderTypeMD
 
     struct SPIRVCapabilities
     {
-
         bool globalVariableDecorationsINTEL = false;
+    };
+
+    struct SPIRVExtensions
+    {
+        // IGC must distinguish between SPIRV compilations that utilize standard
+        // OpenCL images and those using Bindless images from the
+        // SPV_INTEL_bindless_images extension. Currently, OpenCL images require the
+        // valueTracker to be addressed using the bindless addressing model. This is
+        // because IGC needs to insert a bindlessOffset as an implicit argument for
+        // tracked images. Conversely, for bindless images originating from
+        // SPV_INTEL_bindless_images, the bindlessOffset is supplied by the user as a
+        // kernel argument, eliminating the need for IGC to perform tracking.
+        bool spvINTELBindlessImages = false;
     };
 
     //metadata for the entire module
@@ -742,6 +788,7 @@ enum class ShaderTypeMD
         ShaderData shaderData;
         URBLayoutInfo URBInfo;
         bool UseBindlessImage = false;
+        bool UseBindlessImageWithSamplerTracking = false;
         bool enableRangeReduce = false;
         //when true, compiler enables MatchMad optimization for VS
         bool allowMatchMadOptimizationforVS = false;
@@ -780,6 +827,7 @@ enum class ShaderTypeMD
         std::set<std::string> m_OptsToDisable;
 
         SPIRVCapabilities capabilities;
+        SPIRVExtensions extensions;
 
         std::array<uint64_t, NUM_SHADER_RESOURCE_VIEW_SIZE> m_ShaderResourceViewMcsMask{};
         unsigned int computedDepthMode = 0; //Defaults to 0 meaning depth mode is off
@@ -799,6 +847,8 @@ enum class ShaderTypeMD
 
         llvm::MapVector<llvm::Value*, llvm::Value*> predicationMap;
         llvm::MapVector<llvm::Value*, llvm::Value*> lifeTimeStartMap;
+
+        std::vector<HitGroupInfo> HitGroups;
     };
 
     void serialize(const IGC::ModuleMetaData &moduleMD, llvm::Module* module);
@@ -808,6 +858,7 @@ enum class ShaderTypeMD
     bool isBindless(const IGC::FunctionMetaData &funcMD);
     bool isContinuation(const IGC::FunctionMetaData& funcMD);
     bool isCallStackHandler(const IGC::FunctionMetaData &funcMD);
+
 
     // User annotations query functions
     int extractAnnotatedNumThreads(const IGC::FunctionMetaData& funcMD);

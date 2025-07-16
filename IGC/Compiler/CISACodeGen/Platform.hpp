@@ -54,7 +54,7 @@ bool hasQWAddSupport() const
 bool hasNoInt64Inst() const {
     return m_platformInfo.eProductFamily == IGFX_ICELAKE_LP ||
         m_platformInfo.eProductFamily == IGFX_LAKEFIELD ||
-        m_platformInfo.eProductFamily == IGFX_ELKHARTLAKE ||
+        // m_platformInfo.eProductFamily == IGFX_ELKHARTLAKE || // same enum as JASPERLAKE
         m_platformInfo.eProductFamily == IGFX_JASPERLAKE ||
         m_platformInfo.eProductFamily == IGFX_TIGERLAKE_LP ||
         m_platformInfo.eProductFamily == IGFX_ROCKETLAKE ||
@@ -215,6 +215,10 @@ bool isProductChildOf(PRODUCT_FAMILY product) const
 
 bool isCoreXE2() const {
     return ( m_platformInfo.eRenderCoreFamily == IGFX_XE2_HPG_CORE );
+}
+
+bool isCoreXE3() const {
+    return ( m_platformInfo.eRenderCoreFamily == IGFX_XE3_CORE );
 }
 
 // This function checks if core is child of another core
@@ -389,8 +393,7 @@ unsigned int GetBindlessSamplerSize() const
 
 unsigned int GetLogBindlessSamplerSize() const
 {
-    // Samplers are 16 bytes
-    return 4;
+    return (unsigned int) iSTD::Log2(GetBindlessSamplerSize());
 }
 
 bool SupportCPS() const
@@ -519,6 +522,17 @@ bool hasSamplerSupport() const
 bool hasSamplerFeedbackSurface() const
 {
     return m_platformInfo.eProductFamily >= IGFX_BMG;
+}
+
+unsigned getSurfaceStateSize() const
+{
+  {
+    return 64;
+  }
+}
+
+unsigned int getLogSurfaceSize() const {
+  return (unsigned int)iSTD::Log2(getSurfaceStateSize());
 }
 
 // logical subslice id
@@ -766,6 +780,22 @@ bool supportsZEBin() const
     }
 }
 
+
+bool isIntegratedGraphics() const
+{
+    switch (m_platformInfo.eProductFamily)
+    {
+    case IGFX_DG1:
+    case IGFX_XE_HP_SDV:
+    case IGFX_DG2:
+    case IGFX_PVC:
+    case IGFX_BMG:
+        return false;
+    default:
+        return true;
+    }
+}
+
 bool loosenSimd32occu() const
 {
     if (IGC_GET_FLAG_VALUE(ForceLoosenSimd32Occu) == 2)
@@ -788,6 +818,11 @@ bool supportsTier2VRS() const
 bool supportsSIMD16TypedRW() const
 {
     return isCoreChildOf(IGFX_XE_HPC_CORE);
+}
+
+bool supportsBGRATypedRead() const
+{
+    return isCoreChildOf(IGFX_XE_HP_CORE);
 }
 
 bool supportHWGenerateTID() const
@@ -885,7 +920,7 @@ bool WaPredicatedStackIDRelease() const
 
 // This returns the current maximum size that we recommend for performance.
 // SIMD32 is still allowed and we may relax this in the future.
-SIMDMode getMaxRayQuerySIMDSize() const
+SIMDMode getMaxRayQuerySIMDSize(ShaderType shaderType) const
 {
     if (isCoreChildOf(IGFX_XE_HPG_CORE))
     {
@@ -898,11 +933,11 @@ SIMDMode getMaxRayQuerySIMDSize() const
     }
 }
 
-SIMDMode getPreferredRayQuerySIMDSize() const
+SIMDMode getPreferredRayQuerySIMDSize(ShaderType shaderType) const
 {
     SIMDMode ret = isCoreChildOf(IGFX_XE_HPC_CORE) ? SIMDMode::SIMD16 : SIMDMode::SIMD8;
 
-    IGC_ASSERT_MESSAGE(ret <= getMaxRayQuerySIMDSize(), "Preferred SIMD size for RayQuery must not be greater than MaxRayQuerySIMDSize!");
+    IGC_ASSERT_MESSAGE(ret <= getMaxRayQuerySIMDSize(shaderType), "Preferred SIMD size for RayQuery must not be greater than MaxRayQuerySIMDSize!");
 
     return ret;
 }
@@ -1317,7 +1352,7 @@ bool supportByteALUOperation() const
 bool hasNoFP64Inst() const {
     return m_platformInfo.eProductFamily == IGFX_ICELAKE_LP ||
         m_platformInfo.eProductFamily == IGFX_LAKEFIELD ||
-        m_platformInfo.eProductFamily == IGFX_ELKHARTLAKE ||
+        //m_platformInfo.eProductFamily == IGFX_ELKHARTLAKE || // same enum as JASPERLAKE
         m_platformInfo.eProductFamily == IGFX_JASPERLAKE ||
         m_platformInfo.eProductFamily == IGFX_TIGERLAKE_LP ||
         m_platformInfo.eProductFamily == IGFX_ROCKETLAKE ||
@@ -1501,7 +1536,7 @@ bool hasBarrierControlFlowOpt() const
 
 bool needsLocalScopeEvictTGM() const
 {
-    return true;
+    return IGC_IS_FLAG_ENABLED(ForceLocalScopeEvictTGM);
 }
 
 bool needWaSamplerNoMask() const
@@ -1532,10 +1567,20 @@ bool supportsProgrammableOffsets() const
     return isCoreChildOf(IGFX_XE2_HPG_CORE);
 }
 
-bool isDynamicRayQueryDynamicRayManagementMechanismEnabled() const
+bool supportsRayQueryThrottling() const
 {
-    return (isCoreChildOf(IGFX_XE2_HPG_CORE) &&
-        IGC_IS_FLAG_DISABLED(DisableRayQueryDynamicRayManagementMechanism));
+    return isCoreChildOf(IGFX_XE2_HPG_CORE);
+}
+
+bool enableRayQueryThrottling(bool enableByDefault) const
+{
+    if (!supportsRayQueryThrottling())
+        return false;
+
+    if (IGC_IS_FLAG_SET(OverrideRayQueryThrottling))
+        return IGC_GET_FLAG_VALUE(OverrideRayQueryThrottling);
+
+    return enableByDefault;
 }
 
 bool isSWSubTriangleOpacityCullingEmulationEnabled() const
@@ -1884,12 +1929,16 @@ bool usesDynamicPolyPackingPolicies() const
 
 bool allowDivergentControlFlowRayQueryCheckRelease() const
 {
-    return m_WaTable.Wa_22019804511 != 0;
+    return m_WaTable.Wa_22019804511 == 0;
 }
 
 bool allowProceedBasedApproachForRayQueryDynamicRayManagementMechanism() const
 {
     return IGC_IS_FLAG_DISABLED(DisableProceedBasedApproachForRayQueryDynamicRayManagementMechanism);
+}
+
+bool allowsMoviForType(VISA_Type type) const {
+  return (type == ISA_TYPE_UD || type == ISA_TYPE_D);
 }
 
 };

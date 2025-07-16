@@ -11,8 +11,10 @@ SPDX-License-Identifier: MIT
 //
 // releaseMode - The value is responsible for the availability of the flag in the Linux release
 
+#include "common/EmUtils.h"
+
 DECLARE_IGC_GROUP("VISA optimization")
-DECLARE_IGC_REGKEY(DWORD, VISALTO,                       0x3F, "vISA LTO optimization flags. check LINKER_TYPE for more details", false)
+DECLARE_IGC_REGKEY(DWORD, VISALTO,                       0, "vISA LTO optimization flags. check LINKER_TYPE for more details", false)
 DECLARE_IGC_REGKEY(bool, DisableSendS,                  false, "Setting this to 1/true adds a compiler switch to not generate sends commands, default is to enable sends ", false)
 DECLARE_IGC_REGKEY(bool, ForcePreserveR0,               false, "Setting this to true makes VISA preserve r0 in r0", true)
 DECLARE_IGC_REGKEY(bool, EnablePreemption,              true,  "Enable generating preeemptable code (SKL+)", false)
@@ -20,6 +22,7 @@ DECLARE_IGC_REGKEY(bool, ForcePreemptionWA,             false, "Force generating
 DECLARE_IGC_REGKEY(bool, EnableVISANoSchedule,          false, "Enable VISA No-Schedule", true)
 DECLARE_IGC_REGKEY(bool, EnableVISAPreSched,            true,  "Enable VISA Pre-RA Scheduler", true)
 DECLARE_IGC_REGKEY(DWORD, VISAPreSchedCtrl,             0,     "Configure Pre-RA Scheduler, default(0), logging(1), latency(2), pressure(4)", true)
+DECLARE_IGC_REGKEY(DWORD, VISAPreSchedCtrlDpas,         0,     "Special Pre-RA Scheduler configuration for kernels with dpas", true)
 DECLARE_IGC_REGKEY(bool, ForceVISAPreSched,             false, "Force enabling of VISA Pre-RA Scheduler", false)
 DECLARE_IGC_REGKEY(DWORD, VISAPreSchedRPThreshold,      0,     "Threshold to commit a pre-RA Scheduling without spills, 0 for the default", false)
 DECLARE_IGC_REGKEY(DWORD, VISAPreSchedExtraGRF,         0,     "Bump up GRF number to make pre-RA Scheduling more greedy, 0 for the default", false)
@@ -27,7 +30,8 @@ DECLARE_IGC_REGKEY(DWORD, VISAScheduleStartBBID, 0,  "The ID of BB which will be
 DECLARE_IGC_REGKEY(DWORD, VISAScheduleEndBBID, 0,  "The ID of BB which will be last scheduled", false)
 DECLARE_IGC_REGKEY(DWORD, VISAPostScheduleStartBBID, 0,  "The ID of BB which will be first scheduled", false)
 DECLARE_IGC_REGKEY(DWORD, VISAPostScheduleEndBBID, 0,  "The ID of BB which will be last scheduled", false)
-DECLARE_IGC_REGKEY(DWORD, VISASpillAllowed,             0,     "Spill size allowed without increasing GRF number in VRT", false)
+DECLARE_IGC_REGKEY(DWORD, VISASpillAllowed,             256,   "Spill size allowed without increasing GRF number in VRT", false)
+DECLARE_IGC_REGKEY(DWORD, VISASpillAllowed256GRF,       0,     "Spill size allowed specifically for 256 GRF case", false)
 DECLARE_IGC_REGKEY(DWORD, ForceAllowSmallSpill,         0,     "Allow small spills regardless of SIMD, API, or platform. The spill amount is set below", false)
 DECLARE_IGC_REGKEY(DWORD, SIMD8_SpillThreshold,         2,     "Percentage of instructions allowed for spilling on SIMD8", false)
 DECLARE_IGC_REGKEY(DWORD, SIMD16_SpillThreshold,        1,     "Percentage of instructions allowed for spilling on SIMD16", false)
@@ -65,7 +69,7 @@ DECLARE_IGC_REGKEY(DWORD,DisableHFMath,                 0,     "Disables HF math
 DECLARE_IGC_REGKEY(debugString, VISAOptions,            0,     "Options to vISA. Space-separated options.", true)
 DECLARE_IGC_REGKEY(DWORD,disableIGASyntax,              false, "Disables GEN isa text output using IGA and new syntax.", false)
 DECLARE_IGC_REGKEY(DWORD,disableCompaction,             false, "Disables compaction.", true)
-DECLARE_IGC_REGKEY(DWORD,TotalGRFNum,                   0,     "Total GRF setting for both IGC-LLVM and vISA", false)
+DECLARE_IGC_REGKEY(DWORD,TotalGRFNum,                   0,     "Total GRF setting for both IGC-LLVM and vISA", true)
 DECLARE_IGC_REGKEY(DWORD,TotalGRFNum4CS,                0,     "Total GRF setting for both IGC-LLVM and vISA, for ComputeShader-only experiment.", false)
 DECLARE_IGC_REGKEY(DWORD,ReservedRegisterNum,           0,     "Reserve register number for spill cost testing.", false)
 DECLARE_IGC_REGKEY(bool, ExpandPlane,                   false, "Enable pln to mad macro expansion.", false)
@@ -85,6 +89,7 @@ DECLARE_IGC_REGKEY(DWORD,EnableIndirectInstEnd,         0,     "Enable the indir
 DECLARE_IGC_REGKEY(DWORD,EnableSWSBTokenBarrier,        0,     "Enable force specific instruction as a barrier for software scoreboard generation", true)
 DECLARE_IGC_REGKEY(DWORD,SWSBTokenNum,                  0,     "Total tokens used for SWSB.", true)
 DECLARE_IGC_REGKEY(bool, EnableGroupScheduleForBC,      false,  "Enable bank conflict reduction in scheduling.", true)
+DECLARE_IGC_REGKEY(bool, SchedWithSendSrcReadCycle,     false,  "Scheduling with GRF read cycle from send.", true)
 DECLARE_IGC_REGKEY(bool, EnableIGASWSB,                 false,  "Use IGA for SWSB", true)
 DECLARE_IGC_REGKEY(bool, EnableSWSBStitch,              false,  "Insert dependence resolve for kernel stitching", true)
 DECLARE_IGC_REGKEY(bool, DisableRegDistDep,             false,  "distable regDist dependence", true)
@@ -119,6 +124,7 @@ DECLARE_IGC_REGKEY(bool, Enable16DWURBWrite,            false, "Enable 16 Dword 
 DECLARE_IGC_REGKEY(bool, Enable16OWSLMBlockRW,          true,  "Enable 16 OWord (8 GRF) SLM block read/write message", true)
 DECLARE_IGC_REGKEY(bool, Enable64BMediaBlockRW,         false,  "Enable 64 byte wide media block read/write message", true)
 DECLARE_IGC_REGKEY(bool, EnableUntypedSurfRWofSS,       true,   "Enable untyped surface RW to scratch space. XeHP A0 only.", true)
+DECLARE_IGC_REGKEY(bool, GetSendAfterWriteDistance,      false,  "Get the after write dependence distance", true)
 
 DECLARE_IGC_REGKEY(DWORD, ForceHWThreadNumberPerEU,                   0,     "Total HW thread number per-EU.", false)
 DECLARE_IGC_REGKEY(bool, UseMathWithLUT,                false,  "Use the implementations of cos, cospi, log, sin, sincos, and sinpi with Look-Up Tables (LUT).", false)
@@ -170,6 +176,26 @@ DECLARE_IGC_REGKEY(bool, LoopSinkForce2dBlockReadsMaxSink, true,  "Sink as much 
 DECLARE_IGC_REGKEY(bool, LoopSinkEnableLateRescheduling, false,  "Schedule more aggressively in the end if the needed regpressure is still not achieved", false)
 DECLARE_IGC_REGKEY(bool, LoopSinkSkipDPASMacro,          false,  "If a dpas macro sequence is present, skip load sinking", true)
 
+// Load Splitting
+DECLARE_IGC_REGKEY(bool,  LS_enableLoadSplitting,       false, "Enable load splitting pass.", true)
+DECLARE_IGC_REGKEY(bool,  LS_ignoreSplitThreshold,      false, "If true, the pass splits loads regardless of the register pressure.", false)
+DECLARE_IGC_REGKEY(DWORD, LS_minSplitSize_GRF,          1, "Minimal split size in GRFs.", false)
+DECLARE_IGC_REGKEY(DWORD, LS_minSplitSize_E,            4, "Minimal split size in elements.", false)
+DECLARE_IGC_REGKEY(DWORD, LS_splitThresholdDelta_GRF,   2, "Register pressure must exceed total GRFs by this much for the load splitting to fire up.", false)
+
+// Code Scheduling
+DECLARE_IGC_REGKEY(bool, DisableCodeScheduling,         true, "Disable local code scheduling", true)
+
+DECLARE_IGC_REGKEY(bool, EnableCodeSchedulingIfNoSpills, false, "Try rescheduling also when there are no spills", true)
+DECLARE_IGC_REGKEY(bool, CodeSchedulingForceMWOnly,     false, "Force scheduling to consider only latency", true)
+DECLARE_IGC_REGKEY(bool, CodeSchedulingForceRPOnly,     false, "Force scheduling to consider only register pressure", true)
+DECLARE_IGC_REGKEY(DWORD, CodeSchedulingAttemptsLimit,  5, "Limit the number of scheduling attempts", true)
+DECLARE_IGC_REGKEY(DWORD, CodeSchedulingRPMargin,       20, "Schedule so that the register pressure is less than #grf - margin", true)
+
+DECLARE_IGC_REGKEY(bool, DumpCodeScheduling,            false, "Dump code scheduling", true)
+DECLARE_IGC_REGKEY(DWORD, CodeSchedulingDumpLevel,      1, "Code scheduling dump verbosity level", true)
+DECLARE_IGC_REGKEY(bool, CodeSchedulingRenameAll,       false, "Allow renaming all values for debug purposes", false)
+DECLARE_IGC_REGKEY(debugString, CodeSchedulingConfig,   0,     "Override the default scheduling config. Debug only - no backward compatibility", false)
 
 DECLARE_IGC_REGKEY(bool, EnableLoopHoistConstant,       false, "Enables pass to check for specific loop patterns where variables are constant across all but the last iteration, and hoist them out of the loop.", false)
 DECLARE_IGC_REGKEY(bool, DisableCodeHoisting,           false, "Setting this to 1/true adds a compiler switch to disable code-hoisting", false)
@@ -232,7 +258,7 @@ DECLARE_IGC_REGKEY(debugString, LLVMCommandLine,        0,     "applies LLVM com
 DECLARE_IGC_REGKEY(debugString, SelectiveHashOptions,   0,     "applies options to hash range via string", false)
 DECLARE_IGC_REGKEY(bool, DisableDX9LowPrecision,        true,  "Disables HF in DX9.", false)
 DECLARE_IGC_REGKEY(bool, EnablePingPongTextureOpt,      true,  "Enables the Ping Pong texture optimization which is used only for Compute Shaders for back to back dispatches", false)
-DECLARE_IGC_REGKEY(DWORD,EnableAtomicBranch,            0,     "Bitmask to enable Atomic branch optimization that predicates atomic with if/else. 1: if Val == 0 ignore iadd/sub/umax 0. 2: checks if memory is lower than Val for umax. 4: checks if memory if greater than Val for umin.", false)
+DECLARE_IGC_REGKEY(DWORD,EnableAtomicBranch,            0,     "Bitmask to enable Atomic branch optimization that predicates atomic with if/else. 1: if Val == 0 ignore iadd/sub/umax 0. 2: checks if memory is lower than Val for umax. 4: checks if memory if greater than Val for umin. 8: generate load_ugm for untyped atomics, otherwise ld_lz", false)
 DECLARE_IGC_REGKEY(bool, EnableThreeWayLoadSpiltOpt,    false, "Enable three way load spilt opt.", false)
 DECLARE_IGC_REGKEY(bool, EnableSamplerChannelReturn,    true,  "Setting this to 1/true adds a compiler switch to enable using header to return selective channels from sampler", false)
 DECLARE_IGC_REGKEY(bool, EnableThreadCombiningOpt,      true,  "Enables the thread combining optimization which is used only for Compute Shaders for combining a number of software threads to dispatch smaller number of hardware threads", false)
@@ -279,6 +305,7 @@ DECLARE_IGC_REGKEY(bool, forceFullUrbWriteMask,         true,  "Set Full URB wri
 DECLARE_IGC_REGKEY(DWORD, RovOpt,                           3, "Bitmask for ROV optimizations. 0 for all off, 1 for force fence flush none, 2 for setting LSC_L1UC_L3C_WB, 3 for both opt on", false)
 //DECLARE_IGC_REGKEY(bool, EnablePlatformFenceOpt,        true,  "Force fence optimization", false)
 DECLARE_IGC_REGKEY(bool, EnableLSCFence, true, "Enable LSC Fence in ConvertDXIL for the device has LSC", false)
+DECLARE_IGC_REGKEY(bool, ForceLocalScopeEvictTGM, true, "Forces upgrading fence.tgm.local.none to evictions", false)
 DECLARE_IGC_REGKEY(bool, EnableSLMConstProp,            true,   "Enable SLM constant propagation (compute shader only).", false)
 DECLARE_IGC_REGKEY(bool, EnableStatelessToStateful,    true,  "Enable Stateless To Stateful transformation for global and constant address space in OpenCL kernels", false)
 DECLARE_IGC_REGKEY(bool, EnableStatefulToken,           true,  "Enable generating patch token to indicate a ptr argument is fully converted to stateful (temporary)", false)
@@ -332,6 +359,12 @@ DECLARE_IGC_REGKEY(bool, EnableBarrierControlFlowOptimizationPass, false, "Enabl
 DECLARE_IGC_REGKEY(bool, EnableWaveShuffleIndexSinking, true, "Hoist identical instructions operating on WaveShuffleIndex instructions with the same source and a constant lane/channel", false)
 DECLARE_IGC_REGKEY(DWORD, WaveShuffleIndexSinkingMaxIterations, 3, "Max number of iterations to run iterative WaveShuffleIndexSinking", false)
 DECLARE_IGC_REGKEY(bool, EnableWaveAllJointReduction, false, "Enable Joint Reduction Optimization.", false)
+DECLARE_IGC_REGKEY(bool, EnablePromoteToPredicatedMemoryAccess, false, "Enable predicated load/store if conversion.", true)
+DECLARE_IGC_REGKEY(bool, EnableIntDivRemIncrementReduction, true, "Enable consecutive Int DivRem increment by constant optimization", false)
+DECLARE_IGC_REGKEY(bool, DivRemIncrementCondBranchSimplify, false, "Create branches when simplifying consecutive udiv/urem groups increment dividend by constant greater than 1", false)
+DECLARE_IGC_REGKEY(bool, EnableInstructionHoistingOptimization, false,
+                   "Enable optimization for hoisting latency instructions",
+                   false)
 
 DECLARE_IGC_GROUP("Shader debugging")
 DECLARE_IGC_REGKEY(bool, CopyA0ToDBG0,                  false, " Copy a0 used for extended msg descriptor to dbg0 to help debug", false)
@@ -396,6 +429,7 @@ DECLARE_IGC_REGKEY(bool, EnableDivergentBarrierCheck,   false, "Uses WIAnalysis 
 DECLARE_IGC_REGKEY(bool, EnableBitcastExtractInsertPattern,   true,  "Enable BitcastExtractInsertPattern in CustomSafeOptPass.", true)
 DECLARE_IGC_REGKEY(DWORD, ForceLoosenSimd32Occu,        2,     "Control loosenSimd32occu return value. 0 - off, 1 - on, 2 - platform default", false)
 DECLARE_IGC_REGKEY(bool, ForceFunctionsToNop,           false, "Replace functions with immediate return to help narrow down shaders; use with Options.txt.", false)
+DECLARE_IGC_REGKEY(bool, DisableWarnings,           false, "Disable all warnings generated from IGC compiler", true)
 
 DECLARE_IGC_GROUP("Shader dumping")
 DECLARE_IGC_REGKEY(bool, EnableCosDump, false, "Enable cos dump", true)
@@ -408,11 +442,12 @@ DECLARE_IGC_REGKEY(DWORD, ShaderDumpEnableG4,           false, "same as ShaderDu
 DECLARE_IGC_REGKEY(DWORD, ShaderDumpEnableIGAJSON,      false, "adds IGA JSON output to shader dumps (0 = off, 1 = enabled, 2 = include def/use info but causes longer compile times)", 0)
 DECLARE_IGC_REGKEY(bool, ShaderDumpEnableRAMetadata,   false, "adds RA Metadata file to shader dumps", true)
 DECLARE_IGC_REGKEY(bool,  ShaderDumpInstNamer,          false, "dump all unnamed LLVM IR instruction with variable names 'tmp' which makes easier for shaderoverriding", true)
-DECLARE_IGC_REGKEY(debugString, ShaderDumpFilter,       0,     "Only dump files matching the given regex", true)
+DECLARE_IGC_REGKEY(debugString, ShaderDumpRegexFilter,       0,     "Only dump files matching the given regex", true)
 DECLARE_IGC_REGKEY(bool, DumpZEInfoToConsole,           false, "Dump zeinfo to console", true)
 DECLARE_IGC_REGKEY(debugString, ProgbinDumpFileName,    0,     "Specify filename to use for dumping progbin file to current dir", true)
 DECLARE_IGC_REGKEY(bool, ElfDumpEnable,                 false, "dump ELF file", true)
 DECLARE_IGC_REGKEY(bool, ElfTempDumpEnable,             false, "dump temporary ELF files", true)
+DECLARE_IGC_REGKEY(bool, SpvAsmDumpEnable,              false, "Dump spvasm file", true)
 DECLARE_IGC_REGKEY(debugString, DebugDumpNamePrefix,    0,     "Set a prefix to debug info dump filenames(with path) and drop hash info from them (for testing purposes)", true)
 DECLARE_IGC_REGKEY(bool, ShowFullVectorsInShaderDumps,  false, "print all elements of vectors in ShaderDumps, can dramatically increase ShaderDumps size", true)
 DECLARE_IGC_REGKEY(bool, PrintHexFloatInShaderDumpAsm,  true, "print floats in hex in asm dump", true)
@@ -445,6 +480,7 @@ DECLARE_IGC_REGKEY(bool, DumpTimeStatsPerPass,          false, "Collect Timing o
 DECLARE_IGC_REGKEY(bool, DumpHasNonKernelArgLdSt,       false, "Print if hasNonKernelArg load/store to stderr", true)
 DECLARE_IGC_REGKEY(bool, PrintPsoDdiHash,               true,  "Print psoDDIHash in TimeStats_Shaders.csv file", true)
 DECLARE_IGC_REGKEY(bool, ShaderDataBaseStats,           false, "Enable gathering sends' sizes for shader statistics", false)
+DECLARE_IGC_REGKEY(bool, ShaderSendInfoRework,           false, "Temporary Regkey for reworking sendinfo", false)
 DECLARE_IGC_REGKEY(bool, DumpLoopSink,                  false,  "Dump debug info in LoopSink", false)
 DECLARE_IGC_REGKEY(DWORD, LoopSinkDumpLevel,            1,  "1, 2 or 3: Dump loop sink with the needed verbosity", false)
 DECLARE_IGC_REGKEY(debugString, ShaderDataBaseStatsFilePath, 0, "Path to a file with dumped shader stats additional data e.g. data available during compilation only", false)
@@ -463,7 +499,8 @@ DECLARE_IGC_REGKEY(bool, EnableWriteOldFPToStack,       true,  "Setting this to 
 DECLARE_IGC_REGKEY(bool, ZeBinCompatibleDebugging,      true,  "Setting this to 1 (true) enables embed debug info in zeBinary", true)
 DECLARE_IGC_REGKEY(bool, DebugInfoEnforceAmd64EM,       false, "Enforces elf file with the debug infomation to have eMachine set to AMD64", false)
 DECLARE_IGC_REGKEY(bool, DebugInfoValidation,           false, "Enable optional (strict) checks to detect debug information inconsistencies", false)
-DECLARE_IGC_REGKEY(bool, deadLoopForFloatException,           false, "enable a dead loop if float exception happened", false)
+DECLARE_IGC_REGKEY(bool, deadLoopForFloatException,     false, "enable a dead loop if float exception happened", false)
+DECLARE_IGC_REGKEY(bool, EnableIEEEFloatExceptionTrap,      false, "Enable CR0 IEEE float exception trap bit", true)
 DECLARE_IGC_REGKEY(debugString, ExtraOCLOptions,        0,     "Extra options for OpenCL", true)
 DECLARE_IGC_REGKEY(debugString, ExtraOCLInternalOptions, 0,    "Extra internal options for OpenCL", true)
 DECLARE_IGC_REGKEY(bool, UseVISAVarNames,               false, "Make VISA generate names for virtual variables so they match with dbg file", true)
@@ -505,12 +542,21 @@ DECLARE_IGC_REGKEY(bool,  DisableMergeStore,            false, "[temp]If EnableL
 DECLARE_IGC_REGKEY(DWORD,MaxLiveOutThreshold,           0,     "Max LiveOut Threshold in MemOpt2", false)
 DECLARE_IGC_REGKEY(bool, DisableScalarAtomics,          false, "Disable the Scalar Atomics optimization", false)
 DECLARE_IGC_REGKEY(bool, EnableScalarTypedAtomics,      true, "Enable the Scalar Typed Atomics optimization", false)
+DECLARE_IGC_REGKEY(bool, EnableScalarPhisMerger, true, "enable optimization that merges scalar phi nodes into vector ones", true)
 DECLARE_IGC_REGKEY(bool, EnableVectorizer,              true, "Enable IGCVectorizer pass", true)
 DECLARE_IGC_REGKEY(bool, VectorizerCheckScalarizer,              false, "Add scalariser after vectorizer to check performance", true)
 DECLARE_IGC_REGKEY(DWORD, VectorizerList, -1, "Vectorize only one seed instruction with the provided number", true)
 DECLARE_IGC_REGKEY(bool, EnableVectorEmitter, true, "Enable Vector Emission for a vectorizer", true)
+DECLARE_IGC_REGKEY(bool, VectorizerAllowFPTRUNC, true, "Allow FPTRUNC instructions inside vectorizer", true)
 DECLARE_IGC_REGKEY(bool, VectorizerAllowFDIV, true, "Allow FDIV instructions inside vectorizer", true)
+DECLARE_IGC_REGKEY(bool, VectorizerAllowFMUL, true, "Allow FMUL instructions inside vectorizer", true)
 DECLARE_IGC_REGKEY(bool, VectorizerAllowFADD, true, "Allow FADD instructions inside vectorizer", true)
+DECLARE_IGC_REGKEY(bool, VectorizerAllowFSUB, true, "Allow FSUB instructions inside vectorizer", true)
+DECLARE_IGC_REGKEY(bool, VectorizerAllowEXP2, true, "Allow EXP2 instructions inside vectorizer", true)
+DECLARE_IGC_REGKEY(bool, VectorizerAllowMAXNUM, false, "Allow MAXNUM instructions inside vectorizer", true)
+DECLARE_IGC_REGKEY(bool, VectorizerAllowFMADMatching, true, "Allow FADD and FMUL instructions to be matched later in the pattern match pass", true)
+DECLARE_IGC_REGKEY(bool, VectorizerUniformValueVectorizationEnabled, true, "Vector Emitter emits vectorized instruction for uniform values", true)
+DECLARE_IGC_REGKEY(bool, VectorizerEnablePartialVectorization, true, "Not fully tested option, allows to substitute scalar part with partially vectorized through extract elements", true)
 DECLARE_IGC_REGKEY(bool, DisableOCLScalarizer,          false, "Disable ScalarizeFunction pass in OCL pipeline", true)
 DECLARE_IGC_REGKEY(bool, DisablePHIScalarization,       false, "Disable scalarization of PHINode instructions", true)
 DECLARE_IGC_REGKEY(bool, EnableSelectiveScalarizer,     false,  "enable selective scalarizer on GPGPU path", true)
@@ -626,7 +672,6 @@ DECLARE_IGC_REGKEY(bool, EnablePromotionToSampleMlod,          true,
     "Enables promotion of sample and sample_c to sample_mlod and sample_c_mlod instructions when min lod is present", false)
 DECLARE_IGC_REGKEY(bool, DisableCorrectlyRoundedMacros,     false, "Tmp flag to disable correcly rounded macros for BMG+. This flag will be removed in the future.", false)
 DECLARE_IGC_REGKEY(bool, EnableLscSamplerRouting, true, "Enables conversion of LD to LD_L instructions.", false)
-DECLARE_IGC_REGKEY(bool, ForceLscSamplerRoutingSimulationXe3, false, "Force conversion of LD to LD_L instructions on Xe3 simulation", false)
 DECLARE_IGC_REGKEY(bool, EnableSIMD16ForXe2, false, "Enable CS SIMD16 for Xe2", false)
 DECLARE_IGC_REGKEY(bool, EnableSIMD16ForNonWaveXe2, true, "Enable CS SIMD16 for Xe2 if the shader doesn't have wave", false)
 DECLARE_IGC_REGKEY(DWORD, CheckCSSLMLimit, 2, "Check SLM or threads limit on compute shader to turn on Enable2xGRF on DG2+"\
@@ -664,6 +709,7 @@ DECLARE_IGC_REGKEY_ENUM(LscStoreCacheControlOverride, 0, "Overrides cache-contro
 DECLARE_IGC_REGKEY_ENUM(TgmLoadCacheControlOverride, 0, "Overrides cache-control options for non-intrinsic LSC tgm loads.", LSC_CACHE_CTRL_OPTIONS, true)
 DECLARE_IGC_REGKEY_ENUM(TgmStoreCacheControlOverride, 0, "Overrides cache-control options for non-intrinsic LSC tgm stores.", LSC_CACHE_CTRL_OPTIONS, true)
 DECLARE_IGC_REGKEY(bool, LscForceSpillNonStackcall, false, "Non-stack call kernels that spill will use LSC on DG2+", true)
+DECLARE_IGC_REGKEY(bool, EnableEmitMoreMoviCases, false, "Enables emitting movi for waveShuffle cases using And to keep index within single register.", true)
 DECLARE_IGC_REGKEY_ENUM(ForceRegisterAccessBoundsChecks, -1, \
     "Controls the behavior of RegisterAccessBoundsChecks, the pass that adds runtime bounds-checks for vector-indexing instructions." \
     "-1 - default behavior, the pass is enabled based on the API type or AILs" \
@@ -682,6 +728,11 @@ DECLARE_IGC_REGKEY(bool, DisablePrefetchToL1Cache, false, "Disable prefetch to L
 DECLARE_IGC_REGKEY(bool, ForceXYZworkGroupWalkOrder, true, "Force X/Y/Z WorkGroup walk order", true)
 
 DECLARE_IGC_GROUP("Performance experiments")
+DECLARE_IGC_REGKEY(DWORD, ManageableBarriersMode, 0, "Set the ManageableBarriers mode in which should work" \
+    "0 - Mix Mode of simple and dynamic ManageableBarriers"
+    "1 - Dynamic Mode Only, it will use SLM to store data related with barrier and use them in gateway nbarrier instructions."
+    "2 - Simple Mode Only, it will use constant value in gateway nbarrier instructions (without SLM)."
+    , true)
 DECLARE_IGC_REGKEY(bool, ForceNonCoherentStatelessBTI,  false, "Enable gneeration of non cache coherent stateless messages", false)
 DECLARE_IGC_REGKEY(bool, ForceSendsSupportOnSKLA0,      false, "Allow sends on SKL A0, may be unsafe", false)
 DECLARE_IGC_REGKEY(bool, DisableWaSendSEnableIndirectMsgDesc, false, "Disable a C0 WA WaSendSEnableIndirectMsgDesc, may be unsafe", false)
@@ -690,6 +741,7 @@ DECLARE_IGC_REGKEY(bool, DiableWaSamplerNoMask,         false, "Disable WA Diabl
 DECLARE_IGC_REGKEY(bool, DisableDualBlendSource,        false, "Force the compiler to never use dual blend source messages", false)
 DECLARE_IGC_REGKEY(bool, ForceDisableSrc0Alpha,         false, "Force the compiler to skip sending src0 alpha. Only works if we are sure alpha to coverage and alpha test is off", false)
 DECLARE_IGC_REGKEY(bool, EnableLTO,                     true,  "Enable link time optimization", false)
+DECLARE_IGC_REGKEY(bool, DisableLTOinMesh,              false, "Disable link time optimization in Mesh Shaders only", false)
 DECLARE_IGC_REGKEY(bool, EnableLTODebug,                false, "Enable debug information for LTO", true)
 DECLARE_IGC_REGKEY(DWORD, FunctionControl,              0,     "Control function inlining/subroutine/stackcall. See value defs in igc_flags.hpp.", true)
 DECLARE_IGC_REGKEY(DWORD, SelectiveFunctionControl, 0,  "Selectively enables FunctionControl for a list of line-separated function names in " \
@@ -698,7 +750,7 @@ DECLARE_IGC_REGKEY(DWORD, SelectiveFunctionControl, 0,  "Selectively enables Fun
     "0 - Disable, 1 - Enable and read from SelectiveFunctionControlFile, 2 - Print all callable functions to file" \
     "See comments in ProcessFuncAttributes.cpp for how to use this flag.", true)
 DECLARE_IGC_REGKEY(debugString, SelectiveFunctionControlFile, 0, "Set file with path that'll be used by SelectiveFunctionControl", true)
-DECLARE_IGC_REGKEY(bool, EnableStackCallFuncCall,       false, "If enabled, the default function call mode will be set to stack call. Otherwise, subroutine call is used.", false)
+DECLARE_IGC_REGKEY(bool, EnableStackCallFuncCall,       false, "If enabled, the default function call mode will be set to stack call. Otherwise, subroutine call is used.", true)
 DECLARE_IGC_REGKEY(bool, EnableByValStructArgPromotion, true, "If enabled, byval/sret struct arguments are promoted to pass-by-value if possible.", true)
 DECLARE_IGC_REGKEY(bool, ForceInlineStackCallWithImplArg, false, "If enabled, stack calls that uses implicit args will be force inlined.", true)
 DECLARE_IGC_REGKEY(bool, EnableFunctionCloningControl,  true, "If enabled, limits function cloning by converting stackcalls to indirect calls based on the FunctionCloningThreshold value.", true)
@@ -718,6 +770,7 @@ DECLARE_IGC_REGKEY(bool, EnableThreadCombiningWithNoSLM, false, "Enable thread c
 DECLARE_IGC_REGKEY(DWORD, PrintFunctionSizeAnalysis,     0, "Print analysis data of function sizes", true)
 DECLARE_IGC_REGKEY(DWORD, SubroutineThreshold,          110000, "Minimal kernel size to enable subroutines", false)
 DECLARE_IGC_REGKEY(DWORD, SubroutineInlinerThreshold,   3000, "Subroutine inliner threshold", false)
+DECLARE_IGC_REGKEY(bool, EnableLargeFunctionCallMerging,   true, "Merge mutually exclusive calls to large functions to enable inlining", false)
 DECLARE_IGC_REGKEY(bool, ControlKernelTotalSize,        true, "Control kernel total size", true)
 DECLARE_IGC_REGKEY(bool, StaticProfileGuidedTrimming,   false, "Enable static analysis in the kernel trimming", true)
 DECLARE_IGC_REGKEY(debugString, SelectiveTrimming,      0, "Choose a specific function to trim", true)
@@ -857,11 +910,12 @@ DECLARE_IGC_REGKEY(bool, RematEnable, false, "Enable clone adress arithmetic pas
 DECLARE_IGC_REGKEY(bool, RematLog, false, "Dump Remat Log, usefull for analyzing spills as well", false)
 DECLARE_IGC_REGKEY(bool, RematSameBBScope, false, "Confine rematerialization only to variables within the same BB, we won't pull down values from predeccors", false)
 DECLARE_IGC_REGKEY(bool, RematRespectUniformity, false, "Cutoff computation chain on uniform values", false)
-DECLARE_IGC_REGKEY(bool, RematAllowExtractElement, false, "Allow Extract Element to computation chain", false)
+DECLARE_IGC_REGKEY(bool, RematAllowExtractElement, true, "Allow Extract Element to computation chain", false)
 DECLARE_IGC_REGKEY(bool, RematReassocBefore, false, "Enable short sequence of passes before clone address arithmetic pass to potentially decrese amount of operations that will be rematerialized", false)
 DECLARE_IGC_REGKEY(bool, RematInstCombineBefore, false, "Enable short sequence of passes before clone address arithmetic pass to potentially decrese amount of operations that will be rematerialized", false)
 DECLARE_IGC_REGKEY(bool, RematAddrSpaceCastToUse, true, "Allow rematerialization of inttoptr that are used inside AddrSpaceCastInst", false)
-DECLARE_IGC_REGKEY(bool, RematCallsOperand, false, "Allow rematerialization of inttoptr that are used as call's operand", false)
+DECLARE_IGC_REGKEY(bool, RematCallsOperand, true, "Allow rematerialization of inttoptr that are used as call's operand", false)
+DECLARE_IGC_REGKEY(bool, RematCollectCallArgs, true, "Allow collection of call arguments for rematerialization", false)
 DECLARE_IGC_REGKEY(bool, RematAllowOneUseLoad, false, "Remat allow to move loads that have one use and it's inside the chain", false)
 DECLARE_IGC_REGKEY(bool, RematAllowLoads, false, "Remat allow to move loads, no checks, exclusively for testing purposes", false)
 DECLARE_IGC_REGKEY(bool, DumpRegPressureEstimate, false,  "Dump RegPressureEstimate to a file", false)
@@ -870,6 +924,9 @@ DECLARE_IGC_REGKEY(bool, VectorizerLog, false, "Dump Vectorizer Log, usefull for
 DECLARE_IGC_REGKEY(bool, EnableReusingXYZWStoreConstPayload, true, "Enable reusing XYZW stores const payload", false)
 DECLARE_IGC_REGKEY(bool, EnableReusingLSCStoreConstPayload,  false, "Enable reusing LSC stores const payload", false)
 DECLARE_IGC_REGKEY(bool, AllowSIMD16DropForXE2, true, "Controls the switch for XE2 simd16 drop", false)
+DECLARE_IGC_REGKEY(bool, AllowSIMD16DropForXE3, true, "Controls the switch for XE3 simd16 drop", false)
+DECLARE_IGC_REGKEY(bool, AllowEarlySIMD16DropForXE3, true, "Controls the early drop to simd16 for XE3", false)
+DECLARE_IGC_REGKEY(DWORD, EarlySIMD16DropForXE3Threshold, 190, "Threshold for the early drop to simd16 for XE3", false)
 DECLARE_IGC_REGKEY(DWORD, RegPressureVerbocity,   0,  "Different printing types", false)
 DECLARE_IGC_REGKEY(DWORD, RetryRevertExcessiveSpillingKernelThreshold, 10000,  "Sets the threshold for Retry Manager to know which kernel is considered as Excessive Spilling and applies different set of rules", false)
 DECLARE_IGC_REGKEY(DWORD, RetryRevertExcessiveSpillingKernelCoefficient, 102,  "Sets the coefficient for Retry Manager to know whether we should revert back to a previously compiled kernel", false)
@@ -919,6 +976,11 @@ DECLARE_IGC_REGKEY(bool, OverrideCsWalkOrderEnable,  false, "Enable overriding c
 DECLARE_IGC_REGKEY(int,  OverrideCsWalkOrder,        0,     "Override compute walker walk order", true)
 DECLARE_IGC_REGKEY(bool, OverrideCsTileLayoutEnable, false, "Enable overriding compute walker tile layout", true)
 DECLARE_IGC_REGKEY(bool, OverrideCsTileLayout,       0,     "Override compute walker tile layout. False is linear. True is TileY", true)
+DECLARE_IGC_REGKEY_ENUM(OverrideHWGenerateLID, -1, "Override HW Generate Local ID setting" \
+    "-1 - default behavior," \
+    " 0 - force disabled," \
+    " 1 - force enabled", \
+    TRIBOOL_OPTIONS, true)
 DECLARE_IGC_REGKEY(DWORD, MemCpyLoweringUnrollThreshold, 12, "Min number of mem instructions that require non-unrolled loop when lowering memcpy", false)
 DECLARE_IGC_REGKEY(DWORD, EnablePrivMemNewSOATranspose,            1, "0 : disable new algo; 1 and up : enable new algo. " \
                                                                       "1 : enable new algo just for array of struct; " \
@@ -935,9 +997,18 @@ DECLARE_IGC_REGKEY_ENUM(SupportUniformPrivateMemorySpace, -1, \
     " 0 - force disabled" \
     " 1 - force enabled", \
     TRIBOOL_OPTIONS, true)
-DECLARE_IGC_REGKEY(bool, ShortImplicitPayloadHeader, false, "Reduces implicit payload header arg from 8xi32 to 3xi32", true)
-DECLARE_IGC_REGKEY(bool, RemoveUnusedIdImplicitArguments, false, "Remove implicit arguments: global_id_offset (payloadHeader) and/or enqueued_local_size if unused. " \
-    "Useful if kernel doesn't use global id.", true)
+DECLARE_IGC_REGKEY_ENUM(ShortImplicitPayloadHeader, -1, \
+    "Controls the behavior of implicit kernel argument 'payloadHeader'." \
+    "-1 - platform default" \
+    " 0 - force old 8xi32 payloadHeader" \
+    " 1 - force 3xi32 payloadHeader (global_id_offset only)", \
+    TRIBOOL_OPTIONS, true)
+DECLARE_IGC_REGKEY_ENUM(RemoveUnusedIdImplicitArguments, -1, \
+    "Remove implicit arguments: global_id_offset (payloadHeader) and/or enqueued_local_size if unused. Useful if kernel doesn't use global id." \
+    "-1 - platform default" \
+    " 0 - force disabled" \
+    " 1 - force enabled", \
+    TRIBOOL_OPTIONS, true)
 
 DECLARE_IGC_GROUP("Generating precompiled headers")
 DECLARE_IGC_REGKEY(bool, ApplyConservativeRastWAHeader, true, "Apply WaConservativeRasterization for the platforms enabled", false)
@@ -955,6 +1026,7 @@ DECLARE_IGC_GROUP("Raytracing Options")
     DECLARE_IGC_REGKEY(bool, DisableLateRemat, false, "Disable quick remats to avoid some spills", true)
     DECLARE_IGC_REGKEY(DWORD, RematThreshold, 6, "Tunes how aggresively we should remat values into continuations", true)
     DECLARE_IGC_REGKEY(bool, DisableCompactifySpills, false, "Just emit spill/fill at the point of def/use", true)
+    DECLARE_IGC_REGKEY(bool, AllowSpillCompactionOnRetry, false, "Allow spill compaction on retry - may increase spills", true)
     DECLARE_IGC_REGKEY(bool, EnableHoistRemat, false, "Hoist rematerialized instructions to shader entry. Longer live ranges but common values fused.", true)
     DECLARE_IGC_REGKEY(bool, DisableRTGlobalsKnownValues, false, "load MaxBVHLevels from RTGlobals rather than assumming = 2", true)
     DECLARE_IGC_REGKEY(bool, DisableRaytracingIntrinsicAttributes, false, "Turn off noalias and dereferenceable attributes", true)
@@ -975,14 +1047,16 @@ DECLARE_IGC_GROUP("Raytracing Options")
     DECLARE_IGC_REGKEY(bool, DisableStatefulRTSyncStackAccess, true, "do stateless rather than stateful accesses to the HW portion of the sync stack", true)
     DECLARE_IGC_REGKEY(bool, DisableStatefulSWHotZoneAccess, false, "do stateless rather than stateful accesses to the SW HotZone", true)
     DECLARE_IGC_REGKEY(bool, DisableStatefulSWStackAccess, false, "do stateless rather than stateful accesses to the SW Stack", true)
-    DECLARE_IGC_REGKEY(bool, DisableStatefulRTSyncStackAccess4RTShader, false, "do stateless rather than stateful accesses to the HW portion of the sync stack. RT Shader only.", true)
+    DECLARE_IGC_REGKEY(bool, DisableStatefulRTSyncStackAccess4RTShader, true, "do stateless rather than stateful accesses to the HW portion of the sync stack. RT Shader only.", true)
     DECLARE_IGC_REGKEY(bool, DisableStatefulRTSyncStackAccess4nonRTShader, true, "do stateless rather than stateful accesses to the HW portion of the sync stack. nonRT Shader only.", true)
     DECLARE_IGC_REGKEY(bool, DisableRTBindlessAccess, false, "do bindful rather than bindless accesses to raytracing memory", true)
     DECLARE_IGC_REGKEY(bool, DisableRTStackOpts, false, "Disable some optimizations that minimize reads/writes to the RTStack", true)
     DECLARE_IGC_REGKEY(bool, DisablePrepareLoadsStores, false, "Disable preparation for MemOpt", true)
     DECLARE_IGC_REGKEY(bool, DisableRayTracingConstantCoalescing, false, "Disable coalescing", true)
-    DECLARE_IGC_REGKEY(bool, DisableMergeAllocas, true, "Do not merge allocas prior to SplitAsyncPass", false)
-    DECLARE_IGC_REGKEY(bool, DisableMergeAllocasPrivateMemory, false, "Do not merge allocas prior to PrivateMemoryResolution", false)
+    DECLARE_IGC_REGKEY(bool, DisableMergeAllocas, false, "Do not merge allocas prior to SplitAsyncPass", false)
+    DECLARE_IGC_REGKEY(bool, DisableMergeAllocasPrivateMemory, false, "Do not merge allocas prior to PrivateMemoryResolution", true)
+    DECLARE_IGC_REGKEY(bool, DisableMergingOfMultipleAllocasWithOffset, true, "Do not merge multiple smaller allocas under one larger one with different offsets.", true)
+    DECLARE_IGC_REGKEY(bool, DisableMergingOfAllocasWithDifferentType, true, "Do not merge allocas of different types.", true)
     DECLARE_IGC_REGKEY(DWORD, RayTracingConstantCoalescingMinBlockSize, 4, "Set the minimum load size in # OWords = [1,2,4,8,16].", true)
     DECLARE_IGC_REGKEY(bool, DisableRayTracingOptimizations, false, "Disable RayTracing Optimizations for debugging", true)
     DECLARE_IGC_REGKEY(DWORD, RayTracingCustomTileXDim1D, 0, "X dimension of tile (default: DG2=256, Xe2+=512)", true)
@@ -1012,7 +1086,8 @@ DECLARE_IGC_GROUP("Raytracing Options")
     DECLARE_IGC_REGKEY(bool, EnableRTPrintf, false, "Enable printf for ray tracing.", true)
     DECLARE_IGC_REGKEY(DWORD, PrintfBufferSize, 0, "Set printf buffer size. Unit: KB.", true)
     DECLARE_IGC_REGKEY(bool, DisableRayQueryReturnOptimization, false, "RayQuery Return Optimization", true)
-    DECLARE_IGC_REGKEY(bool, DisableRayQueryDynamicRayManagementMechanism, false, "Dynamic ray management mechanism for Synchronous Ray Tracing", true)
+    DECLARE_IGC_REGKEY(bool, UseNewInlineRaytracing, true, "Use the new rayquery implementation", true)
+    DECLARE_IGC_REGKEY(bool, OverrideRayQueryThrottling, false, "Force rayquery throttling (dynamic ray management) to be enabled or disabled. Default value of this key is ignored", true)
     DECLARE_IGC_REGKEY(bool, DisableRayQueryDynamicRayManagementMechanismForExternalFunctionsCalls, false, "Disable dynamic ray management mechanism for shaders with external functions calls", true)
     DECLARE_IGC_REGKEY(bool, DisableRayQueryDynamicRayManagementMechanismForBarriers, false, "Disable dynamic ray management mechanism for shaders with barriers", true)
     DECLARE_IGC_REGKEY(bool, EnableOuterLoopHoistingForRayQueryDynamicRayManagementMechanism, false, "Disable dynamic ray management mechanism for shaders with barriers", true)

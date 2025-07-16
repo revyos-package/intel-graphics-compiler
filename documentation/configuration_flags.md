@@ -352,6 +352,7 @@ $ export IGC_ShaderDumpEnable=1
 | `TestIGCPreCompiledFunctions` | Enable testing for precompiled kernels. [TEST ONLY] | - |
 | `ld2dmsInstsClubbingThreshold` | Do not club more than these ld2dms insts into the new BB during MCSOpt | - |
 | `manualEnableRSWA` | Enable read suppression WA for the send and indirect access | - |
+| `DisableWarnings` | Disable all warnings generated from IGC compiler | - |
 ## Shader dumping
 | Flag  | Description | Release builds |
 |:---- | :---- | :----: |
@@ -375,6 +376,7 @@ $ export IGC_ShaderDumpEnable=1
 | `DumpZEInfoToConsole` | Dump zeinfo to console | Available |
 | `ElfDumpEnable` | dump ELF file | Available |
 | `ElfTempDumpEnable` | dump temporary ELF files | Available |
+| `SpvAsmDumpEnable` | Dump spvasm file | Available |
 | `EnableCapsDump` | Enable hardware caps dump | Available |
 | `EnableCisDump` | Enable cis dump | Available |
 | `EnableCosDump` | Enable cos dump | Available |

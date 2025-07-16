@@ -537,6 +537,7 @@ std::string printVariableDecl(const print_format_provider_t *header,
   const var_info_t *var = header->getVar(declID);
   VISA_Type isa_type = (VISA_Type)((var->bit_properties) & 0xF);
   VISA_Align align = var->getAlignment();
+  G4_Declare *aliasDcl = var->dcl->getRootDeclare();
 
   unsigned numPreDefinedVars = Get_CISA_PreDefined_Var_Count();
   sstr << ".decl "
@@ -548,7 +549,8 @@ std::string printVariableDecl(const print_format_provider_t *header,
   if (align != ALIGN_UNDEF)
     sstr << " align=" << Common_ISA_Get_Align_Name(align);
 
-  if (var->alias_index) {
+  if (var->alias_index ||
+      (aliasDcl && strcmp(aliasDcl->getName(), "%null") == 0)) {
     sstr << " alias=<";
     sstr << printVariableDeclName(header, var->alias_index, options);
     sstr << ", " << var->alias_offset << ">";
@@ -2723,13 +2725,13 @@ private:
       ss << "d64";
       break;
     case LSC_DATA_SIZE_8c32b:
-      ss << "d8c32";
+      ss << "d8u32";
       break;
     case LSC_DATA_SIZE_16c32b:
-      ss << "d16c32";
+      ss << "d16u32";
       break;
     case LSC_DATA_SIZE_16c32bH:
-      ss << "d16c32h";
+      ss << "d16u32h";
       break;
     default:
       formatBadEnum(dataSize);
@@ -2958,6 +2960,12 @@ private:
     //////////////////
     // caching
     formatCachingOpts();
+    // ov
+    if (hasOV(sfid, opInfo.op)) {
+      unsigned ov = getNext<unsigned>();
+      if (ov)
+        ss << ".ov";
+    }
 
     // execution size and offset
     ss << " " << printExecutionSize(inst->opcode, inst->execsize, subOp);

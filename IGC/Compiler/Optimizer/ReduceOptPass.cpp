@@ -9,10 +9,8 @@ SPDX-License-Identifier: MIT
 #include "ReduceOptPass.hpp"
 #include "IGCIRBuilder.h"
 #include <llvm/IR/Function.h>
-#include <llvmWrapper/IR/PatternMatch.h>
 
 #include "Compiler/IGCPassSupport.h"
-#include "Compiler/CISACodeGen/helper.h"
 
 #include "common/LLVMWarningsPush.hpp"
 #include "common/LLVMWarningsPop.hpp"
@@ -30,21 +28,12 @@ char ReduceOptPass::ID = 0;
 IGC_INITIALIZE_PASS_BEGIN(ReduceOptPass, PASS_FLAG, PASS_DESCRIPTION, PASS_CFG_ONLY, PASS_ANALYSIS)
 IGC_INITIALIZE_PASS_END(ReduceOptPass, PASS_FLAG, PASS_DESCRIPTION, PASS_CFG_ONLY, PASS_ANALYSIS)
 
-#if defined(IGC_SCALAR_USE_KHRONOS_SPIRV_TRANSLATOR)
-    #define GlobalSizeName "__spirv_BuiltInGlobalSize"
-    #define GlobalInvocationIdName "__spirv_BuiltInGlobalInvocationId"
-    #define GlobalOffsetName "__spirv_BuiltInGlobalOffset"
-    #define WorkgroupSizeName "__spirv_BuiltInWorkgroupSize"
-    #define LocalInvocationIdName "__spirv_BuiltInLocalInvocationId"
-    #define ReduceWorkGroupName "__spirv_Group"
-#else
-    #define GlobalSizeName "__builtin_spirv_BuiltInGlobalSize"
-    #define GlobalInvocationIdName "__builtin_spirv_BuiltInGlobalInvocationId"
-    #define GlobalOffsetName "__builtin_spirv_BuiltInGlobalOffset"
-    #define WorkgroupSizeName "__builtin_spirv_BuiltInWorkgroupSize"
-    #define LocalInvocationIdName "__builtin_spirv_BuiltInLocalInvocationId"
-    #define ReduceWorkGroupName "__builtin_spirv_OpGroup"
-#endif
+#define GlobalSizeName "__spirv_BuiltInGlobalSize"
+#define GlobalInvocationIdName "__spirv_BuiltInGlobalInvocationId"
+#define GlobalOffsetName "__spirv_BuiltInGlobalOffset"
+#define WorkgroupSizeName "__spirv_BuiltInWorkgroupSize"
+#define LocalInvocationIdName "__spirv_BuiltInLocalInvocationId"
+#define ReduceWorkGroupName "__spirv_Group"
 
 ReduceOptPass::ReduceOptPass() : FunctionPass(ID) {
     initializeReduceOptPassPass(*PassRegistry::getPassRegistry());

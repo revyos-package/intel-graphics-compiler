@@ -68,11 +68,10 @@ public:
         AU.addRequired<WIAnalysis>();
     }
 
-    typedef llvm::SmallVector<llvm::Instruction *, 16> RematChain;
-
-    typedef std::unordered_set<llvm::Instruction *> RematSet;
-    typedef std::pair<RematSet, RematSet> RematPair;
-    typedef llvm::SmallVector<RematPair, 16> SliceToRematTargetVector;
+    using RematChain = llvm::SmallVector<llvm::Instruction *, 16>;
+    using RematSet = llvm::SmallSetVector<llvm::Instruction *, 16>;
+    using RematPair = std::pair<RematSet, RematSet>;
+    using SliceToRematTargetVector = llvm::SmallVector<RematPair, 16>;
 
     bool runOnFunction(Function&) override;
 
@@ -322,8 +321,11 @@ void CloneAddressArithmetic::addToSystem(RematSet &Set, llvm::Instruction *I) {
         }
     }
 
-    if(!Same)
-        Vector.push_back(RematPair(Set, {I}));
+    if (!Same) {
+        llvm::SmallSetVector<llvm::Instruction *, 16> NewSet;
+        NewSet.insert(I);
+        Vector.push_back(RematPair(Set, NewSet));
+    }
 
     PRINT_LOG_NL("");
 }
@@ -462,12 +464,12 @@ void CloneAddressArithmetic::speculateWholeChain(RematSet &ToProcess, unsigned i
 
         addToSetRemat(I, Set);
         for(auto& el: Chain) {
-            Set.erase(el);
+            Set.remove(el);
             PRINT_LOG("[" << FlowMap[el] << "] "); PRINT_INST_NL(el);
             addToSetRemat(el, Set);
          }
 
-        for(auto el : Set) {
+        for(auto* el : Set) {
             PRINT_LOG("origin: "); PRINT_INST(el); PRINT_LOG_NL("");
         }
 
@@ -527,7 +529,8 @@ void CloneAddressArithmetic::collectInstToProcess(RematSet& ToProcess, Function&
 
             bool IsLoad = llvm::isa<LoadInst>(I);
             bool IsStore = llvm::isa<StoreInst>(I);
-            if (!IsLoad && !IsStore) continue;
+            bool IsCall = llvm::isa<CallInst>(I);
+            if (!IsLoad && !IsStore && !IsCall) continue;
 
             llvm::Value* V =
                 IsLoad ? static_cast<LoadInst *>(&I)->getPointerOperand() :
@@ -535,6 +538,14 @@ void CloneAddressArithmetic::collectInstToProcess(RematSet& ToProcess, Function&
 
             if(isRematInstruction(V))
                 ToProcess.insert(static_cast<Instruction *>(V));
+
+            if (IsCall && IGC_IS_FLAG_ENABLED(RematCollectCallArgs)) {
+                for (auto &Arg : cast<CallInst>(I).args()) {
+                    if(isRematInstruction(Arg)) {
+                        ToProcess.insert(cast<Instruction>(&Arg));
+                    }
+                }
+            }
         }
     }
 }

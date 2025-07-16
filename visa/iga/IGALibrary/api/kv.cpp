@@ -176,6 +176,28 @@ int32_t kv_get_inst_size(const kv_t *kv, int32_t pc) {
   return inst->hasInstOpt(InstOpt::COMPACTED) ? 8 : 16;
 }
 
+kv_status_t kv_get_inst_msg_info(const kv_t *kv, int32_t pc, bool *isAtomic,
+                                 bool *isSlm, bool *isScratch) {
+    if (!kv) {
+        return KV_ERROR;
+    }
+
+    const Instruction* inst = ((KernelViewImpl*)kv)->getInstruction(pc);
+    if (!inst) {
+        return KV_INVALID_PC;
+    }
+    const DecodeResult di = tryDecode(*inst, nullptr);
+    if (!di) {
+        return KV_DECODE_ERROR;
+    }
+
+    *isSlm = di.info.hasAttr(iga::MessageInfo::Attr::SLM);
+    *isScratch = di.info.hasAttr(iga::MessageInfo::Attr::SCRATCH);
+    *isAtomic = di.info.isAtomic();
+
+    return KV_SUCCESS;
+}
+
 bool kv_has_inst_opt(const kv_t *kv, int32_t pc, uint32_t opt) {
   KernelViewImpl *kvImpl = (KernelViewImpl *)kv;
   const Instruction *inst = kvImpl->getInstruction(pc);
@@ -309,18 +331,21 @@ uint32_t kv_get_send_descs(const kv_t *kv, int32_t pc, uint32_t *ex_desc,
   }
 
   uint32_t n = 0;
-  if (inst->getExtMsgDescriptor().isImm()) {
-    n++;
-    *ex_desc = inst->getExtMsgDescriptor().imm;
-  } else {
-    *ex_desc = KV_INVALID_SEND_DESC;
-  }
-  if (inst->getMsgDescriptor().isImm()) {
-    n++;
-    *desc = inst->getMsgDescriptor().imm;
-  } else {
-    *desc = KV_INVALID_SEND_DESC;
-  }
+      if (inst->getExtMsgDescriptor().isImm()) {
+          n++;
+          *ex_desc = inst->getExtMsgDescriptor().imm;
+      }
+      else {
+          *ex_desc = KV_INVALID_SEND_DESC;
+      }
+      if (inst->getMsgDescriptor().isImm()) {
+          n++;
+          *desc = inst->getMsgDescriptor().imm;
+      }
+      else {
+          *desc = KV_INVALID_SEND_DESC;
+      }
+
   return n;
 }
 
@@ -337,7 +362,6 @@ kv_status_t kv_get_send_exdesc_immoff(const kv_t *kv, int32_t pc,
     return KV_DESCRIPTOR_INVALID;
   }
 
-  const auto exDesc = inst->getExtMsgDescriptor();
   const auto desc = inst->getMsgDescriptor();
 
   auto addrType = ((desc.imm >> 29) & 0x3); // Desc[30:29]
@@ -428,7 +452,6 @@ kv_status_t kv_get_message_type(const kv_t *kv, int32_t pc,
     return kv_status_t::KV_NON_SEND_INSTRUCTION;
   }
 
-  auto exDesc = inst->getExtMsgDescriptor();
   auto desc = inst->getMsgDescriptor();
 
   // NOTE: we could probably get the message just from desc

@@ -41,6 +41,8 @@ DEF_VISA_OPTION(vISA_DumpPerfStats, ET_BOOL, "-dumpVISAJsonStats",
                 "dump the core stats to default json file name", false)
 DEF_VISA_OPTION(vISA_DumpPerfStatsVerbose, ET_BOOL, "-dumpVISAJsonStatsVerbose",
                 "dump the verbose stats to default json file name", false)
+DEF_VISA_OPTION(vISA_DumpSendInfoStats, ET_BOOL, "-dumpVISASendInfoStats",
+                "dumps the sendinfo stats with the stats.json file", false)
 DEF_VISA_OPTION(VISA_FullIRVerify, ET_BOOL, "-fullIRVerify", UNUSED, false)
 // dump each option while it is being set by setOption()
 DEF_VISA_OPTION(vISA_dumpVISAOptions, ET_BOOL, "-dumpVisaOptions", UNUSED,
@@ -145,6 +147,7 @@ DEF_VISA_OPTION(vISA_ChangeMoveType, ET_BOOL, "-ALTMode", UNUSED, true)
 DEF_VISA_OPTION(vISA_accSubstitution, ET_BOOL, "-noAccSub", UNUSED, true)
 DEF_VISA_OPTION(vISA_accSubBeforeRA, ET_BOOL, "-noAccSubBRA", UNUSED, true)
 DEF_VISA_OPTION(vISA_PreSchedForAcc, ET_BOOL, "-preSchedForAcc", UNUSED, false)
+DEF_VISA_OPTION(vISA_emitMoreMoviCases, ET_BOOL, "-emitMoreMoviCases", UNUSED, false)
 DEF_VISA_OPTION(
     vISA_EnableGatherWithImmPreRA, ET_INT32, "-gatherWithImmPreRA",
     "USAGE: -gatherWithImmPreRA <0|1|2|3> where 0 is disabled, 1 sampler is "
@@ -168,6 +171,17 @@ DEF_VISA_OPTION(
     "Spill size allowed without increasing GRF number in VRT."
     "0 means VRT will always bump up the GRF number to avoid spills",
     256)
+DEF_VISA_OPTION(vISA_SpillAllowed256GRF, ET_INT32, "-spillAllowed256GRF",
+                "USAGE: -spillAllowed256GRF <spillSize>.\n"
+                "Override spill threshold for 256GRF config. If shader has "
+                "spills < <spillSize>, #GRF is not bumped up. "
+                "0 means no override",
+                0)
+DEF_VISA_OPTION(vISA_ForceGRFModeUp, ET_INT32, "-forceGRFModeUp",
+                "USAGE: -forceGRFModeUp <k>.\n"
+                "Set the GRF mode k higher than the one selected by default"
+                "heuristics. 0 means no increase in GRF mode.",
+                0)
 DEF_VISA_OPTION(vISA_ScalarPipe, ET_INT32, "-scalarPipe",
                 "USAGE: -scalarPipe <num>\n", 0)
 DEF_VISA_OPTION(vISA_LVN, ET_BOOL, "-nolvn", UNUSED, true)
@@ -285,6 +299,12 @@ DEF_VISA_OPTION(vISA_lscEnableImmOffsFor, ET_INT32, "-lscEnableImmOffsFor",
                 "Bit [17] enables offsets in spill/fill codegen.  "
                 "Confer with the type VISALscImmOffOpts.",
                 0x3003E)
+DEF_VISA_OPTION(vISA_lscEnableImmOffsetForA32Stateful, ET_BOOL,
+                "-lscDisableImmOffsetForA32Stateful",
+                "This is to control LSC immediate offset optimization "
+                "in InstCombine pass to work around hardware bound checking "
+                "problem of signed src0 for LSC SLM and A32 stateful messages.",
+                false)
 DEF_VISA_OPTION(vISA_PreserveR0InR0, ET_BOOL, "-preserver0", UNUSED, false)
 DEF_VISA_OPTION(vISA_StackCallABIVer, ET_INT32, "-abiver", "DEPRECATED, is a nop", 1)
 DEF_VISA_OPTION(vISA_LastCallerSavedGRF, ET_INT32, "-lastCallerSavedGRF",
@@ -442,6 +462,10 @@ DEF_VISA_OPTION(vISA_ScheduleStartBBID, ET_INT32, "-sched-start",
                 "USAGE: -sched-start <BB ID>\n", 0)
 DEF_VISA_OPTION(vISA_ScheduleEndBBID, ET_INT32, "-sched-end",
                 "USAGE: -sched-end <BB ID>\n", 0)
+DEF_VISA_OPTION(vISA_SpillCleanupStartBBID, ET_INT32, "-spill-cleanup-start",
+                "USAGE: -spill-cleanup-start <BB ID>\n", 0)
+DEF_VISA_OPTION(vISA_SpillCleanupEndBBID, ET_INT32, "-spill-cleanup-end",
+                "USAGE: -spill-cleanup-end <BB ID>\n", 0xffffffff)
 DEF_VISA_OPTION(vISA_preRA_MinRegThreshold, ET_INT32, "-minreg-rp",
                 "USAGE: -minreg-rp <threshold>\n", 0)
 DEF_VISA_OPTION(vISA_DumpSchedule, ET_BOOL, "-dumpSchedule", UNUSED, false)
@@ -569,7 +593,7 @@ DEF_VISA_OPTION(vISA_HybridRAWithSpill, ET_BOOL, "-hybridRAWithSpill", UNUSED,
 DEF_VISA_OPTION(vISA_SelectiveFastRA, ET_BOOL, "-selectiveFastRA", UNUSED,
                 false)
 DEF_VISA_OPTION(vISA_SelectiveRAInstThreshold, ET_INT32, "-selectiveRAInstThreshold",
-                UNUSED, 128*1024)
+                UNUSED, 131072) // 128*1024
 DEF_VISA_OPTION(vISA_SelectiveRAGlobaVarRatioThreshold, ET_CSTR, "-selectiveRAGVRatioThreshold",
                 UNUSED, "0.16")
 DEF_VISA_OPTION(vISA_EnableSwapAccSub, ET_BOOL, "-swapAccSub", UNUSED, true)
@@ -595,8 +619,8 @@ DEF_VISA_OPTION(vISA_ISAASMToConsole, ET_BOOL, "-isaasmToConsole",
                 "emit isaasm to stdout instead of file and do early exit", false)
 DEF_VISA_OPTION(vISA_DumpIsaVarNames, ET_BOOL, "-dumpisavarnames", UNUSED, true)
 DEF_VISA_OPTION(vISA_UniqueLabels, ET_BOOL, "-uniqueLabel", UNUSED, false)
-DEF_VISA_OPTION(vISA_ShaderDumpFilter, ET_CSTR, "-shaderDumpFilter",
-                "USAGE: -shaderDumpFilter <regex>\n", NULL)
+DEF_VISA_OPTION(vISA_ShaderDumpRegexFilter, ET_CSTR, "-shaderDumpRegexFilter",
+                "USAGE: -shaderDumpRegexFilter <regex>\n", NULL)
 DEF_VISA_OPTION(vISA_DumpvISA, ET_BOOL, "-dumpvisa",
                 "-dumpvisa is deprecated and will be removed.", false)
 DEF_VISA_OPTION(vISA_StripComments, ET_BOOL, "-stripcomments", UNUSED, false)
@@ -694,6 +718,8 @@ DEF_VISA_OPTION(vISA_removeFence, ET_BOOL, "-removeFence",
                 "Remove fence if no write in a kernel", false)
 DEF_VISA_OPTION(vISA_skipGitHash, ET_BOOL, "-noGitHash",
                 "Do not emit git hash in .asm", false)
+DEF_VISA_OPTION(vISA_SendAWProfiling, ET_BOOL, "-sendAWProfiling",
+                "Emit after write profiling data in .asm", false)
 
 
 //=== HW Workarounds ===

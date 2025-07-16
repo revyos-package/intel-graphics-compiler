@@ -24,7 +24,6 @@ SPDX-License-Identifier: MIT
 #include "common/LLVMWarningsPop.hpp"
 #endif
 
-#include <iostream>
 #include <tuple>
 #include "Probe/Assertion.h"
 
@@ -650,6 +649,11 @@ std::pair<uint64_t, uint64_t> ELFWriter::writeCompatibilityNote() {
     writeOneNote("IntelGT",
                  INDIRECT_ACCESS_DETECTION_VERSION,
                  NT_INTELGT_INDIRECT_ACCESS_DETECTION_VERSION);
+
+    // write NT_INTELGT_INDIRECT_ACCESS_BUFFER_MAJOR_VERSION
+    writeOneNote("IntelGT",
+                 INDIRECT_ACCESS_BUFFER_MAJOR_VERSION,
+                 NT_INTELGT_INDIRECT_ACCESS_BUFFER_MAJOR_VERSION);
 
     return std::make_pair(start_off, m_W.OS.tell() - start_off);
 }

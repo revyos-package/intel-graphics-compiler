@@ -6,7 +6,6 @@ SPDX-License-Identifier: MIT
 
 ============================= end_copyright_notice ===========================*/
 
-#include <vector>
 
 #include "Compiler/Optimizer/OpenCLPasses/BreakConstantExpr/BreakConstantExpr.hpp"
 #include "Compiler/IGCPassSupport.h"
@@ -19,7 +18,6 @@ SPDX-License-Identifier: MIT
 #include <llvm/IR/Metadata.h>
 #include <llvm/IR/InstIterator.h>
 #include "common/LLVMWarningsPop.hpp"
-#include "Probe/Assertion.h"
 
 using namespace llvm;
 using namespace IGC;
@@ -267,7 +265,7 @@ bool BreakConstantExpr::breakConstantStruct(ConstantStruct* cs,
         }
     };
 
-    auto breakInst = [=](Instruction* I) {
+    auto breakInst = [this](Instruction* I) {
         bool changed = false;
         const int numOperands = (int)I->getNumOperands();
         for (int i = 0; i < numOperands; ++i) {

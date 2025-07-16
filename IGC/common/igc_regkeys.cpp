@@ -544,8 +544,8 @@ static void DumpIGCRegistryKeyDefinitions(
 
 void DumpIGCRegistryKeyDefinitions()
 {
-    constexpr char* registryKeyPath = "HKLM\\" IGC_REGISTRY_KEY;
-    constexpr char* xmlPath =
+    constexpr const char* registryKeyPath = "HKLM\\" IGC_REGISTRY_KEY;
+    constexpr const char* xmlPath =
         "C:\\Intel\\IGfx\\GfxRegistryManager\\Keys\\IGC.xml";
 
     DumpIGCRegistryKeyDefinitions(registryKeyPath, xmlPath);
@@ -1044,8 +1044,9 @@ void appendToOptionsLogFile(std::string const &message)
     os.close();
 }
 
-static thread_local ShaderHash g_CurrentShaderHash;
 static thread_local std::vector<std::string> g_CurrentEntryPointNames;
+
+static thread_local ShaderHash g_CurrentShaderHash;
 void SetCurrentDebugHash(const ShaderHash& hash)
 {
     g_CurrentShaderHash = hash;
@@ -1061,6 +1062,7 @@ void ClearCurrentEntryPoints()
 {
     g_CurrentEntryPointNames.clear();
 }
+
 
 bool CheckHashRange(SRegKeyVariableMetaData& varname)
 {
@@ -1118,16 +1120,19 @@ bool CheckEntryPoint(SRegKeyVariableMetaData& varname)
         std::string msg = "Warning: entry point not set yet; IGC_GET_FLAG_VALUE(" + std::string(varname.GetName()) + ") returned default value";
         appendToOptionsLogFile(msg);
     }
-    //looping entry point recorded by regkey metadata
-    for (auto& it : varname.entry_points)
+
     {
-        //looping each entry point of current shader
-        for (std::string& CurrEntryPoint : g_CurrentEntryPointNames)
+        //looping entry point recorded by regkey metadata
+        for (auto& it : varname.entry_points)
         {
-            if (CurrEntryPoint == it.entry_point_name)
+            //looping each entry point of current shader
+            for (std::string& CurrEntryPoint : g_CurrentEntryPointNames)
             {
-                varname.m_Value = it.m_Value;
-                return true;
+                if (CurrEntryPoint == it.entry_point_name)
+                {
+                    varname.m_Value = it.m_Value;
+                    return true;
+                }
             }
         }
     }
@@ -1223,6 +1228,8 @@ static void LoadFromRegKeyOrEnvVarOrOptions(
                         }
                     }
                     memcpy_s(pRegKeyVariable[i].m_string, sizeof(valueFromOptions), valueFromOptions, sizeof(valueFromOptions));
+                    pRegKeyVariable[i].Set();
+                    checkAndSetIfKeyHasNoDefaultValue(&pRegKeyVariable[i]);
                 }
                 else if (found > 0 && options[found - 1] != ' ' && options[found - 1] != ',')
                 {
@@ -1240,12 +1247,62 @@ static void LoadFromRegKeyOrEnvVarOrOptions(
     }
     if (IGC_IS_FLAG_ENABLED(PrintDebugSettings))
     {
-        std::cout << "*** Settings with non-default values ***" << std::endl;
-        for(DWORD i = 0; i < NUM_REGKEY_ENTRIES; i++)
+        // Using std::cout caused crashes in SYCL environment so we use fprintf instead as a work around.
+        std::ostringstream debugOutputStream;
+
+        for (DWORD i = 0; i < NUM_REGKEY_ENTRIES; i++)
         {
             if (pRegKeyVariable[i].m_isSetToNonDefaultValue)
-                std::cout << pRegKeyVariable[i].GetName() << " " << pRegKeyVariable[i].m_Value << std::endl;
+                debugOutputStream << pRegKeyVariable[i].GetName() << " " << pRegKeyVariable[i].m_Value << '\n';
         }
+
+        fprintf(stdout, "%s", debugOutputStream.str().c_str());
+    }
+}
+
+/*****************************************************************************\
+
+Function:
+    InitializeRegKeys
+
+Description:
+    Initialize global-scoped registry variables
+
+Input:
+    None
+
+Output:
+    None
+
+\*****************************************************************************/
+void InitializeRegKeys()
+{
+    static std::mutex loadFlags;
+    static volatile bool flagsSet = false;
+    std::lock_guard<std::mutex> lock(loadFlags);
+
+    if (!flagsSet)
+    {
+        flagsSet = true;
+        setImpliedIGCKeys();
+
+#if !defined(_DEBUG)
+        if (IGC_IS_FLAG_ENABLED(EnableDebugging))
+#endif
+        {
+            //DumpIGCRegistryKeyDefinitions();
+            LoadDebugFlagsFromFile();
+            LoadDebugFlagsFromString(IGC_GET_REGKEYSTRING(SelectiveHashOptions));
+        }
+        if (IGC_IS_FLAG_ENABLED(LLVMCommandLine))
+        {
+            std::vector<char*> args;
+            args.push_back((char*)("IGC"));
+            ParseCStringVector(args, IGC_GET_REGKEYSTRING(LLVMCommandLine));
+            llvm::cl::ParseCommandLineOptions(args.size(), &args[0]);
+        }
+
+        setImpliedIGCKeys();
     }
 }
 
@@ -1275,23 +1332,7 @@ void LoadRegistryKeys(const std::string& options, bool *RegFlagNameError)
     {
         flagsSet = true;
         LoadFromRegKeyOrEnvVarOrOptions(options, RegFlagNameError);
-#if !defined(_DEBUG)
-        if (IGC_IS_FLAG_ENABLED(EnableDebugging))
-#endif
-        {
-            //DumpIGCRegistryKeyDefinitions();
-            LoadDebugFlagsFromFile();
-            LoadDebugFlagsFromString(IGC_GET_REGKEYSTRING(SelectiveHashOptions));
-        }
-        if(IGC_IS_FLAG_ENABLED(LLVMCommandLine))
-        {
-            std::vector<char*> args;
-            args.push_back((char *)("IGC"));
-            ParseCStringVector(args, IGC_GET_REGKEYSTRING(LLVMCommandLine));
-            llvm::cl::ParseCommandLineOptions(args.size(), &args[0]);
-        }
-
-        setImpliedIGCKeys();
+        InitializeRegKeys();
     }
 }
 
@@ -1325,6 +1366,7 @@ void GetKeysSetExplicitly(std::string* KeyValuePairs, std::string* OptionKeys)
         // Ignore some dump keys
         if (strcmp("ShaderDumpEnableAll", key) == 0 ||
             strcmp("ShaderDumpEnable", key) == 0 ||
+            strcmp("ShaderDumpRegexFilter", key) == 0 ||
             strcmp("DumpToCurrentDir", key) == 0 ||
             strcmp("EnableCosDump", key) == 0 ||
             strcmp("DumpToCustomDir", key) == 0 ||

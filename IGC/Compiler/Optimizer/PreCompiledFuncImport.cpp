@@ -8,20 +8,16 @@ SPDX-License-Identifier: MIT
 
 #include "common/LLVMWarningsPush.hpp"
 #include "llvm/Config/llvm-config.h"
-#include "llvm/Support/ScaledNumber.h"
 #include "llvm/ADT/SmallSet.h"
 #include "llvm/IR/Module.h"
 #include "llvmWrapper/IR/DerivedTypes.h"
 #include "llvmWrapper/IR/IRBuilder.h"
 #include "llvmWrapper/IR/Function.h"
 #include "llvm/IR/InstIterator.h"
-#include "llvm/Support/MemoryBuffer.h"
-#include "llvm/Support/GenericDomTree.h"
 #include "llvm/Transforms/Utils/Cloning.h"
 #include "llvm/Bitcode/BitcodeReader.h"
 #include "llvm/Bitcode/BitcodeWriter.h"
 #include "llvm/Linker/Linker.h"
-#include "llvm/Support/SourceMgr.h"
 #include "llvm/IRReader/IRReader.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
 #include "common/LLVMWarningsPop.hpp"
@@ -40,7 +36,6 @@ SPDX-License-Identifier: MIT
 #include "Compiler/CodeGenPublic.h"
 #include "common/LLVMUtils.h"
 #include "AdaptorOCL/OCL/BuiltinResource.h"
-#include "AdaptorOCL/OCL/LoadBuffer.h"
 
 #include <vector>
 #include <utility>
@@ -203,6 +198,7 @@ const char* PreCompiledFuncImport::m_Int32EmuFunctionNames[NUM_INT32_EMU_FUNCTIO
 // The entry order must match to FunctionIDs enum!
 const PreCompiledFuncInfo PreCompiledFuncImport::m_functionInfos[NUM_FUNCTION_IDS] =
 {
+// clang-format off
     { "__igcbuiltin_dp_add",              LIBMOD_DP_ADD_SUB },
     { "__igcbuiltin_dp_sub",              LIBMOD_DP_ADD_SUB },
     { "__igcbuiltin_dp_fma",              LIBMOD_DP_FMA_MUL },
@@ -225,6 +221,7 @@ const PreCompiledFuncInfo PreCompiledFuncImport::m_functionInfos[NUM_FUNCTION_ID
     { "__igcbuiltin_dp_to_uint64",        LIBMOD_DP_CONV_I64 },
     { "__igcbuiltin_int64_to_dp",         LIBMOD_DP_CONV_I64 },
     { "__igcbuiltin_uint64_to_dp",        LIBMOD_DP_CONV_I64 },
+// clang-format on
 };
 
 // The entry order must match to LibraryModules enum!
@@ -2230,7 +2227,7 @@ void PreCompiledFuncImport::visitCallInst(llvm::CallInst& I)
         args[1] = I.getOperand(1);
 
         auto pMD = getAnalysis<MetaDataUtilsWrapper>().getModuleMetaData();
-        int ftz = (m_pCtx->m_floatDenormMode32 == FLOAT_DENORM_FLUSH_TO_ZERO) ? 1 : 0;
+        int ftz = (pMD->compOpt.FloatDenormMode32 == FLOAT_DENORM_FLUSH_TO_ZERO) ? 1 : 0;
         int daz = (pMD->compOpt.DenormsAreZero) ? 1 : 0;
         args[2] = ConstantInt::get(Type::getInt32Ty(I.getContext()), ftz);
         args[3] = ConstantInt::get(Type::getInt32Ty(I.getContext()), daz);

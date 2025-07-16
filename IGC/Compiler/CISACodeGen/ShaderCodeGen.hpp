@@ -132,7 +132,7 @@ public:
     virtual OctEltUnit GetTotalURBReadLength() const {
         return OctEltUnit(0);
     }
-    unsigned GetMaxRegForThreadDispatch() const
+    virtual unsigned GetMaxRegForThreadDispatch() const
     {
         return m_simdProgram.m_startReg + 8 * GetTotalURBReadLength().Count();
     }
@@ -168,6 +168,7 @@ public:
     void        AddPatchConstantSetup(uint index, CVariable* var);
 
     unsigned getSetupSize() const { return unsigned(setup.size()); }
+    CShaderProgram* GetParent() const { return m_parent; }
 
     // TODO: simplify calls to GetNewVariable to these shorter and more
     // expressive cases where possible.
@@ -319,6 +320,7 @@ public:
         FunctionGroup* FG = (FGA && entry) ? FGA->getGroupForHead(entry) : nullptr;
         if (FG)
         {
+            m_HasSubroutine = FG->hasSubroutine();
             m_HasStackCall = FG->hasStackCall();
             m_HasIndirectCall = FG->hasIndirectCall();
             m_HasNestedCall = FG->hasNestedCall();
@@ -331,6 +333,7 @@ public:
     }
 
     GenXFunctionGroupAnalysis* GetFGA() { return m_FGA; }
+    bool HasSubroutines() const { return m_HasSubroutine; }
     bool HasStackCalls() const { return m_HasStackCall; }
     void SetHasStackCalls(bool hasStackCall) { m_HasStackCall = hasStackCall; }
     bool HasNestedCalls() const { return m_HasNestedCall; }
@@ -719,10 +722,6 @@ protected:
     CVariable* m_ImplArgBufPtr = nullptr;
     CVariable* m_LocalIdBufPtr = nullptr;
     CVariable* m_GlobalBufferArg = nullptr;
-
-    /// holds max number of inputs that can be pushed for this shader unit
-    static const uint32_t m_pMaxNumOfPushedInputs;
-
     SProgramOutput m_simdProgram;
 
     // for each vector BCI whose uses are all extractElt with imm offset,
@@ -748,6 +747,7 @@ protected:
     DebugInfoData diData;
 
     // Program function attributes
+    bool m_HasSubroutine = false;
     bool m_HasStackCall = false;
     bool m_HasNestedCall = false;
     bool m_HasIndirectCall = false;

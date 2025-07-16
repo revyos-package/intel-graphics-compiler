@@ -192,7 +192,7 @@ namespace IGC
 
     bool isUserFunctionCall(const llvm::Instruction* I);
 
-    bool isDiscardInstruction(const llvm::Instruction* I);
+    bool isHidingComplexControlFlow(const llvm::Instruction* I);
 
     bool IsMemLoadIntrinsic(llvm::GenISAIntrinsic::ID id);
 
@@ -695,4 +695,7 @@ namespace IGC
 
     bool SeparateSpillAndScratch(const CodeGenContext* ctx);
     bool UsedWithoutImmInMemInst( llvm::Value* v );
+
+    bool AllowShortImplicitPayloadHeader(const CodeGenContext* ctx);
+    bool AllowRemovingUnusedImplicitArguments(const CodeGenContext* ctx);
 } // namespace IGC

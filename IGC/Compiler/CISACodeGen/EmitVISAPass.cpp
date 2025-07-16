@@ -1,6 +1,6 @@
 /*========================== begin_copyright_notice ============================
 
-Copyright (C) 2017-2023 Intel Corporation
+Copyright (C) 2017-2025 Intel Corporation
 
 SPDX-License-Identifier: MIT
 
@@ -687,6 +687,34 @@ bool EmitPass::shouldForceEarlyRecompile(MetaDataUtils *pMdUtils,
   return PassedThreshold;
 }
 
+bool EmitPass::shouldDropToSIMD16(MetaDataUtils *pMdUtils,
+                                  llvm::Function *F) {
+  if (m_pCtx->type != ShaderType::OPENCL_SHADER || IGC_IS_FLAG_DISABLED(AllowEarlySIMD16DropForXE3)) {
+    return false;
+  }
+
+  if (!m_canAbortOnSpill || !m_pCtx->isAutoGRFSelectionEnabled() || !isEntryFunc(pMdUtils, F)) {
+    return false;
+  }
+
+  // If there are user set values for SIMD size or GRF number just return
+  if (IGC_IS_FLAG_ENABLED(ForceCSSIMD32) ||  m_pCtx->getModuleMetaData()->csInfo.forcedSIMDSize != 0 ||
+      m_pCtx->getNumGRFPerThread( false) != 0) {
+    return false;
+  }
+
+  // Currently, we do this optimization only for XE3 but we can relax this requirement to all platforms
+  // where abortOnSpills is enabled.
+  if (!m_pCtx->platform.isCoreXE3()) {
+    return false;
+  }
+
+  auto MaxRegPressure = getMaxRegPressureInFunctionGroup(F, pMdUtils);
+  auto Threshold = IGC_GET_FLAG_VALUE(EarlySIMD16DropForXE3Threshold);
+  bool shouldDrop = MaxRegPressure > Threshold;
+  return shouldDrop;
+}
+
 bool EmitPass::runOnFunction(llvm::Function& F)
 {
     m_currFuncHasSubroutine = false;
@@ -723,7 +751,9 @@ bool EmitPass::runOnFunction(llvm::Function& F)
         CShader * simd16Program = Iter->second->GetShader(SIMDMode::SIMD16);
         if (simd16Program &&
             simd16Program->ProgramOutput()->m_programBin != 0 &&
-            !m_pCtx->hasSpills(simd16Program->ProgramOutput()->m_scratchSpaceUsedBySpills))
+            !m_pCtx->hasSpills(
+                simd16Program->ProgramOutput()->m_scratchSpaceUsedBySpills,
+                simd16Program->ProgramOutput()->m_numGRFTotal))
             return false;
     }
     if (IGC_IS_FLAG_ENABLED(EnableKernelCostInfo)) {
@@ -751,6 +781,11 @@ bool EmitPass::runOnFunction(llvm::Function& F)
         // to compile, we use this set to prepare data structures and we clear it after
         // compilation is done, not propagate it to the next stage
         m_pCtx->m_retryManager.earlyRetryKernelSet.insert(F.getName().str());
+        return false;
+    }
+
+    if (shouldDropToSIMD16(pMdUtils, &F))
+    {
         return false;
     }
 
@@ -789,7 +824,7 @@ bool EmitPass::runOnFunction(llvm::Function& F)
     m_currShader->SetEmitPassHelper(this);
 
     //Add CCtuple root variables.
-    if (IGC_IS_FLAG_DISABLED(DisablePayloadCoalescing)) {
+    if (IGC_IS_FLAG_DISABLED(DisablePayloadCoalescing) && m_moduleMD->compOpt.WaDisablePayloadCoalescing == false) {
         m_currShader->SetCoalescingEngineHelper(m_CE);
     }
 
@@ -825,7 +860,9 @@ bool EmitPass::runOnFunction(llvm::Function& F)
             m_encoder->GetSimdSize() == prevShader->GetEncoder().GetSimdSize() &&
             prevShader->GetEncoder().IsCodePatchCandidate() &&
             prevShader->ProgramOutput()->m_programBin &&
-            !m_pCtx->hasSpills(prevShader->ProgramOutput()->m_scratchSpaceUsedBySpills))
+            !m_pCtx->hasSpills(
+                prevShader->ProgramOutput()->m_scratchSpaceUsedBySpills,
+                prevShader->ProgramOutput()->m_numGRFTotal))
         {
             prevKernel = prevShader->GetEncoder().GetVISAKernel();
             m_encoder->SetPayloadEnd(prevShader->GetEncoder().GetPayloadEnd());
@@ -913,6 +950,7 @@ bool EmitPass::runOnFunction(llvm::Function& F)
         }
 
         uint lowerBoundGRF = 0;
+        uint upperBoundGRF = 0;
         int numThreadsPerEU = -1;
         if (F.hasFnAttribute("num-thread-per-eu"))
         {
@@ -921,7 +959,7 @@ bool EmitPass::runOnFunction(llvm::Function& F)
         }
         // call builder after pre-analysis pass where scratchspace offset to VISA is calculated
         m_encoder->InitEncoder(m_canAbortOnSpill, m_currShader->HasStackCalls(), hasInlineAsmCall, hasAdditionalVisaAsmToLink,
-            numThreadsPerEU, lowerBoundGRF, prevKernel);
+            numThreadsPerEU, lowerBoundGRF, upperBoundGRF, prevKernel);
 
         if (!m_encoder->IsCodePatchCandidate())
             createVMaskPred(m_vMaskPredForSubplane);
@@ -1338,7 +1376,9 @@ bool EmitPass::runOnFunction(llvm::Function& F)
 
         if (m_encoder->IsCodePatchCandidate())
         {
-            if (m_pCtx->hasSpills(m_currShader->ProgramOutput()->m_scratchSpaceUsedBySpills))
+            if (m_pCtx->hasSpills(
+                m_currShader->ProgramOutput()->m_scratchSpaceUsedBySpills,
+                m_currShader->ProgramOutput()->m_numGRFTotal))
             {
                 if (IGC_GET_FLAG_VALUE(CodePatchExperiments))
                 {
@@ -1448,7 +1488,9 @@ bool EmitPass::runOnFunction(llvm::Function& F)
         if (!m_encoder->IsCodePatchCandidate() ||
             m_encoder->HasPrevKernel() ||
             !m_currShader->ProgramOutput()->m_programBin ||
-            m_pCtx->hasSpills(m_currShader->ProgramOutput()->m_scratchSpaceUsedBySpills))
+            m_pCtx->hasSpills(
+                m_currShader->ProgramOutput()->m_scratchSpaceUsedBySpills,
+                m_currShader->ProgramOutput()->m_numGRFTotal))
         {
             m_pCtx->m_prevShader = nullptr;
             // Postpone destroying VISA builder to
@@ -1555,9 +1597,10 @@ void EmitPass::MovPhiSources(llvm::BasicBlock* aBB)
         unsigned numElt;
         bool isSplat;
         uint64_t splatValue;
+        Type *type;
 
-        VTyInfo() : numElt(0), isSplat(false), splatValue(0) { }
-        explicit VTyInfo(Value * V) : numElt(0), isSplat(false), splatValue(0) {
+        VTyInfo() : numElt(0), isSplat(false), splatValue(0), type(nullptr) { }
+        explicit VTyInfo(Value * V) : numElt(0), isSplat(false), splatValue(0), type(V->getType()) {
             if (IGCLLVM::FixedVectorType * vTy = dyn_cast<IGCLLVM::FixedVectorType>(V->getType())) {
                 numElt = vTy->getNumElements();
                 if (isa<ConstantAggregateZero>(V)) {
@@ -1750,8 +1793,7 @@ void EmitPass::MovPhiSources(llvm::BasicBlock* aBB)
                 emitVectorCopy(dst, src, vTyInfo.numElt);
             }
             else {
-                m_encoder->Copy(dst, src);
-                m_encoder->Push();
+                emitCopyAll(dst, src, vTyInfo.type);
             }
         }
     }
@@ -2135,6 +2177,23 @@ void EmitPass::EmitAluIntrinsic(llvm::CallInst* I, const SSource source[2], cons
             }
             break;
         }
+        case Intrinsic::exp2:
+        {
+            if (IGC_IS_FLAG_ENABLED(EnableVectorEmitter) && source[0].value->getType()->isVectorTy()) {
+                Exp2(source, modifier);
+            }
+            else EmitSimpleAlu(I, source, modifier);
+            break;
+        }
+        case Intrinsic::maxnum: {
+          if (IGC_IS_FLAG_ENABLED(EnableVectorEmitter) &&
+              source[0].value->getType()->isVectorTy() &&
+              source[1].value->getType()->isVectorTy()) {
+            MaxNum(source, modifier);
+          } else
+            EmitSimpleAlu(I, source, modifier);
+          break;
+        }
         case Intrinsic::powi:
             Powi(source, modifier);
             break;
@@ -2341,7 +2400,7 @@ void EmitPass::EmitSimpleAlu(Instruction* inst, CVariable* dst, CVariable* src0,
     EmitSimpleAlu(GetOpCode(inst), dst, src0, src1);
 }
 
-void EmitPass::EmitSimpleAlu(EOPCODE opCode, const SSource sources[2], const DstModifier& modifier)
+void EmitPass::EmitSimpleAlu(EOPCODE opCode, const SSource sources[2], const DstModifier& modifier, bool isUnsigned)
 {
     CVariable* srcs[2] = { nullptr, nullptr };
 
@@ -2353,8 +2412,13 @@ void EmitPass::EmitSimpleAlu(EOPCODE opCode, const SSource sources[2], const Dst
         srcs[1] = GetSrcVariable(sources[1], sources[1].fromConstantPool);
         SetSourceModifiers(1, sources[1]);
     }
+    CVariable* dst = m_destination;
+    if (isUnsigned)
+    {
+        dst = m_currShader->BitCast(m_destination, GetUnsignedType(m_destination->GetType()));
+    }
     m_encoder->SetDstModifier(modifier);
-    EmitSimpleAlu(opCode, m_destination, srcs[0], srcs[1]);
+    EmitSimpleAlu(opCode, dst, srcs[0], srcs[1]);
 }
 
 void EmitPass::EmitSimpleAlu(EOPCODE opCode, CVariable* dst, CVariable* src0, CVariable* src1)
@@ -2616,6 +2680,7 @@ void EmitPass::EmitSimpleAlu(EOPCODE opCode, CVariable* dst, CVariable* src0, CV
 }
 
 void EmitPass::EmitMinMax(bool isMin, bool isUnsigned, const SSource sources[2], const DstModifier& modifier) {
+
     EOPCODE opCode = isMin ? llvm_min : llvm_max;
     CVariable* srcs[2] = { nullptr, nullptr };
     CVariable* dst = m_destination;
@@ -2647,7 +2712,9 @@ void EmitPass::Powi(const SSource sources[2], const DstModifier& modifier)
     }
     else
     {
-        src1Float = m_currShader->GetNewVariable(src0);
+        src1Float = m_currShader->GetNewVariable(
+          src1Int, CName(src1Int->getName(), "float"));
+        src1Float = m_currShader->BitCast(src1Float, src0->GetType());
         m_encoder->Cast(src1Float, src1Int);
     }
     m_encoder->SetDstModifier(modifier);
@@ -2732,6 +2799,72 @@ void EmitPass::EmitIntegerTruncWithSat(bool isSignedDst, bool isSignedSrc, const
 
     m_encoder->Cast(dst, src);
     m_encoder->Push();
+}
+
+// Emits 4 conversion instructions that downconvert 4 values to a packed
+// <4 x i8> value.
+void EmitPass::EmitPack4i8(const std::array<SSource, 4>& sources, const std::array<bool, 4> isSat, const DstModifier& dstMod)
+{
+    CVariable* dst = m_currShader->GetNewAlias(m_destination, ISA_TYPE_B, 0, 0);
+    for (uint32_t i = 0; i < 4; ++i)
+    {
+        DstModifier mod = dstMod;
+        mod.sat = isSat[i];
+        m_encoder->SetDstModifier(mod);
+        CVariable* src = GetSrcVariable(sources[i]);
+
+        m_encoder->SetDstRegion(4);
+        m_encoder->SetDstSubReg(i);
+        m_encoder->Cast(dst, src);
+        m_encoder->Push();
+    }
+}
+
+// Emits a conversion instruction that upconverts an 8-bit value from
+// a packed <4 x i8> value.
+void EmitPass::EmitUnpack4i8(const SSource& source, uint32_t index, bool isUnsigned, const DstModifier& dstMod)
+{
+    auto type = isUnsigned ? ISA_TYPE_UB : ISA_TYPE_B;
+    CVariable* src = m_currShader->GetNewAlias(GetSrcVariable(source), type, 0, 0);
+    CVariable* dst = m_destination;
+    if (isUnsigned)
+    {
+        dst = m_currShader->BitCast(dst, GetUnsignedIntegerType(dst->GetType()));
+    }
+    m_encoder->SetDstModifier(dstMod);
+    m_encoder->SetSrcSubReg(0, index);
+    if (!src->IsUniform())
+    {
+        m_encoder->SetSrcRegion(0, 4, 1, 0);
+    }
+    m_encoder->Cast(dst, src);
+    m_encoder->Push();
+}
+
+// Emits 8-bit integer move operations that repack 4 i8 values from a packed
+// <4 x i8> variale into a packed <4 x i8> destination variable.
+void EmitPass::EmitRepack4i8(const std::array<SSource, 4>& sources, const std::array<uint32_t, 4>& mappings, const DstModifier& dstMod)
+{
+    CVariable* dst = m_currShader->GetNewAlias(m_destination, ISA_TYPE_UB, 0, 0);
+    for (uint32_t i = 0; i < 4; ++i)
+    {
+        if (isa<UndefValue>(sources[i].value))
+        {
+            continue;
+        }
+        m_encoder->SetDstModifier(dstMod);
+        CVariable* src = GetSrcVariable(sources[i]);
+
+        m_encoder->SetDstRegion(4);
+        m_encoder->SetDstSubReg(i);
+        m_encoder->SetSrcSubReg(0, mappings[i]);
+        if (!src->IsUniform())
+        {
+            m_encoder->SetSrcRegion(0, 4, 1, 0);
+        }
+        m_encoder->Cast(dst, src);
+        m_encoder->Push();
+    }
 }
 
 // This function generates copy:
@@ -2951,6 +3084,7 @@ void EmitPass::EmitInsertValueToStruct(InsertValueInst* inst)
         CVariable* SrcV = GetSymbol(src0);
         if (DstV != SrcV)
         {
+            m_encoder->Lifetime(VISAVarLifetime::LIFETIME_START, DstV);
             // Only copy SrcV's elements that have been initialized already.
             // For the example, DstV = %13, SrcV = %9;
             // 'toBeCopied' will be field {0, 1}, not {0,1,2,3}.
@@ -3233,6 +3367,60 @@ void EmitPass::EmitExtractValueFromLayoutStruct(ExtractValueInst* EVI)
     }
     else {
         emitVectorCopy(DstV, srcVal, n);
+    }
+}
+
+void EmitPass::EmitSelectStruct(SelectInst* SI)
+{
+    StructType* sTy = dyn_cast<StructType>(SI->getType());
+    IGC_ASSERT_MESSAGE(sTy, "This method is only for structs");
+
+    const uint32_t nLanes = numLanes(m_currShader->m_SIMDSize);
+
+    auto* srcTrueV = SI->getTrueValue();
+    auto* srcFalseV = SI->getFalseValue();
+
+    auto* srcTrueS = GetSymbol(srcTrueV);
+    auto* srcFalseS = GetSymbol(srcFalseV);
+    auto* destS = GetSymbol(SI);
+    auto* cond = GetSymbol(SI->getCondition());
+
+    if (srcTrueS != destS && srcFalseS != destS)
+        // if we aren't coalescing with any of the operands, emit lifetime start for the struct
+        m_encoder->Lifetime(VISAVarLifetime::LIFETIME_START, destS);
+
+    auto iterator = {
+        std::make_tuple(srcTrueV, srcTrueS, false),
+        std::make_tuple(srcFalseV, srcFalseS, true)
+    };
+
+    for (auto& [srcV, srcS, inv] : iterator)
+    {
+        // For now, do not support uniform dst and non-uniform src
+        IGC_ASSERT_MESSAGE(!srcS->IsUniform() || srcS->IsUniform() == destS->IsUniform(),
+            "Can't select non-uniform value into a uniform struct!");
+
+        if (srcS == destS)
+            continue;
+
+        SmallVector<std::vector<unsigned>> toBeCopied;
+        getAllDefinedMembers(srcV, toBeCopied);
+        for (const auto& II : toBeCopied)
+        {
+
+            Type* ty;
+            uint32_t byteOffset;
+            getStructMemberByteOffsetAndType_1(m_DL, sTy, II, ty, byteOffset);
+
+            uint32_t d_off =
+                byteOffset * (destS->IsUniform() ? 1 : nLanes);
+            uint32_t s_off =
+                byteOffset * (srcS->IsUniform() ? 1 : nLanes);
+
+            m_encoder->SetPredicate(cond);
+            m_encoder->SetInversePredicate(inv);
+            emitMayUnalignedVectorCopy(destS, d_off, srcS, s_off, ty);
+        }
     }
 }
 
@@ -4391,22 +4579,6 @@ void EmitPass::BinaryUnary(llvm::Instruction* inst, const SSource source[2], con
     }
 }
 
-void EmitPass::Sub(const SSource sources[2], const DstModifier& modifier)
-{
-    CVariable* src0 = GetSrcVariable(sources[0]);
-    CVariable* src1 = GetSrcVariable(sources[1]);
-    e_modifier mod1 = CombineModifier(EMOD_NEG, sources[1].mod);
-
-    m_encoder->SetDstModifier(modifier);
-    SetSourceModifiers(0, sources[0]);
-    SetSourceModifiers(1, sources[1]);
-    // override modifier of source 1
-    m_encoder->SetSrcModifier(1, mod1);
-    m_encoder->Add(m_destination, src0, src1);
-    m_encoder->Push();
-
-}
-
 void EmitPass::Mul64(CVariable* dst, CVariable* src[2], SIMDMode simdMode, bool noMask) const
 {
 
@@ -4592,12 +4764,12 @@ void EmitPass::Mul64(CVariable* dst, CVariable* src[2], SIMDMode simdMode, bool 
     m_encoder->Push();
 }
 
-static unsigned int getVectorSize(Value *I) {
+static unsigned getVectorSize(Value *I) {
     IGCLLVM::FixedVectorType *VecType =
         llvm::dyn_cast<IGCLLVM::FixedVectorType>(I->getType());
     if (!VecType)
-        return 0;
-    unsigned int NumElements = VecType->getNumElements();
+        IGC_ASSERT_EXIT_MESSAGE(0, "IGC Vectorizer always creates FixedVectors, we do not expect other vector types");
+    unsigned NumElements = VecType->getNumElements();
     return NumElements;
 }
 
@@ -4605,24 +4777,24 @@ void EmitPass::FPTrunc(const SSource sources[2], const DstModifier& modifier) {
 
     CVariable* src[2];
     src[0] = GetSrcVariable(sources[0]);
-    if (IGC_IS_FLAG_ENABLED(EnableVectorEmitter) && sources[0].value->getType()->isVectorTy()) {
+    if (IGC_IS_FLAG_ENABLED(EnableVectorEmitter) &&
+            sources[0].value->getType()->isVectorTy()) {
 
-        unsigned int VectorSize = 0;
-        if (llvm::isa<Instruction>(sources[0].value))
-            VectorSize = getVectorSize(llvm::cast<Instruction>(sources[0].value));
+        IGC_ASSERT_EXIT_MESSAGE(numLanes(m_encoder->GetSimdSize()) == 16, "As of now Vector Emission is only supported for SIMD16");
+        unsigned VectorSize = getVectorSize(sources[0].value);
 
         // float is 4 bytes --> divide by 4
-        unsigned int NumberOfFloatsThatFitInRegister = m_currShader->getGRFSize()/4;
-        for (unsigned int i = 0; i < VectorSize; ++i) {
+        unsigned NumberOfFloatsThatFitInRegister = m_currShader->getGRFSize()/4;
+        for (unsigned i = 0; i < VectorSize; ++i) {
 
             // this is FPTrunc we move from 32bits to 16 this gives us factor of 2
-            unsigned int row = i / 2;
+            unsigned row = i / 2;
             // now we can fit twice as many half floats into the same register:
             // .decl vector331 v_type=G type=f num_elts=128 align=wordx32
             // .decl vectorized_cast v_type=G type=hf num_elts=128 align=wordx32
             // mov (M1, 16) vectorized_cast(0,0 <-- this is odd col)<1> vector331(0,0)<1;1,0>
             // mov (M1, 16) vectorized_cast(0,16 <-- this is even col)<1> vector331(1,0)<1;1,0>
-            unsigned int col = (i%2) * NumberOfFloatsThatFitInRegister;
+            unsigned col = (i%2) * NumberOfFloatsThatFitInRegister;
             SetSourceModifiers(0, sources[0]);
             if (src[0]->IsUniform()) { m_encoder->SetSrcSubReg(0, i); }
             else m_encoder->SetSrcSubVar(0, i);
@@ -4635,6 +4807,67 @@ void EmitPass::FPTrunc(const SSource sources[2], const DstModifier& modifier) {
     }
 }
 
+void EmitPass::Sub(const SSource sources[2], const DstModifier& modifier)
+{
+    CVariable* src[2];
+    for (int i = 0; i < 2; ++i)
+    {
+        src[i] = GetSrcVariable(sources[i]);
+    }
+    e_modifier mod1 = CombineModifier(EMOD_NEG, sources[1].mod);
+
+    if (IGC_IS_FLAG_ENABLED(EnableVectorEmitter) &&
+            sources[0].value->getType()->isVectorTy() &&
+            sources[1].value->getType()->isVectorTy()) {
+
+        IGC_ASSERT_EXIT_MESSAGE(m_encoder->GetSimdSize() == lanesToSIMDMode(16), "As of now Vector Emission is only supported for SIMD16");
+
+        unsigned VectorSize = getVectorSize(sources[0].value);
+
+        bool AllUniform = src[0]->IsUniform() && src[1]->IsUniform() && m_destination->IsUniform();
+
+        if (IGC_IS_FLAG_ENABLED(VectorizerUniformValueVectorizationEnabled) && AllUniform && VectorSize <= 16) {
+            m_encoder->SetSrcModifier(1, mod1);
+            m_encoder->SetSrcRegion(0, 1, 1, 0);
+            m_encoder->SetSrcRegion(1, 1, 1, 0);
+            m_encoder->SetUniformSIMDSize(lanesToSIMDMode(VectorSize));
+            m_encoder->Add(m_destination, src[0], src[1]);
+            m_encoder->Push();
+            return;
+        }
+
+        for (unsigned i = 0; i < VectorSize; ++i) {
+            SetSourceModifiers(0, sources[0]);
+            SetSourceModifiers(1, sources[1]);
+            m_encoder->SetSrcModifier(1, mod1);
+
+            if (src[0]->IsUniform())
+                m_encoder->SetSrcSubReg(0, i);
+            else
+                m_encoder->SetSrcSubVar(0, i);
+            if (src[1]->IsUniform())
+                m_encoder->SetSrcSubReg(1, i);
+            else
+                m_encoder->SetSrcSubVar(1, i);
+
+            if (src[0]->IsUniform() && src[1]->IsUniform()) m_encoder->SetDstSubReg(i);
+            else m_encoder->SetDstSubVar(i);
+
+            m_encoder->Add(m_destination, src[0], src[1]);
+            m_encoder->Push();
+        }
+        return;
+    }
+
+    m_encoder->SetDstModifier(modifier);
+    SetSourceModifiers(0, sources[0]);
+    SetSourceModifiers(1, sources[1]);
+    // override modifier of source 1
+    m_encoder->SetSrcModifier(1, mod1);
+    m_encoder->Add(m_destination, src[0], src[1]);
+    m_encoder->Push();
+}
+
 
 void EmitPass::Add(const SSource sources[2], const DstModifier& modifier)
 {
@@ -4644,13 +4877,29 @@ void EmitPass::Add(const SSource sources[2], const DstModifier& modifier)
         src[i] = GetSrcVariable(sources[i]);
     }
 
-    if (IGC_IS_FLAG_ENABLED(EnableVectorEmitter) && sources[0].value->getType()->isVectorTy() && sources[1].value->getType()->isVectorTy()) {
+    if (IGC_IS_FLAG_ENABLED(EnableVectorEmitter) &&
+            sources[0].value->getType()->isVectorTy() &&
+            sources[1].value->getType()->isVectorTy()) {
 
-        unsigned int VectorSize = 0;
-        if (llvm::isa<Instruction>(sources[0].value))
-            VectorSize = getVectorSize(llvm::cast<Instruction>(sources[0].value));
+        IGC_ASSERT_EXIT_MESSAGE(numLanes(m_encoder->GetSimdSize()) == 16, "As of now Vector Emission is only supported for SIMD16");
+        unsigned VectorSize = getVectorSize(sources[0].value);
 
-        for (unsigned int i = 0; i < VectorSize; ++i) {
+        bool AllUniform = src[0]->IsUniform() && src[1]->IsUniform() && m_destination->IsUniform();
+        // cannot emit 16 SIMD if SIMD SIZE is set to 8, but can emit 4
+        // simple ALU instructions has the same possible width as SIMD, "math" pipeline instructions
+        // has reduced width
+        bool CanEmitThisSize = VectorSize <= numLanes(m_currShader->m_SIMDSize);
+
+        if (IGC_IS_FLAG_ENABLED(VectorizerUniformValueVectorizationEnabled) && AllUniform && CanEmitThisSize) {
+            m_encoder->SetSrcRegion(0, 1, 1, 0);
+            m_encoder->SetSrcRegion(1, 1, 1, 0);
+            m_encoder->SetUniformSIMDSize(lanesToSIMDMode(VectorSize));
+            m_encoder->Add(m_destination, src[0], src[1]);
+            m_encoder->Push();
+            return;
+        }
+
+        for (unsigned i = 0; i < VectorSize; ++i) {
             SetSourceModifiers(0, sources[0]);
             SetSourceModifiers(1, sources[1]);
 
@@ -4683,13 +4932,31 @@ void EmitPass::Mul(const SSource sources[2], const DstModifier& modifier)
         src[i] = GetSrcVariable(sources[i]);
     }
 
-    if (IGC_IS_FLAG_ENABLED(EnableVectorEmitter) && sources[0].value->getType()->isVectorTy() && sources[1].value->getType()->isVectorTy()) {
+    unsigned SIMDSize = numLanes(m_currShader->m_SIMDSize);
 
-        unsigned int VectorSize = 0;
-        if (llvm::isa<Instruction>(sources[0].value))
-            VectorSize = getVectorSize(llvm::cast<Instruction>(sources[0].value));
+    if (IGC_IS_FLAG_ENABLED(EnableVectorEmitter) &&
+            sources[0].value->getType()->isVectorTy() &&
+            sources[1].value->getType()->isVectorTy()) {
 
-        for (unsigned int i = 0; i < VectorSize; ++i) {
+        IGC_ASSERT_EXIT_MESSAGE(numLanes(m_encoder->GetSimdSize()) == 16, "As of now Vector Emission is only supported for SIMD16");
+        unsigned VectorSize = getVectorSize(sources[0].value);
+
+        bool AllUniform = src[0]->IsUniform() && src[1]->IsUniform() && m_destination->IsUniform();
+        // cannot emit 16 SIMD if SIMD SIZE is set to 8, but can emit 4
+        // simple ALU instructions has the same possible width as SIMD, "math" pipeline instructions
+        // has reduced width
+        bool CanEmitThisSize = VectorSize <= SIMDSize;
+
+        if (IGC_IS_FLAG_ENABLED(VectorizerUniformValueVectorizationEnabled) && AllUniform && CanEmitThisSize) {
+            m_encoder->SetSrcRegion(0, 1, 1, 0);
+            m_encoder->SetSrcRegion(1, 1, 1, 0);
+            m_encoder->SetUniformSIMDSize(lanesToSIMDMode(VectorSize));
+            m_encoder->Mul(m_destination, src[0], src[1]);
+            m_encoder->Push();
+            return;
+        }
+
+        for (unsigned i = 0; i < VectorSize; ++i) {
             SetSourceModifiers(0, sources[0]);
             SetSourceModifiers(1, sources[1]);
 
@@ -4740,13 +5007,14 @@ void EmitPass::Div(const SSource sources[2], const DstModifier& modifier)
     CVariable* src[2];
     for (int i = 0; i < 2; ++i) src[i] = GetSrcVariable(sources[i]);
 
-    if (IGC_IS_FLAG_ENABLED(EnableVectorEmitter) && sources[0].value->getType()->isVectorTy() && sources[1].value->getType()->isVectorTy()) {
+    if (IGC_IS_FLAG_ENABLED(EnableVectorEmitter) &&
+            sources[0].value->getType()->isVectorTy() &&
+            sources[1].value->getType()->isVectorTy()) {
 
-        unsigned int VectorSize = 0;
-        if (llvm::isa<Instruction>(sources[0].value))
-            VectorSize = getVectorSize(llvm::cast<Instruction>(sources[0].value));
+        IGC_ASSERT_EXIT_MESSAGE(numLanes(m_encoder->GetSimdSize()) == 16, "As of now Vector Emission is only supported for SIMD16");
+        unsigned VectorSize = getVectorSize(sources[0].value);
 
-        for (unsigned int i = 0; i < VectorSize; ++i) {
+        for (unsigned i = 0; i < VectorSize; ++i) {
             SetSourceModifiers(0, sources[0]);
             SetSourceModifiers(1, sources[1]);
 
@@ -4771,15 +5039,15 @@ void EmitPass::Inv(const SSource sources[2], const DstModifier& modifier) {
             sources[0].value->getType()->isVectorTy() &&
             sources[1].value->getType()->isVectorTy()) {
 
-        unsigned int VectorSize = 0;
-        if (llvm::isa<Value>(sources[0].value))
-            VectorSize = getVectorSize(llvm::cast<Value>(sources[0].value));
+        IGC_ASSERT_EXIT_MESSAGE(numLanes(m_encoder->GetSimdSize()) == 16, "As of now Vector Emission is only supported for SIMD16");
+        unsigned VectorSize = getVectorSize(sources[0].value);
 
         CVariable* src[1];
-        // sources[0] got used to check that it contains all 1
+        // sources[0] was used to check that it contains all 1
+        // that's why we are in INV
         src[0] = GetSrcVariable(sources[1]);
 
-        for (unsigned int i = 0; i < VectorSize; ++i) {
+        for (unsigned i = 0; i < VectorSize; ++i) {
             SetSourceModifiers(0, sources[1]);
 
             if (src[0]->IsUniform()) {
@@ -4797,12 +5065,164 @@ void EmitPass::Inv(const SSource sources[2], const DstModifier& modifier) {
     return;
 }
 
+void EmitPass::MaxNum(const SSource sources[2], const DstModifier &modifier) {
+  CVariable *src[2];
+  for (int i = 0; i < 2; ++i) {
+    src[i] = GetSrcVariable(sources[i]);
+  }
+
+  if (IGC_IS_FLAG_ENABLED(EnableVectorEmitter) &&
+      sources[0].value->getType()->isVectorTy() &&
+      sources[1].value->getType()->isVectorTy()) {
+
+    IGC_ASSERT_EXIT_MESSAGE(
+        numLanes(m_encoder->GetSimdSize()) == 16,
+        "As of now Vector Emission is only supported for SIMD16");
+    unsigned VectorSize = getVectorSize(sources[0].value);
+
+    bool AllUniform = src[0]->IsUniform() && src[1]->IsUniform() &&
+                      m_destination->IsUniform();
+    // cannot emit instruction with EXEC_SIZE 32 if SIMD SIZE of the kernel
+    // is set to 16, but can emit 2, 4, 8, 16
+    // simple ALU instruction has the same possible width as SIMD, "math"
+    // pipeline instruction has reduced width
+    bool CanEmitThisSize = VectorSize <= numLanes(m_currShader->m_SIMDSize);
+
+    if (IGC_IS_FLAG_ENABLED(VectorizerUniformValueVectorizationEnabled) &&
+        AllUniform && CanEmitThisSize) {
+      m_encoder->SetSrcRegion(0, 1, 1, 0);
+      m_encoder->SetSrcRegion(1, 1, 1, 0);
+      m_encoder->SetUniformSIMDSize(lanesToSIMDMode(VectorSize));
+      m_encoder->Max(m_destination, src[0], src[1]);
+      m_encoder->Push();
+      return;
+    }
+
+    for (unsigned i = 0; i < VectorSize; ++i) {
+      SetSourceModifiers(0, sources[0]);
+      SetSourceModifiers(1, sources[1]);
+
+      if (src[0]->IsUniform())
+        m_encoder->SetSrcSubReg(0, i);
+      else
+        m_encoder->SetSrcSubVar(0, i);
+      if (src[1]->IsUniform())
+        m_encoder->SetSrcSubReg(1, i);
+      else
+        m_encoder->SetSrcSubVar(1, i);
+
+      if (src[0]->IsUniform() && src[1]->IsUniform())
+        m_encoder->SetDstSubReg(i);
+      else
+        m_encoder->SetDstSubVar(i);
+
+      m_encoder->Max(m_destination, src[0], src[1]);
+      m_encoder->Push();
+    }
+    return;
+  }
+
+  IGC_ASSERT_EXIT_MESSAGE(0, " if we are at this part, something went wrong "
+                             "with maxnum vectorization");
+}
+
+void EmitPass::Exp2(const SSource sources[2], const DstModifier& modifier) {
+
+    if (IGC_IS_FLAG_ENABLED(EnableVectorEmitter) &&
+            sources[0].value->getType()->isVectorTy()) {
+
+        IGC_ASSERT_EXIT_MESSAGE(m_encoder->GetSimdSize() == lanesToSIMDMode(16), "As of now Vector Emission is only supported for SIMD16");
+
+        unsigned VectorSize = getVectorSize(sources[0].value);
+
+        CVariable* src[1];
+        src[0] = GetSrcVariable(sources[0]);
+        bool AllUniform = src[0]->IsUniform() && m_destination->IsUniform();
+
+        if (IGC_IS_FLAG_ENABLED(VectorizerUniformValueVectorizationEnabled) && AllUniform && VectorSize <= 16) {
+            m_encoder->SetSrcRegion(0, 1, 1, 0);
+            m_encoder->SetUniformSIMDSize(lanesToSIMDMode(VectorSize));
+            m_encoder->Exp(m_destination, src[0]);
+            m_encoder->Push();
+            return;
+        }
+
+        for (unsigned i = 0; i < VectorSize; ++i) {
+            SetSourceModifiers(0, sources[0]);
+
+            if (AllUniform) {
+                m_encoder->SetSrcSubReg(0, i);
+                m_encoder->SetDstSubReg(i);
+            }
+            else {
+                m_encoder->SetSrcSubVar(0, i);
+                m_encoder->SetDstSubVar(i);
+            }
+            m_encoder->Exp(m_destination, src[0]);
+            m_encoder->Push();
+        }
+    }
+    return;
+}
+
+
+void EmitPass::VectorMad(const SSource sources[3], const DstModifier& modifier) {
+
+    CVariable* src[3];
+    for (int i = 0; i < 3; ++i) src[i] = GetSrcVariable(sources[i]);
+
+    unsigned VectorSize = getVectorSize(sources[0].value);
+
+    bool AllUniform = src[0]->IsUniform() &&
+        src[1]->IsUniform() && src[2]->IsUniform() &&
+        m_destination->IsUniform();
+
+    // cannot emit 16 SIMD if SIMD SIZE is set to 8, but can emit 4
+    // simple ALU instructions has the same possible width as SIMD, "math" pipeline instructions
+    // has reduced width
+    bool CanEmitThisSize = VectorSize <= numLanes(m_currShader->m_SIMDSize);
+
+    if (IGC_IS_FLAG_ENABLED(VectorizerUniformValueVectorizationEnabled) && AllUniform && CanEmitThisSize) {
+        // regioning must be updated by hand, DO NOT COPY for fptrunc
+        m_encoder->SetSrcRegion(0, 1, 1, 0);
+        m_encoder->SetSrcRegion(1, 1, 1, 0);
+        m_encoder->SetSrcRegion(2, 1, 1, 0);
+        // this will force no_mask and proper uniform SIMD SIZE
+        m_encoder->SetUniformSIMDSize(lanesToSIMDMode(VectorSize));
+        m_encoder->Mad(m_destination, src[0], src[1], src[2]);
+        m_encoder->Push();
+        return;
+    }
+
+    for (unsigned i = 0; i < VectorSize; ++i) {
+
+        SetSourceModifiers(0, sources[0]);
+        SetSourceModifiers(1, sources[1]);
+        SetSourceModifiers(2, sources[2]);
+
+        if (src[0]->IsUniform()) m_encoder->SetSrcSubReg(0, i);
+        else m_encoder->SetSrcSubVar(0, i);
+        if (src[1]->IsUniform()) m_encoder->SetSrcSubReg(1, i);
+        else m_encoder->SetSrcSubVar(1, i);
+        if (src[2]->IsUniform()) m_encoder->SetSrcSubReg(2, i);
+        else m_encoder->SetSrcSubVar(2, i);
+
+
+        if (AllUniform) m_encoder->SetDstSubReg(i);
+        else m_encoder->SetDstSubVar(i);
+
+        m_encoder->Mad(m_destination, src[0], src[1], src[2]);
+        m_encoder->Push();
+    }
+}
+
 void EmitPass::FDiv(const SSource sources[2], const DstModifier& modifier)
 {
     if (IGC_IS_FLAG_ENABLED(EnableVectorEmitter) &&
             sources[0].value->getType()->isVectorTy() &&
             sources[1].value->getType()->isVectorTy()) {
 
+        IGC_ASSERT_EXIT_MESSAGE(numLanes(m_encoder->GetSimdSize()) == 16, "As of now Vector Emission is only supported for SIMD16");
         if (isVectorOfOnes(sources[0].value)) Inv(sources, modifier);
         else Div(sources,modifier);
 
@@ -5057,7 +5477,6 @@ void EmitPass::Select(const SSource sources[3], const DstModifier& modifier)
 
     m_encoder->Select(flag, m_destination, src0, src1);
     m_encoder->Push();
-
 }
 
 void EmitPass::PredAdd(const SSource& pred, bool invert, const SSource sources[2], const DstModifier& modifier)
@@ -5196,6 +5615,9 @@ void EmitPass::emitSetDebugReg(llvm::Instruction* inst)
         m_encoder->Copy(m_currShader->GetDBG(), src);
         m_encoder->Push();
     }
+
+    if (inst->use_empty())
+        return;
 
     // read dbg0.1
     m_encoder->SetSrcSubReg(0, 1);
@@ -5758,13 +6180,32 @@ void EmitPass::emitSimdShuffle(llvm::Instruction* inst)
         // bit set. Inactive lanes contain garbage data and may cause an
         // out-of-bounds register access.
         bool laneIdCanBeOOB = !m_currShader->m_DriverInfo->needsRegisterAccessBoundsChecks();
-        if (!m_currShader->m_Platform->supportsOutOfBoundsGrfAccess() &&
-            !channelUniform &&
-            (m_encoder->IsSubSpanDestination() || laneIdCanBeOOB))
+
+        bool defaultConditions =
+            (!m_currShader->m_Platform->supportsOutOfBoundsGrfAccess() &&
+             !channelUniform &&
+             (m_encoder->IsSubSpanDestination() || laneIdCanBeOOB));
+
+        // Enabling movi requires that first lane even inactive will be within bounds of register we want.
+        // It also is limited to accessing single GRF.
+        // For uniform channel which will be simd1 there's probably no gain in movi.
+        bool moviPromotionEnabled = IGC_GET_FLAG_VALUE(EnableEmitMoreMoviCases);
+        bool isSingleGrf = data->GetSize() <= (unsigned)getGRFSize();
+        bool platformMoviTypeCheck = m_currShader->m_Platform->allowsMoviForType(data->GetType());
+        bool forcePreventOOB = isSingleGrf && moviPromotionEnabled && platformMoviTypeCheck && !channelUniform;
+
+        if (defaultConditions || forcePreventOOB)
         {
             uint maskOfValidLanes = numLanes(m_currShader->m_State.m_dispatchSize) - 1;
             m_encoder->SetSrcRegion(0, 2, 1, 0);
             m_encoder->SetDstRegion(2);
+
+            // To support conversion to movi we need to make all calculations (shl, addr_add) of address NoMask.
+            // to avoid random data from previous execution in divergent CF.
+            if (forcePreventOOB)
+            {
+                m_encoder->SetNoMask();
+            }
             m_encoder->And(simdChannelUW, simdChannelUW,
                 m_currShader->ImmToVariable(maskOfValidLanes, ISA_TYPE_UW));
             m_encoder->Push();
@@ -5779,6 +6220,10 @@ void EmitPass::emitSimdShuffle(llvm::Instruction* inst)
         if (!channelUniform)
         {
             m_encoder->SetSrcRegion(0, 16, 8, 2);
+        }
+        if (forcePreventOOB)
+        {
+            m_encoder->SetNoMask();
         }
         m_encoder->Shl(pSrcElm, simdChannelUW,
             m_currShader->ImmToVariable(shtAmt, ISA_TYPE_UW));
@@ -5818,6 +6263,10 @@ void EmitPass::emitSimdShuffle(llvm::Instruction* inst)
                 else // !channelUniform
                 {
                     m_encoder->SetSimdSize(SIMDMode::SIMD16);
+                    if (forcePreventOOB)
+                    {
+                        m_encoder->SetNoMask();
+                    }
 
                     m_encoder->AddrAdd(pDstArrElm, src, pSrcElm);
                     m_encoder->Push();
@@ -5853,6 +6302,10 @@ void EmitPass::emitSimdShuffle(llvm::Instruction* inst)
                     m_encoder->SetMask(EMASK_H2);
                     m_encoder->SetSrcSubReg(0, 16);
                     m_encoder->SetSrcSubReg(1, 16);
+                    if (forcePreventOOB)
+                    {
+                        m_encoder->SetNoMask();
+                    }
                     m_encoder->AddrAdd(pDstArrElm, src, pSrcElm);
                     m_encoder->Push();
 
@@ -5923,6 +6376,10 @@ void EmitPass::emitSimdShuffle(llvm::Instruction* inst)
             {
                 // also calculate the second half of address
                 m_encoder->SetSrcRegion(0, 16, 8, 2);
+                if (forcePreventOOB)
+                {
+                    m_encoder->SetNoMask();
+                }
                 m_encoder->Shl(pSrcElm, simdChannelUW,
                     m_currShader->ImmToVariable(shtAmt, ISA_TYPE_UW));
                 m_encoder->Push();
@@ -5945,6 +6402,11 @@ void EmitPass::emitSimdShuffle(llvm::Instruction* inst)
             true,
             m_destination->getName());
 
+        if (forcePreventOOB)
+        {
+            m_encoder->SetNoMask();
+        }
+
         m_encoder->AddrAdd(pDstArrElm, src, pSrcElm);
         m_encoder->Push();
 
@@ -5954,6 +6416,10 @@ void EmitPass::emitSimdShuffle(llvm::Instruction* inst)
         if (isSimd32)
         {
             m_encoder->SetSecondHalf(true);
+            if (forcePreventOOB)
+            {
+                m_encoder->SetNoMask();
+            }
             m_encoder->AddrAdd(pDstArrElm, src, pSrcElm);
             m_encoder->Push();
             m_encoder->Copy(m_destination, pDstArrElm);
@@ -8233,7 +8699,7 @@ void EmitPass::emitSampleInstruction(SampleIntrinsic* inst)
 {
     EOPCODE opCode = GetOpCode(inst);
 
-    m_currShader->m_State.SetHasSample();
+    m_currShader->m_State.SetHasSampleInst();
     ResourceDescriptor resource = GetSampleResourceHelper(inst);
     bool isEval = isUsedOnlyByEval(inst);
     ResourceDescriptor pairedResource = inst->hasPairedTextureArg() && llvm::isa<llvm::UndefValue>(inst->getPairedTextureValue()) == false ?
@@ -8663,6 +9129,7 @@ void EmitPass::emitGather4Instruction(SamplerGatherIntrinsic* inst)
 {
     EOPCODE opCode = GetOpCode(inst);
     uint numOperands = inst->getNumOperands();
+    m_currShader->m_State.SetHasGather4Inst();
 
     //Subtract the offsets, resource and sampler sources to get
     //the number of texture coordinates, src channel select and index to texture source
@@ -8784,6 +9251,7 @@ void EmitPass::emitLdmsInstruction(llvm::Instruction* inst)
 {
     uint numOperands = inst->getNumOperands();
     EOPCODE opCode = GetOpCode(inst);
+    m_currShader->m_State.SetHasLoadInst();
     //Subtract the offsets, and texture resource, lod to get
     //the number of texture coordinates and index to texture source
     uint numSources = numOperands - 5;
@@ -9190,6 +9658,7 @@ void EmitPass::EmitGenIntrinsicMessage(llvm::GenIntrinsicInst* inst)
     case GenISAIntrinsic::GenISA_fcmpxchgatomicraw:
     case GenISAIntrinsic::GenISA_icmpxchgatomicrawA64:
     case GenISAIntrinsic::GenISA_fcmpxchgatomicrawA64:
+    case GenISAIntrinsic::GenISA_intatomicrawsinglelane:
         emitAtomicRaw(inst, inst->getOperand(1));
         break;
     case GenISAIntrinsic::GenISA_intatomictyped:
@@ -9243,6 +9712,8 @@ void EmitPass::EmitGenIntrinsicMessage(llvm::GenIntrinsicInst* inst)
     case GenISAIntrinsic::GenISA_2fto2bf:
     case GenISAIntrinsic::GenISA_hftobf8:
     case GenISAIntrinsic::GenISA_bf8tohf:
+    case GenISAIntrinsic::GenISA_hftohf8:
+    case GenISAIntrinsic::GenISA_hf8tohf:
     case GenISAIntrinsic::GenISA_ftotf32:
         emitfcvt(inst);
         break;
@@ -9262,6 +9733,7 @@ void EmitPass::EmitGenIntrinsicMessage(llvm::GenIntrinsicInst* inst)
         emitLoadRawIndexed(
             cast<LdRawIntrinsic>(inst),
             cast<LdRawIntrinsic>(inst)->getOffsetValue(),
+            nullptr,
             nullptr);
         break;
     case GenISAIntrinsic::GenISA_storerawvector_indexed:
@@ -9269,6 +9741,7 @@ void EmitPass::EmitGenIntrinsicMessage(llvm::GenIntrinsicInst* inst)
         emitStoreRawIndexed(
             cast<StoreRawIntrinsic>(inst),
             cast<StoreRawIntrinsic>(inst)->getOffsetValue(),
+            nullptr,
             nullptr);
         break;
     case GenISAIntrinsic::GenISA_GetBufferPtr:
@@ -9312,6 +9785,32 @@ void EmitPass::EmitGenIntrinsicMessage(llvm::GenIntrinsicInst* inst)
         m_encoder->SetSrcSubReg(0, 1);
         m_encoder->SetDstSubReg(1);
         m_encoder->Or(m_currShader->GetCR0(), m_currShader->GetCR0(), Mask);
+        m_encoder->Push();
+        break;
+    }
+    case GenISAIntrinsic::GenISA_enable_ieee_exception_trap:
+    {
+        // Set IEEE Exception Trap bit.
+        CVariable *Mask = m_currShader->ImmToVariable(
+            1 << 9,
+            ISA_TYPE_UD);
+
+        m_encoder->SetSrcSubReg(0, 0);
+        m_encoder->SetDstSubReg(0);
+        m_encoder->Or(m_currShader->GetCR0(), m_currShader->GetCR0(), Mask);
+        m_encoder->Push();
+        break;
+    }
+    case GenISAIntrinsic::GenISA_disable_ieee_exception_trap:
+    {
+        // Disable IEEE Exception Trap bit.
+        CVariable *Mask = m_currShader->ImmToVariable(
+            ~(1 << 9),
+            ISA_TYPE_UD);
+
+        m_encoder->SetSrcSubReg(0, 0);
+        m_encoder->SetDstSubReg(0);
+        m_encoder->And(m_currShader->GetCR0(), m_currShader->GetCR0(), Mask);
         m_encoder->Push();
         break;
     }
@@ -9432,7 +9931,18 @@ void EmitPass::EmitGenIntrinsicMessage(llvm::GenIntrinsicInst* inst)
     }
     case GenISAIntrinsic::GenISA_getSR0:
     {
-        m_encoder->SetSrcSubReg(0, static_cast<uint16_t>(GetImmediateVal(inst->getOperand(0))));
+        if (!isa<ConstantInt>(inst->getOperand(0)))
+        {
+            m_pCtx->EmitError("Expected constant operand 0 for GenISA_getSR0 intrinsic.", inst);
+            return;
+        }
+        uint subReg = GetImmediateVal(inst->getOperand(0));
+        if (subReg > 3)
+        {
+            m_pCtx->EmitError("GenISA_getSR0 intrinsic expects operand 0 value in the range [0-3].", inst);
+            return;
+        }
+        m_encoder->SetSrcSubReg(0, static_cast<uint16_t>(subReg));
         m_encoder->Copy(m_destination, m_currShader->GetSR0());
         m_encoder->Push();
         break;
@@ -9441,6 +9951,36 @@ void EmitPass::EmitGenIntrinsicMessage(llvm::GenIntrinsicInst* inst)
     {
         m_encoder->SetSrcSubReg(0, 0);
         m_encoder->Copy(m_destination, m_currShader->GetSR0());
+        m_encoder->Push();
+        break;
+    }
+    case GenISAIntrinsic::GenISA_setSR0:
+    {
+        if (!isa<ConstantInt>(inst->getOperand(0)))
+        {
+            m_pCtx->EmitError("Expected constant operand 0 for GenISA_setSR0 intrinsic.", inst);
+            return;
+        }
+        uint subReg = GetImmediateVal(inst->getOperand(0));
+        if (subReg != 1 && subReg != 2)
+        {
+            m_pCtx->EmitError("GenISA_setSR0 intrinsic expects operand 0 value to be 1 or 2. Other parts of SR0 are read-only.", inst);
+            return;
+        }
+        m_encoder->SetDstSubReg(static_cast<uint16_t>(subReg));
+        CVariable* val = GetSymbol(inst->getOperand(1));
+        if (val->GetType() != ISA_TYPE_UD && val->GetType() != ISA_TYPE_D)
+        {
+            m_pCtx->EmitError("GenISA_setSR0 intrinsic expects a variable of type UD or D", inst);
+            return;
+        }
+        if (val->GetType() != ISA_TYPE_UD) {
+            // if type of val would be signed, m_encoder->Copy would add a signed alias for sr0 destination,
+            // which is not valid.
+            val = m_currShader->BitCast(val, ISA_TYPE_UD);
+        }
+
+        m_encoder->Copy(m_currShader->GetSR0(), val);
         m_encoder->Push();
         break;
     }
@@ -9500,6 +10040,9 @@ void EmitPass::EmitGenIntrinsicMessage(llvm::GenIntrinsicInst* inst)
     case GenISAIntrinsic::GenISA_WaveClusteredInterleave:
         emitWaveClusteredInterleave(inst);
         break;
+    case GenISAIntrinsic::GenISA_bfn:
+        emitBfn(inst);
+        break;
     case GenISAIntrinsic::GenISA_dp4a_ss:
     case GenISAIntrinsic::GenISA_dp4a_uu:
     case GenISAIntrinsic::GenISA_dp4a_su:
@@ -9551,6 +10094,7 @@ void EmitPass::EmitGenIntrinsicMessage(llvm::GenIntrinsicInst* inst)
         break;
     case GenISAIntrinsic::GenISA_getR0:
     case GenISAIntrinsic::GenISA_getPayloadHeader:
+    case GenISAIntrinsic::GenISA_getGlobalOffset:
     case GenISAIntrinsic::GenISA_getWorkDim:
     case GenISAIntrinsic::GenISA_getNumWorkGroups:
     case GenISAIntrinsic::GenISA_getLocalSize:
@@ -9681,6 +10225,12 @@ void EmitPass::EmitGenIntrinsicMessage(llvm::GenIntrinsicInst* inst)
     case GenISAIntrinsic::GenISA_bitcasttostruct:
         emitBitcasttostruct(inst);
       break;
+    case GenISAIntrinsic::GenISA_PredicatedLoad:
+        emitPredicatedLoad(inst);
+        break;
+    case GenISAIntrinsic::GenISA_PredicatedStore:
+        emitPredicatedStore(inst);
+        break;
     default:
         // we assume that some of gen-intrinsic should always be pattern-matched away,
         // therefore we do not handle them in visa-emission.
@@ -11082,11 +11632,13 @@ void EmitPass::setRovCacheCtrl(GenIntrinsicInst* inst)
 }
 
 void EmitPass::emitLoadRawIndexed(
-    LdRawIntrinsic * inst, Value * varOffset, ConstantInt * immOffset)
+    LdRawIntrinsic* inst,
+    Value* varOffset,
+    ConstantInt* immScale,
+    ConstantInt* immOffset)
 {
     Value* bufPtrv = inst->getResourceValue();
 
-    ResourceDescriptor resource = GetResourceVariable(bufPtrv);
     LSC_DOC_ADDR_SPACE addrSpace = m_pCtx->getUserAddrSpaceMD().Get(inst);
     m_currShader->m_State.isMessageTargetDataCacheDataPort = true;
     if (shouldGenerateLSC(inst))
@@ -11102,13 +11654,14 @@ void EmitPass::emitLoadRawIndexed(
             bufPtrv,
             varOffset,
             immOffset,
-            nullptr,
+            immScale,
             cacheOpts,
             addrSpace
           );
         return;
     }
     IGC_ASSERT(immOffset == nullptr);
+    ResourceDescriptor resource = GetResourceVariable(bufPtrv);
     emitLoad3DInner(inst, resource, varOffset);
 }
 
@@ -11436,6 +11989,28 @@ void EmitPass::emitLoad(
     emitVectorLoad(inst, offset, immOffset);
 }
 
+void EmitPass::emitPredicatedLoad(Instruction *inst) {
+    if (!shouldGenerateLSC()){
+        IGC_ASSERT_MESSAGE(false, "Predicated load is not implemented on non-LSC path!");
+        return;
+    }
+
+    Value* offset = inst->getOperand(0);
+    IGC_ASSERT(offset);
+    LSC_CACHE_OPTS cacheOpts = translateLSCCacheControlsFromMetadata(inst, true);
+    LSC_DOC_ADDR_SPACE addrSpace = m_pCtx->getUserAddrSpaceMD().Get(inst);
+
+    emitLSCVectorLoad(
+        inst,
+        offset,
+        offset,
+        nullptr,
+        nullptr,
+        cacheOpts,
+        addrSpace
+    );
+}
+
 
 void EmitPass::EmitNoModifier(llvm::Instruction* inst)
 {
@@ -11513,6 +12088,9 @@ void EmitPass::EmitNoModifier(llvm::Instruction* inst)
         break;
     case Instruction::ExtractValue:
         EmitExtractValueFromStruct(cast<ExtractValueInst>(inst));
+        break;
+    case Instruction::Select:
+        EmitSelectStruct(cast<SelectInst>(inst));
         break;
     case Instruction::Unreachable:
         break;
@@ -12572,7 +13150,10 @@ void EmitPass::emitSymbolRelocation(Function& F)
 }
 
 void EmitPass::emitStoreRawIndexed(
-    StoreRawIntrinsic* inst, Value* varOffset, ConstantInt* immOffset)
+    StoreRawIntrinsic* inst,
+    Value* varOffset,
+    ConstantInt* immScale,
+    ConstantInt* immOffset)
 {
     Value* pBufPtr = inst->getResourceValue();
     Value* pValToStore = inst->getStoreValue();
@@ -12589,7 +13170,7 @@ void EmitPass::emitStoreRawIndexed(
             pBufPtr,
             varOffset,
             immOffset,
-            nullptr,
+            immScale,
             pValToStore,
             inst->getParent(),
             cacheOpts,
@@ -12784,6 +13365,30 @@ void EmitPass::emitStore(
     IGC_ASSERT_MESSAGE(immScale ? immScale->getSExtValue() == 1 : true,
         "Immediate Scale not supported on non-LSC path!");
     emitVectorStore(inst, varOffset, immOffset);
+}
+
+void EmitPass::emitPredicatedStore(Instruction *inst) {
+    if (!shouldGenerateLSC()) {
+        IGC_ASSERT_MESSAGE(false, "Predicated store is not supported on non-LSC path!");
+        return;
+    }
+
+    LSC_DOC_ADDR_SPACE addrSpace = m_pCtx->getUserAddrSpaceMD().Get(inst);
+    LSC_CACHE_OPTS cacheOpts = translateLSCCacheControlsFromMetadata(inst, false);
+
+    emitLSCVectorStore(
+        inst->getOperand(0),
+        inst->getOperand(0),
+        nullptr,
+        nullptr,
+        inst->getOperand(1),
+        inst->getParent(),
+        cacheOpts,
+        cast<ConstantInt>(inst->getOperand(2))->getZExtValue(), // alignment
+        inst->getMetadata("enable.vmask"),
+        addrSpace
+       ,inst->getOperand(3)
+    );
 }
 
 CVariable* EmitPass::GetSymbol(llvm::Value* v) const
@@ -14284,10 +14889,19 @@ void EmitPass::emitReductionTree( e_opcode op, VISA_Type type, CVariable* src, C
         for( unsigned int i = 0; i < numIterations; i++ )
         {
             // Get alias for src0, src1, and dst based on offsets and SIMD size
-            auto* layerSrc0 = m_currShader->GetNewAlias( src, type, i * 2 * layerMaxSimdLanes * m_encoder->GetCISADataTypeSize( type ), layerMaxSimdLanes );
-            auto* layerSrc1 = m_currShader->GetNewAlias( src, type, ( i * 2 * layerMaxSimdLanes + src1Offset ) * m_encoder->GetCISADataTypeSize( type ), layerMaxSimdLanes );
-            auto* layerDst = m_currShader->GetNewAlias( src, type, i * layerMaxSimdLanes * m_encoder->GetCISADataTypeSize( type ), layerMaxSimdLanes );
-
+            auto* layerSrc0 = m_currShader->GetNewAlias( src, type, i * 2 * layerMaxSimdLanes * m_encoder->GetCISADataTypeSize( type ), layerMaxSimdLanes, false );
+            auto* layerSrc1 = m_currShader->GetNewAlias( src, type, ( i * 2 * layerMaxSimdLanes + src1Offset ) * m_encoder->GetCISADataTypeSize( type ), layerMaxSimdLanes, false );
+            CVariable* layerDst;
+            if( (srcElementCount >> 1 <= dst->GetNumberElement()) && (i + 1 == numIterations ))
+            {
+                // Final layer, use destination of WaveAll vector intrinsic inst (passed in with correct offset)
+                layerDst = dst;
+            }
+            else
+            {
+                // Use src as workspace to store intermediate values
+                layerDst = m_currShader->GetNewAlias( src, type, i * layerMaxSimdLanes * m_encoder->GetCISADataTypeSize( type ), layerMaxSimdLanes, false );
+            }
             if( !int64EmulationNeeded )
             {
                 m_encoder->SetNoMask();
@@ -14316,13 +14930,6 @@ void EmitPass::emitReductionTree( e_opcode op, VISA_Type type, CVariable* src, C
         srcElementCount >>= 1;
         reductionElementCount >>= 1;
     }
-
-    // copy fully reduced elements from src to dst
-    auto* finalLayerDst = m_currShader->GetNewAlias( src, type, 0, dst->GetNumberElement() );
-    m_encoder->SetNoMask();
-    m_encoder->SetSimdSize( lanesToSIMDMode( dst->GetNumberElement() ) );
-    m_encoder->Copy( dst, finalLayerDst );
-    m_encoder->Push();
 }
 
 // Recursive function that emits one or more joint reduction trees based on the joint output width
@@ -14336,8 +14943,8 @@ void EmitPass::emitReductionTrees( e_opcode op, VISA_Type type, SIMDMode simdMod
         // Do full tree reduction
         unsigned int reductionElements = src->GetNumberElement() / dst->GetNumberElement();
         unsigned int groupReductionElementCount = reductionElements * simdLanes;
-        CVariable* srcAlias = m_currShader->GetNewAlias( src, type, startIdx * reductionElements * m_encoder->GetCISADataTypeSize( type ), groupReductionElementCount );
-        CVariable* dstAlias = m_currShader->GetNewAlias( dst, type, startIdx * m_encoder->GetCISADataTypeSize( type ), simdLanes);
+        CVariable* srcAlias = m_currShader->GetNewAlias( src, type, startIdx * reductionElements * m_encoder->GetCISADataTypeSize( type ), groupReductionElementCount, false );
+        CVariable* dstAlias = m_currShader->GetNewAlias( dst, type, startIdx * m_encoder->GetCISADataTypeSize( type ), simdLanes, false);
         emitReductionTree( op, type, srcAlias, dstAlias );
         // Start new recursive tree if any elements are left
         if ( numGroups > simdLanes )
@@ -16100,14 +16707,16 @@ void EmitPass::emitAtomicRaw(llvm::GenIntrinsicInst *pInst, Value *dstAddr,
     }
 
     Function* F = pInst->getParent()->getParent();
-    if (F->hasFnAttribute("KMPLOCK") && m_currShader->GetIsUniform(pInst))
+    if ((F->hasFnAttribute("KMPLOCK") && m_currShader->GetIsUniform(pInst)) ||
+        IID == GenISAIntrinsic::GenISA_intatomicrawsinglelane)
     {
         m_encoder->SetSimdSize(SIMDMode::SIMD1);
         m_encoder->SetNoMask();
     }
     pDstAddr = BroadcastIfUniform(pDstAddr);
 
-    if (F->hasFnAttribute("KMPLOCK") && m_currShader->GetIsUniform(pInst))
+    if ((F->hasFnAttribute("KMPLOCK") && m_currShader->GetIsUniform(pInst)) ||
+        IID == GenISAIntrinsic::GenISA_intatomicrawsinglelane)
     {
         m_encoder->SetSimdSize(SIMDMode::SIMD1);
         m_encoder->SetNoMask();
@@ -16117,7 +16726,8 @@ void EmitPass::emitAtomicRaw(llvm::GenIntrinsicInst *pInst, Value *dstAddr,
         pSrc0 = UnpackOrBroadcastIfUniform(pSrc0);
     }
 
-    if (F->hasFnAttribute("KMPLOCK") && m_currShader->GetIsUniform(pInst))
+    if ((F->hasFnAttribute("KMPLOCK") && m_currShader->GetIsUniform(pInst)) ||
+        IID == GenISAIntrinsic::GenISA_intatomicrawsinglelane)
     {
         m_encoder->SetSimdSize(SIMDMode::SIMD1);
         m_encoder->SetNoMask();
@@ -16799,14 +17409,10 @@ void EmitPass::emitTypedWrite(llvm::Instruction* pInsn)
 
 void EmitPass::emitThreadGroupNamedBarriersSignal(llvm::Instruction* inst)
 {
-    CVariable* barrierID = m_currShader->ImmToVariable(
-        cast<llvm::ConstantInt>(inst->getOperand(0))->getSExtValue(), ISA_TYPE_UD);
-    CVariable* barrierType = m_currShader->ImmToVariable(
-        cast<llvm::ConstantInt>(inst->getOperand(1))->getSExtValue(), ISA_TYPE_UW);
-    CVariable* producerCnt = m_currShader->ImmToVariable(
-        cast<llvm::ConstantInt>(inst->getOperand(2))->getSExtValue(), ISA_TYPE_UD);
-    CVariable* consumerCnt = m_currShader->ImmToVariable(
-        cast<llvm::ConstantInt>(inst->getOperand(3))->getSExtValue(), ISA_TYPE_UD);
+    CVariable* barrierID = m_currShader->GetSymbol(inst->getOperand(0));
+    CVariable* barrierType = m_currShader->GetSymbol(inst->getOperand(1));
+    CVariable* producerCnt = m_currShader->GetSymbol(inst->getOperand(2));
+    CVariable* consumerCnt = m_currShader->GetSymbol(inst->getOperand(3));
     m_encoder->NamedBarrier(EBARRIER_SIGNAL, barrierID, barrierType, producerCnt, consumerCnt);
 
     m_encoder->Push();
@@ -16814,8 +17420,7 @@ void EmitPass::emitThreadGroupNamedBarriersSignal(llvm::Instruction* inst)
 
 void EmitPass::emitThreadGroupNamedBarriersWait(llvm::Instruction* inst)
 {
-    CVariable* barrierID = m_currShader->ImmToVariable(
-        cast<llvm::ConstantInt>(inst->getOperand(0))->getSExtValue(), ISA_TYPE_UD);
+    CVariable* barrierID = m_currShader->GetSymbol(inst->getOperand(0));
 
     m_encoder->NamedBarrier(EBARRIER_WAIT, barrierID, nullptr, nullptr, nullptr);
     m_encoder->Push();
@@ -17075,7 +17680,7 @@ void EmitPass::emitTypedMemoryFence(llvm::Instruction* inst)
 
         m_encoder->LSC_Fence(LSC_TGM, scope, flushOpt);
         m_encoder->Push();
-        if (m_currShader->m_Platform->hasSamplerSupport())
+        if (m_currShader->m_Platform->hasSamplerSupport() && !m_currShader->m_Platform->supportsBGRATypedRead())
         {
             emitFlushSamplerCache();
         }
@@ -17626,6 +18231,19 @@ void EmitPass::emitFPOWithNonDefaultRoundingMode(llvm::GenIntrinsicInst* inst)
     }
 
     ResetRoundingMode(inst);
+}
+
+void EmitPass::emitBfn(llvm::GenIntrinsicInst* inst)
+{
+    IGC_ASSERT_MESSAGE(isa<ConstantInt>(inst->getArgOperand(3)), "booleanFuncCtrl must be const!");
+    const uint8_t booleanFuncCtrl = int_cast<uint8_t>(cast<ConstantInt>(inst->getArgOperand(3))->getZExtValue());
+
+    CVariable* src0 = GetSymbol(inst->getOperand(0));
+    CVariable* src1 = GetSymbol(inst->getOperand(1));
+    CVariable* src2 = GetSymbol(inst->getOperand(2));
+
+    m_encoder->Bfn(booleanFuncCtrl, m_destination, src0, src1, src2);
+    m_encoder->Push();
 }
 
 void EmitPass::emitftoi(llvm::GenIntrinsicInst* inst)
@@ -19443,7 +20061,9 @@ void EmitPass::emitLSCVectorLoad_subDW(LSC_CACHE_OPTS CacheOpts, bool UseA32,
                                        int ImmScale, uint32_t NumElts,
                                        uint32_t EltBytes,
                                        LSC_DOC_ADDR_SPACE AddrSpace,
-                                       LSC_ADDR_SIZE AddrSize
+                                       LSC_ADDR_SIZE AddrSize,
+                                       CVariable *inputPredicate,
+                                       CVariable *mergeVal
   ) {
     // NumElts must be 1 !
     IGC_ASSERT(NumElts == 1 && (EltBytes == 1 || EltBytes == 2));
@@ -19490,13 +20110,37 @@ void EmitPass::emitLSCVectorLoad_subDW(LSC_CACHE_OPTS CacheOpts, bool UseA32,
         gatherDst = m_currShader->GetNewAlias(gatherDst, gatherDst->GetType(), 0, nbelts);
     }
 
+    CVariable *gatherDstAlias = m_currShader->GetNewAlias(gatherDst, Dest->GetType(), 0, 0);
+
+    // Copy merge value to gatherDst now, to avoid predicated copy to original destination later
+    if (mergeVal)
+    {
+        uint32_t hStride = doUniformLoad ? 0 : ((EltBytes == 1) ? 4 : 2);
+        m_encoder->SetDstRegion(hStride);
+        m_encoder->Copy(gatherDstAlias, mergeVal);
+        m_encoder->Push();
+    }
+
     SamplerDescriptor sampler;
     ResourceLoop(Resource, sampler, [&](CVariable* flag, CVariable*& destination,
         ResourceDescriptor resource, bool needloop) {
+        CVariable *finalPredicate = nullptr;
+        if (!doUniformLoad)
+            finalPredicate = IGC_IS_FLAG_ENABLED(UseVMaskPredicateForLoads) ? GetCombinedVMaskPred(flag) : flag;
+
+        if (inputPredicate && finalPredicate) {
+            m_pCtx->EmitError("Predicated load is not expected.", nullptr);
+            IGC_ASSERT_MESSAGE(false, "Not expected scenario. Predicated load should not be used.");
+            m_encoder->And(finalPredicate, finalPredicate, inputPredicate);
+            m_encoder->Push();
+        } else if (inputPredicate) {
+            finalPredicate = inputPredicate;
+        }
+
         if (doUniformLoad)
             m_encoder->SetNoMask();
-        else
-            m_encoder->SetPredicate(IGC_IS_FLAG_ENABLED(UseVMaskPredicateForLoads) ? GetCombinedVMaskPred(flag) : flag);
+
+        m_encoder->SetPredicate(finalPredicate);
 
         emitLSCLoad(CacheOpts, gatherDst,
                     eOffset, EltBytes * 8, 1, 0, &Resource, AddrSize,
@@ -19505,12 +20149,13 @@ void EmitPass::emitLSCVectorLoad_subDW(LSC_CACHE_OPTS CacheOpts, bool UseA32,
         });
 
     // Copy from gatherDst to original destination
-    gatherDst = m_currShader->GetNewAlias(gatherDst, Dest->GetType(), 0, 0);
     uint32_t vStride = doUniformLoad ? 0 : ((EltBytes == 1) ? 4 : 2);
     m_encoder->SetSrcRegion(0, vStride, 1, 0);
-    m_encoder->Copy(Dest, gatherDst);
+    // set predicate for copy, only if did not initialize gatherDst with mergeVal
+    if(!mergeVal)
+        m_encoder->SetPredicate(inputPredicate);
+    m_encoder->Copy(Dest, gatherDstAlias);
     m_encoder->Push();
-    return;
 }
 
 // Handle uniform load (address and resource are uniform). This is a sub-function
@@ -19525,11 +20170,13 @@ void EmitPass::emitLSCVectorLoad_uniform(
     CVariable *Dest,
     CVariable *Offset, int ImmOffset, int ImmScale, uint32_t NumElts,
     uint32_t EltBytes, uint64_t Align, uint32_t Addrspace,
-    LSC_DOC_ADDR_SPACE UserAddrSpace, LSC_ADDR_SIZE AddrSize) {
+    LSC_DOC_ADDR_SPACE UserAddrSpace, LSC_ADDR_SIZE AddrSize,
+    CVariable *inputPredicate, CVariable *mergeVal) {
 
     IGC_ASSERT(Offset->IsUniform() && (EltBytes == 4 || EltBytes == 8));
     CVariable *eOffset = Offset;
     CVariable* ldDest = Dest;
+    CVariable* newMergeVal = mergeVal;
     uint32_t dSize = EltBytes;  // lsc's data size
     uint32_t vSize = NumElts;   // lsc's vector size
     if (dSize == 4 && (vSize > 64 || vSize == 6) && Align >= 8)
@@ -19537,12 +20184,20 @@ void EmitPass::emitLSCVectorLoad_uniform(
         dSize = 8;
         vSize = vSize / 2;
         ldDest = m_currShader->GetNewAlias(ldDest, ISA_TYPE_UQ, 0, 0);
+        if (mergeVal)
+            newMergeVal = m_currShader->GetNewAlias(mergeVal, ISA_TYPE_UQ, 0, 0);
     }
     else if (dSize == 8 && vSize < 64 && Align == 4)
     {
         dSize = 4;
         vSize = vSize * 2;
         ldDest = m_currShader->GetNewAlias(ldDest, ISA_TYPE_UD, 0, 0);
+        if (mergeVal) {
+            if (mergeVal->IsImmediate())
+                newMergeVal = m_currShader->ImmToVariable(mergeVal->GetImmediateValue(), ISA_TYPE_UD);
+            else
+                newMergeVal = m_currShader->GetNewAlias(mergeVal, ISA_TYPE_UD, 0, 0);
+        }
     }
 
     bool destUniform = Dest->IsUniform();
@@ -19563,7 +20218,11 @@ void EmitPass::emitLSCVectorLoad_uniform(
                 vSize, tDest->GetType(), EALIGN_GRF, true, tDest->getName());
         }
 
+        if (mergeVal)
+            emitVectorCopy(tDest, newMergeVal, vSize);
+
         m_encoder->SetNoMask();
+        m_encoder->SetPredicate(inputPredicate);
         emitLSCLoad(CacheOpts, tDest,
                     eOffset, dSize * 8, vSize, 0, &Resource, AddrSize,
                     LSC_DATA_ORDER_TRANSPOSE, ImmOffset, ImmScale,
@@ -19572,7 +20231,7 @@ void EmitPass::emitLSCVectorLoad_uniform(
 
         if (needTemp)
         {
-            emitVectorCopy(ldDest, tDest, vSize);
+            emitVectorCopy(ldDest, tDest, vSize, 0, 0, false, mergeVal ? nullptr : inputPredicate);
         }
         return;
     }
@@ -19603,7 +20262,11 @@ void EmitPass::emitLSCVectorLoad_uniform(
         tDest = m_currShader->GetNewVariable(elts, tDest->GetType(), dataAlign, true, CName::NONE);
     }
 
+    if (mergeVal)
+        emitVectorCopy(tDest, newMergeVal, vSize);
+
     m_encoder->SetNoMask();
+    m_encoder->SetPredicate(inputPredicate);
     emitLSCLoad(CacheOpts, tDest,
                 nEOff, dSize * 8, 1, 0, &Resource,
                 AddrSize,
@@ -19613,7 +20276,7 @@ void EmitPass::emitLSCVectorLoad_uniform(
 
     if (needTemp)
     {
-        emitVectorCopy(ldDest, tDest, vSize);
+        emitVectorCopy(ldDest, tDest, vSize, 0, 0, false, mergeVal ? nullptr : inputPredicate);
     }
     return;
 }
@@ -19627,14 +20290,21 @@ void EmitPass::emitLSCVectorLoad(Instruction* inst,
                                  LSC_DOC_ADDR_SPACE addrSpace
 ) {
 
+    bool predicatedLoad = false;
+    if (auto CI = dyn_cast<llvm::GenIntrinsicInst>(inst); CI && CI->getIntrinsicID() == GenISAIntrinsic::GenISA_PredicatedLoad)
+        predicatedLoad = true;
+
     Type *Ty = inst->getType();
     uint64_t align = 0;
     if (auto LI = dyn_cast<LoadInst>(inst))
         align = IGCLLVM::getAlignmentValue(LI);
     else if (auto CI = dyn_cast<LdRawIntrinsic>(inst))
         align = CI->getAlignment();
+    else if (predicatedLoad)
+        align = cast<ConstantInt>(inst->getOperand(1))->getZExtValue();
+
     PointerType* ptrType = cast<PointerType>(Ptr->getType());
-    ResourceDescriptor resource = GetResourceVariable(Ptr);
+    ResourceDescriptor resource = GetResourceVariable(Ptr, true);
     bool useA32 = !IGC::isA64Ptr(ptrType, m_currShader->GetContext());
     LSC_ADDR_SIZE addrSize = useA32 ? LSC_ADDR_SIZE_32b : LSC_ADDR_SIZE_64b;
     IGCLLVM::FixedVectorType* VTy = dyn_cast<IGCLLVM::FixedVectorType>(Ty);
@@ -19650,6 +20320,35 @@ void EmitPass::emitLSCVectorLoad(Instruction* inst,
     {
         eOffset = TruncatePointer(eOffset);
     }
+
+    // if the merge value is dead after predicated load and is not immediate, and
+    // has other properties same as destination -> use it as destination
+    bool isDestReplacedWithMerge = false;
+    CVariable* mergeVar = nullptr;
+    if(predicatedLoad) {
+        // find instruction after predicated load in BB
+        auto instIt = std::find_if(inst->getParent()->begin(),
+                                inst->getParent()->end(),
+                                [inst](Instruction &I) { return &I == inst; });
+        IGC_ASSERT(instIt != inst->getParent()->end());
+        instIt++;
+        IGC_ASSERT(instIt != inst->getParent()->end());
+
+        Value *mergeVal = inst->getOperand(3);
+        LiveVars *pLV = m_deSSA->getLiveVars();
+        mergeVar = GetSymbol(mergeVal);
+        if (!isa<Constant>(mergeVal) && !pLV->isLiveAt(mergeVal, &*instIt) &&
+            !mergeVar->IsImmediate() &&
+            mergeVar->GetNumberElement() == m_destination->GetNumberElement() &&
+            mergeVar->GetType() == m_destination->GetType() &&
+            mergeVar->GetAlign() == m_destination->GetAlign() &&
+            mergeVar->IsUniform() == m_destination->IsUniform()) {
+            m_destination = mergeVar;
+            m_currShader->UpdateSymbolMap(inst, mergeVar);
+            isDestReplacedWithMerge = true;
+        }
+    }
+
     CVariable* destCVar = m_destination;
     bool destUniform = destCVar->IsUniform();
     bool srcUniform = eOffset->IsUniform();
@@ -19667,9 +20366,11 @@ void EmitPass::emitLSCVectorLoad(Instruction* inst,
     if (eltBytes < 4)
     {
         IGC_ASSERT(elts == 1);
-      emitLSCVectorLoad_subDW(cacheOpts, useA32, resource, destCVar,
+        emitLSCVectorLoad_subDW(cacheOpts, useA32, resource, destCVar,
                               eOffset, immOffsetInt, immScaleInt, 1, eltBytes,
-                              addrSpace, addrSize);
+                              addrSpace, addrSize,
+                              predicatedLoad ? GetSymbol(inst->getOperand(2)) : nullptr,
+                              isDestReplacedWithMerge ? nullptr : mergeVar);
         return;
     }
 
@@ -19678,7 +20379,9 @@ void EmitPass::emitLSCVectorLoad(Instruction* inst,
         emitLSCVectorLoad_uniform(
             cacheOpts, useA32, resource, destCVar,
             eOffset, immOffsetInt, immScaleInt, elts, eltBytes, align,
-            ptrType->getPointerAddressSpace(), addrSpace, addrSize);
+            ptrType->getPointerAddressSpace(), addrSpace, addrSize,
+            predicatedLoad ? GetSymbol(inst->getOperand(2)) : nullptr,
+            isDestReplacedWithMerge ? nullptr : mergeVar);
         return;
     }
 
@@ -19692,6 +20395,15 @@ void EmitPass::emitLSCVectorLoad(Instruction* inst,
 
     ModuleMetaData* modMD = getAnalysis<MetaDataUtilsWrapper>().getModuleMetaData();
     auto& predicationMap = modMD->predicationMap;
+
+    if (predicatedLoad && !isDestReplacedWithMerge) {
+        if (elts > 1) {
+            emitVectorCopy(destCVar, mergeVar, elts);
+        } else {
+            m_encoder->Copy(destCVar, mergeVar);
+            m_encoder->Push();
+        }
+    }
 
     SamplerDescriptor sampler;
     ResourceLoop(resource, sampler, [&](CVariable* flag, CVariable*& destination,
@@ -19749,14 +20461,24 @@ void EmitPass::emitLSCVectorLoad(Instruction* inst,
                     dVisaTy, (uint16_t)eltOffBytes, (uint16_t)nbelts);
             }
 
+            CVariable* pred = nullptr;
             if (predicationMap.count(inst))
-            {
-                m_encoder->SetPredicate(m_currShader->GetSymbol(cast<Instruction>(predicationMap[inst])));
-            }
+                pred = m_currShader->GetSymbol(cast<Instruction>(predicationMap[inst]));
             else
-            {
-                m_encoder->SetPredicate(IGC_IS_FLAG_ENABLED(UseVMaskPredicateForLoads) ? GetCombinedVMaskPred(flag) : flag);
+                pred = IGC_IS_FLAG_ENABLED(UseVMaskPredicateForLoads) ? GetCombinedVMaskPred(flag) : flag;
+
+            if(predicatedLoad) {
+                CVariable* cond = GetSymbol(inst->getOperand(2));
+                if (pred) {
+                    m_pCtx->EmitError("Predicated load is not expected.", inst);
+                    IGC_ASSERT_MESSAGE(false, "Not expected scenario. Predicated load should not be used.");
+                    m_encoder->And(pred, pred, cond);
+                    m_encoder->Push();
+                } else
+                    pred = cond;
             }
+
+            m_encoder->SetPredicate(pred);
 
             VectorMessage::MESSAGE_KIND messageType = VecMessInfo.insts[i].kind;
             IGC_ASSERT_MESSAGE(
@@ -19772,7 +20494,8 @@ void EmitPass::emitLSCVectorLoad(Instruction* inst,
 
             if (needTemp)
             {
-                emitVectorCopy(destCVar, gatherDst, instElts, eltOff, 0);
+                emitVectorCopy(destCVar, gatherDst, instElts, eltOff, 0, false,
+                (predicatedLoad && isDestReplacedWithMerge) ? pred : nullptr);
             }
         }
     }, m_RLA->GetResourceLoopMarker(inst));
@@ -19786,7 +20509,8 @@ void EmitPass::emitLSCVectorStore_subDW(LSC_CACHE_OPTS CacheOpts, bool UseA32,
                                         uint32_t NumElts, uint32_t EltBytes,
                                         alignment_t Alignment,
                                         LSC_DOC_ADDR_SPACE AddrSpace,
-                                        LSC_ADDR_SIZE AddrSize
+                                        LSC_ADDR_SIZE AddrSize,
+                                        Value *predicate
 ) {
     // NumElts must be 1!
     IGC_ASSERT_MESSAGE(NumElts == 1 && (EltBytes == 1 || EltBytes == 2),
@@ -19846,6 +20570,20 @@ void EmitPass::emitLSCVectorStore_subDW(LSC_CACHE_OPTS CacheOpts, bool UseA32,
         {
             m_encoder->SetNoMask();
         }
+
+        if (predicate) {
+            // This predicate parameters will be not null only if PredicatedStore intrinsic is used
+            // PredicatedStore intrinsic is being used instead of LLVM store, where makes sense.
+            // setPredicateForDiscard used earlier is used only when compiler needs to create the
+            // resource loop, which is never expected for simple LLVM store or PredicatedStore.
+            // Hence, these predicates should never be used together.
+            if(!doUniformStore && flag != nullptr) {
+                m_pCtx->EmitError("Predicated store is not expected.", nullptr);
+                IGC_ASSERT_MESSAGE(false, "Unexpected scenario: resource loop with predicated store!");
+            }
+            m_encoder->SetPredicate(GetSymbol(predicate));
+        }
+
       // NumElts = 1
       emitLSCStore(CacheOpts,
                    stVar, eOffset, EltBytes * 8, 1, 0, &Resource, AddrSize,
@@ -19870,7 +20608,8 @@ void EmitPass::emitLSCVectorStore_uniform(LSC_CACHE_OPTS CacheOpts, bool UseA32,
                                           int ImmScale, uint32_t NumElts,
                                           uint32_t EltBytes, alignment_t Align,
                                           LSC_DOC_ADDR_SPACE AddrSpace,
-                                          LSC_ADDR_SIZE AddrSize
+                                          LSC_ADDR_SIZE AddrSize,
+                                          Value *predicate
 ) {
     // If needed, can handle non-uniform StoreVar.
     IGC_ASSERT(StoreVar->IsUniform() && Offset->IsUniform() && (EltBytes == 4 || EltBytes == 8));
@@ -19919,6 +20658,8 @@ void EmitPass::emitLSCVectorStore_uniform(LSC_CACHE_OPTS CacheOpts, bool UseA32,
         ResourceLoop(Resource, sampler, [&](CVariable* /*flag*/, CVariable*& /*destination*/,
             ResourceDescriptor /*resource*/, bool /*needLoop*/) {
             m_encoder->SetNoMask();
+            if (predicate)
+                m_encoder->SetPredicate(GetSymbol(predicate));
           emitLSCStore(CacheOpts,
                        new_stVar, new_eoff, dSize * 8, 1, 0, &Resource,
                        AddrSize, LSC_DATA_ORDER_NONTRANSPOSE, ImmOffset,
@@ -19943,6 +20684,8 @@ void EmitPass::emitLSCVectorStore_uniform(LSC_CACHE_OPTS CacheOpts, bool UseA32,
         ResourceDescriptor /*resource*/, bool /*needLoop*/) {
         m_encoder->SetUniformSIMDSize(SIMDMode::SIMD1);
         m_encoder->SetNoMask();
+        if (predicate)
+            m_encoder->SetPredicate(GetSymbol(predicate));
         emitLSCStore(CacheOpts,
                      stVar, eOffset, dSize * 8, vSize, 0, &Resource, AddrSize,
                      LSC_DATA_ORDER_TRANSPOSE, ImmOffset, ImmScale, AddrSpace);
@@ -19957,7 +20700,7 @@ void EmitPass::emitLSCVectorStore(Value *Ptr,
                                   BasicBlock *BB, LSC_CACHE_OPTS cacheOpts,
                                   alignment_t align, bool dontForceDmask,
                                   LSC_DOC_ADDR_SPACE addrSpace
-
+                                 ,Value *predicate
 ) {
 
     PointerType* ptrType = cast<PointerType>(Ptr->getType());
@@ -19969,7 +20712,7 @@ void EmitPass::emitLSCVectorStore(Value *Ptr,
 
     unsigned int width = numLanes(m_currShader->m_SIMDSize);
 
-    ResourceDescriptor resource = GetResourceVariable(Ptr);
+    ResourceDescriptor resource = GetResourceVariable(Ptr, true);
     CountStatelessIndirectAccess(Ptr, resource);
     if (ptrType->getPointerAddressSpace() != ADDRESS_SPACE_PRIVATE &&
         !dontForceDmask)
@@ -20021,7 +20764,7 @@ void EmitPass::emitLSCVectorStore(Value *Ptr,
         IGC_ASSERT(elts == 1);
         emitLSCVectorStore_subDW(cacheOpts, useA32, resource,
                                  storedVar, eOffset, immOffsetVal, immScaleVal,
-                                 1, eltBytes, align, addrSpace, addrSize);
+                                 1, eltBytes, align, addrSpace, addrSize, predicate);
         return;
     }
 
@@ -20033,7 +20776,7 @@ void EmitPass::emitLSCVectorStore(Value *Ptr,
         emitLSCVectorStore_uniform(cacheOpts, useA32, resource,
                                    storedVar, eOffset, immOffsetVal,
                                    immScaleVal, elts, eltBytes, align,
-                                   addrSpace, addrSize);
+                                   addrSpace, addrSize, predicate);
         return;
     }
 
@@ -20098,6 +20841,19 @@ void EmitPass::emitLSCVectorStore(Value *Ptr,
                 messageType == VectorMessage::MESSAGE_A32_LSC_RW ||
                     messageType == VectorMessage::MESSAGE_A64_LSC_RW,
                 "Internal Error: unexpected message kind for load!");
+
+            if (predicate) {
+                // This predicate parameter will be not null only if PredicatedStore intrinsic is used
+                // PredicatedStore intrinsic is being used instead of LLVM store, where makes sense.
+                // setPredicateForDiscard used earlier is used only when compiler needs to create the
+                // resource loop, which is never expected for simple LLVM store or PredicatedStore.
+                // Hence, these predicates should never be used together.
+                if (flag != nullptr) {
+                    m_pCtx->EmitError("Predicated store is not expected.", nullptr);
+                    IGC_ASSERT_MESSAGE(false, "Unexpected scenario: resource loop with predicated store!");
+                }
+                m_encoder->SetPredicate(GetSymbol(predicate));
+            }
 
             emitLSCStore(cacheOpts,
                          subStoredVar, rawAddrVar, blkBits, numBlks, 0,
@@ -20662,7 +21418,8 @@ void EmitPass::emitLscUniformAtomicCounter(llvm::GenIntrinsicInst* pInst)
 
 // DstSubRegOffset and SrcSubRegOffset are in unit of element size.
 void EmitPass::emitUniformVectorCopy(CVariable* Dst, CVariable* Src, uint32_t nElts,
-    uint32_t DstSubRegOffset, uint32_t SrcSubRegOffset, bool allowLargerSIMDSize)
+    uint32_t DstSubRegOffset, uint32_t SrcSubRegOffset, bool allowLargerSIMDSize,
+    CVariable* predicate)
 {
     IGC_ASSERT(Dst->IsUniform() && Src->IsUniform());
 
@@ -20671,7 +21428,7 @@ void EmitPass::emitUniformVectorCopy(CVariable* Dst, CVariable* Src, uint32_t nE
 
     // The starting index of elements to be copied.
     unsigned i = 0;
-    auto partialCopy = [=, &i](SIMDMode mod)
+    auto partialCopy = [this, nElts, soff, doff, predicate, Dst, Src, &i](SIMDMode mod)
     {
         unsigned w = numLanes(mod);
         if (i + w > nElts)
@@ -20684,6 +21441,7 @@ void EmitPass::emitUniformVectorCopy(CVariable* Dst, CVariable* Src, uint32_t nE
         m_encoder->SetSrcRegion(0, vStride, 1, 0);
         m_encoder->SetSrcSubReg(0, soff + i);
         m_encoder->SetDstSubReg(doff + i);
+        m_encoder->SetPredicate(predicate);
         m_encoder->Copy(Dst, Src);
         m_encoder->Push();
 
@@ -20765,7 +21523,8 @@ void EmitPass::emitPredicatedVectorSelect(CVariable* Dst, CVariable* Src0, CVari
 
 // DstSubRegOffset and SrcSubRegOffset are in unit of element size.
 void EmitPass::emitVectorCopy(CVariable* Dst, CVariable* Src, uint32_t nElts,
-    uint32_t DstSubRegOffset, uint32_t SrcSubRegOffset, bool allowLargerSIMDSize)
+    uint32_t DstSubRegOffset, uint32_t SrcSubRegOffset, bool allowLargerSIMDSize,
+    CVariable* predicate)
 {
     bool srcUniform = Src->IsUniform();
     bool dstUniform = Dst->IsUniform();
@@ -20774,7 +21533,7 @@ void EmitPass::emitVectorCopy(CVariable* Dst, CVariable* Src, uint32_t nElts,
     if (srcUniform && dstUniform) {
         emitUniformVectorCopy(
             Dst, Src, nElts, DstSubRegOffset, SrcSubRegOffset,
-            allowLargerSIMDSize);
+            allowLargerSIMDSize, predicate);
         return;
     }
 
@@ -20816,6 +21575,7 @@ void EmitPass::emitVectorCopy(CVariable* Dst, CVariable* Src, uint32_t nElts,
                     m_encoder->SetSimdSize(mode);
                     m_encoder->SetSrcSubReg(0, SrcSubReg);
                     m_encoder->SetDstSubReg(DstSubReg);
+                    m_encoder->SetPredicate(predicate);
                     m_encoder->Copy(Dst, Src);
                     m_encoder->Push();
 
@@ -20840,6 +21600,7 @@ void EmitPass::emitVectorCopy(CVariable* Dst, CVariable* Src, uint32_t nElts,
                     m_encoder->SetSimdSize(mode);
                     m_encoder->SetSrcSubReg(0, SrcSubReg);
                     m_encoder->SetDstSubReg(DstSubReg);
+                    m_encoder->SetPredicate(predicate);
                     m_encoder->Copy(Dst, Src);
                     m_encoder->Push();
 
@@ -20858,6 +21619,7 @@ void EmitPass::emitVectorCopy(CVariable* Dst, CVariable* Src, uint32_t nElts,
 
         m_encoder->SetSrcSubReg(0, SrcSubReg);
         m_encoder->SetDstSubReg(DstSubReg);
+        m_encoder->SetPredicate(predicate);
         m_encoder->Copy(Dst, Src);
         m_encoder->Push();
     }
@@ -21385,10 +22147,10 @@ void IGC::EmitPass::emitCanonicalize(llvm::Instruction* inst, const DstModifier&
     // A normalized fp value isn't changed.
     // The operation is done only if particular flags are set.
     // If the instruction should be emitted anyway, flushing a subnormal to zero has to implemented in other way.
-    CodeGenContext* pCodeGenContext = getAnalysis<CodeGenContextWrapper>().getCodeGenContext();
-    bool flushVal = pCodeGenContext->m_floatDenormMode16 == ::IGC::FLOAT_DENORM_FLUSH_TO_ZERO && inst->getType()->isHalfTy();
-    flushVal = flushVal || (pCodeGenContext->m_floatDenormMode32 == ::IGC::FLOAT_DENORM_FLUSH_TO_ZERO && inst->getType()->isFloatTy());
-    flushVal = flushVal || (pCodeGenContext->m_floatDenormMode64 == ::IGC::FLOAT_DENORM_FLUSH_TO_ZERO && inst->getType()->isDoubleTy());
+    CompOptions& compOpt = getAnalysis<CodeGenContextWrapper>().getCodeGenContext()->getModuleMetaData()->compOpt;
+    bool flushVal = compOpt.FloatDenormMode16 == ::IGC::FLOAT_DENORM_FLUSH_TO_ZERO && inst->getType()->isHalfTy();
+    flushVal = flushVal || (compOpt.FloatDenormMode32 == ::IGC::FLOAT_DENORM_FLUSH_TO_ZERO && inst->getType()->isFloatTy());
+    flushVal = flushVal || (compOpt.FloatDenormMode64 == ::IGC::FLOAT_DENORM_FLUSH_TO_ZERO && inst->getType()->isDoubleTy());
     if (flushVal || modifier.sat)
     {
         CVariable* inputVal = GetSymbol(inst->getOperand(0));
@@ -21636,7 +22398,7 @@ void EmitPass::emitGetBufferPtr(GenIntrinsicInst* inst)
     m_currShader->SetBindingTableEntryCountAndBitmap(directIdx, bufType, 0, bti);
 }
 
-ResourceDescriptor EmitPass::GetResourceVariable(Value* resourcePtr)
+ResourceDescriptor EmitPass::GetResourceVariable(Value* resourcePtr, bool Check)
 {
     ResourceDescriptor resource;
     BufferType bufType = BUFFER_TYPE_UNKNOWN;
@@ -21664,15 +22426,14 @@ ResourceDescriptor EmitPass::GetResourceVariable(Value* resourcePtr)
         if (IsBindless(bufType) ||
             !directIndexing)
         {
-            if (isa<IntToPtrInst>(resourcePtr))
-            {
-                IntToPtrInst* i2p = dyn_cast<IntToPtrInst>(resourcePtr);
-                resource.m_resource = GetSymbol(i2p->getOperand(0));
-            }
-            else
-            {
-                resource.m_resource = GetSymbol(resourcePtr);
-            }
+            auto SetResource = [&](Value* resourcePtr) {
+                if (auto* i2p = dyn_cast<IntToPtrInst>(resourcePtr))
+                    resource.m_resource = GetSymbol(i2p->getOperand(0));
+                else
+                    resource.m_resource = GetSymbol(resourcePtr);
+            };
+
+            SetResource(resourcePtr);
 
             if (resource.m_resource->GetElemSize() < 4)
             {
@@ -22663,13 +23424,13 @@ void EmitPass::emitWaveAll(llvm::GenIntrinsicInst* inst)
             for( uint16_t i = 0; i < dst->GetNumberElement(); i++ )
             {
                 // Prepare reduceSrc
-                CVariable* srcAlias = m_currShader->GetNewAlias( src, type, i * numLanes( m_currShader->m_SIMDSize ) * m_encoder->GetCISADataTypeSize( type ), numLanes( m_currShader->m_SIMDSize ) );
-                CVariable* reduceSrcAlias = m_currShader->GetNewAlias( reduceSrc, type, i * numLanes( m_currShader->m_SIMDSize ) * m_encoder->GetCISADataTypeSize( type ), numLanes( m_currShader->m_SIMDSize ) );
+                CVariable* srcAlias = m_currShader->GetNewAlias( src, type, i * numLanes( m_currShader->m_SIMDSize ) * m_encoder->GetCISADataTypeSize( type ), numLanes( m_currShader->m_SIMDSize ), false);
+                CVariable* reduceSrcAlias = m_currShader->GetNewAlias( reduceSrc, type, i * numLanes( m_currShader->m_SIMDSize ) * m_encoder->GetCISADataTypeSize( type ), numLanes( m_currShader->m_SIMDSize ), false );
                 ScanReducePrepareSrc( type, identity, false, false, srcAlias, reduceSrcAlias );
 
                 // Prepare reduceSrcSecondHalf
-                CVariable* srcSecondHalfAlias = m_currShader->GetNewAlias( src, type, i * numLanes( m_currShader->m_SIMDSize ) * m_encoder->GetCISADataTypeSize( type ), numLanes( m_currShader->m_SIMDSize ) );
-                CVariable* reduceSrcSecondHalfAlias = m_currShader->GetNewAlias( reduceSrcSecondHalf, type, i * numLanes( m_currShader->m_SIMDSize ) * m_encoder->GetCISADataTypeSize( type ), numLanes( m_currShader->m_SIMDSize ) );
+                CVariable* srcSecondHalfAlias = m_currShader->GetNewAlias( src, type, i * numLanes( m_currShader->m_SIMDSize ) * m_encoder->GetCISADataTypeSize( type ), numLanes( m_currShader->m_SIMDSize ), false );
+                CVariable* reduceSrcSecondHalfAlias = m_currShader->GetNewAlias( reduceSrcSecondHalf, type, i * numLanes( m_currShader->m_SIMDSize ) * m_encoder->GetCISADataTypeSize( type ), numLanes( m_currShader->m_SIMDSize ), false);
                 ScanReducePrepareSrc( type, identity, false, true, srcSecondHalfAlias, reduceSrcSecondHalfAlias );
 
                 // Emit correct operations
@@ -22910,7 +23671,7 @@ void EmitPass::emitImplicitArgIntrinsic(llvm::GenIntrinsicInst* I)
 
         if (IAtype == ImplicitArg::ArgType::R0 ||
             IAtype == ImplicitArg::ArgType::PAYLOAD_HEADER ||
-            IAtype == ImplicitArg::ArgType::PAYLOAD_HEADER_SHORT ||
+            IAtype == ImplicitArg::ArgType::GLOBAL_OFFSET ||
             IAtype == ImplicitArg::ArgType::WORK_DIM ||
             IAtype == ImplicitArg::ArgType::NUM_GROUPS ||
             IAtype == ImplicitArg::ArgType::GLOBAL_SIZE ||
@@ -23163,6 +23924,7 @@ void EmitPass::emitfcvt(llvm::GenIntrinsicInst* GII)
     switch (id)
     {
     case GenISAIntrinsic::GenISA_hftobf8:
+    case GenISAIntrinsic::GenISA_hftohf8:
     {
         ConstantInt* CI = cast<ConstantInt>(GII->getOperand(2));
         isSat = CI->getValue().getBoolValue();
@@ -23186,6 +23948,8 @@ void EmitPass::emitfcvt(llvm::GenIntrinsicInst* GII)
         id == GenISAIntrinsic::GenISA_bftof ||
         id == GenISAIntrinsic::GenISA_hftobf8 ||
         id == GenISAIntrinsic::GenISA_bf8tohf ||
+        id == GenISAIntrinsic::GenISA_hftohf8 ||
+        id == GenISAIntrinsic::GenISA_hf8tohf ||
         id == GenISAIntrinsic::GenISA_ftotf32)
     {
         CVariable* tDst = nullptr, *tSrc = nullptr;
@@ -23222,6 +23986,15 @@ void EmitPass::emitfcvt(llvm::GenIntrinsicInst* GII)
                 tSrc = src;
             }
         }
+        // Use Type_B for HF8
+        else if (id == GenISAIntrinsic::GenISA_hf8tohf) {
+            tDst = dst;
+            tSrc = m_currShader->GetNewAlias(src, ISA_TYPE_B, 0, 0);
+        }
+        else if (id == GenISAIntrinsic::GenISA_hftohf8) {
+            tDst = m_currShader->GetNewAlias(dst, ISA_TYPE_B, 0, 0);
+            tSrc = src;
+        }
         else {
             IGC_ASSERT_EXIT_MESSAGE(0, "Something wrong in cvt!");
         }
@@ -23250,6 +24023,8 @@ void EmitPass::emitfcvt(llvm::GenIntrinsicInst* GII)
                 }
                 if (id == GenISAIntrinsic::GenISA_hftobf8 ||
                     id == GenISAIntrinsic::GenISA_bf8tohf ||
+                    id == GenISAIntrinsic::GenISA_hftohf8 ||
+                    id == GenISAIntrinsic::GenISA_hf8tohf ||
                     id == GenISAIntrinsic::GenISA_ftotf32
                     )
                 {
@@ -23274,12 +24049,15 @@ void EmitPass::emitfcvt(llvm::GenIntrinsicInst* GII)
                 m_encoder->SetSrcSubReg(0, srcOff);
                 if (id == GenISAIntrinsic::GenISA_hftobf8 ||
                     id == GenISAIntrinsic::GenISA_bf8tohf ||
+                    id == GenISAIntrinsic::GenISA_hftohf8 ||
+                    id == GenISAIntrinsic::GenISA_hf8tohf ||
                     id == GenISAIntrinsic::GenISA_ftotf32
                    )
                 {
                     switch (id)
                     {
                     case GenISAIntrinsic::GenISA_hftobf8:
+                    case GenISAIntrinsic::GenISA_hftohf8:
                     {
                         // HW requires NoMask
                         m_encoder->SetNoMask();
@@ -24075,6 +24853,7 @@ void EmitPass::emitLscIntrinsicPrefetch(llvm::GenIntrinsicInst* inst)
 
     ResourceDescriptor resource = GetResourceVariable(Ptr);
     CVariable* offset = GetSymbol(Ptr);
+    offset = ReAlignUniformVariable(offset, EALIGN_GRF);
     bool useA32 = !isA64Ptr(ptrType, m_currShader->GetContext());
     LSC_ADDR_SIZE addrSize = useA32 ? LSC_ADDR_SIZE_32b : LSC_ADDR_SIZE_64b;
     offset = useA32 ? TruncatePointer(offset) : offset;
@@ -24454,21 +25233,6 @@ void EmitPass::emitLSC2DBlockOperation(llvm::GenIntrinsicInst* inst)
     bool isVnni = (uint)cast<ConstantInt>(inst->getOperand(11))->getZExtValue();
 
     CVariable* destination = m_destination;
-    if (numBlocksV == 2 && blockHeight == 1 &&
-        !isPrefetch &&
-        elemSizeInBits * blockWidth == 256 &&
-        m_currShader->m_Platform->getPlatformInfo().eProductFamily >= IGFX_PVC)
-    {
-        // m1 v2 block read has grf aligned V blocks,
-        // variable should be 2x larger
-        destination = m_currShader->GetNewVariable(
-            m_destination->GetNumberElement() * 2,
-            m_destination->GetType(),
-            m_destination->GetAlign(),
-            m_destination->IsUniform(),
-            m_destination->GetNumberInstance(),
-            CName::NONE);
-    }
     LSC_CACHE_OPTS cacheOpts = translateLSCCacheControlsFromValue(inst->getOperand(12), isRead);
 
     if (isRead == false)
@@ -24477,38 +25241,137 @@ void EmitPass::emitLSC2DBlockOperation(llvm::GenIntrinsicInst* inst)
         destination = BroadcastIfUniform(GetSymbol(inst->getOperand(storeDestinationOperandId)));
     }
 
-    m_encoder->LSC_2DBlockMessage(
-        isRead ? LSC_LOAD_BLOCK2D : LSC_STORE_BLOCK2D,
-        nullptr,
-        destination,
-        nullptr, //pImgBTI - not needed for read
-        pXOffset,
-        pYOffset,
-        blockWidth,  //elements based
-        blockHeight,
-        elemSizeInBits,
-        numBlocksV,
-        isTranspose,
-        isVnni,
-        pFlatImageBaseoffset,
-        pFlatImageWidth,
-        pFlatImageHeight,
-        pFlatImagePitch,
-        cacheOpts);
-    m_encoder->Push();
-
-    if (isRead &&
-        !isPrefetch &&
-        destination != m_destination)
-    {
-        // m1 v2 block read
-        m_encoder->Copy(m_destination, destination);
+    bool emu_read = (isRead && isTranspose &&
+        (elemSizeInBits == 8 || elemSizeInBits == 16));
+    if (!emu_read) {
+        m_encoder->LSC_2DBlockMessage(
+            isRead ? LSC_LOAD_BLOCK2D : LSC_STORE_BLOCK2D,
+            nullptr,
+            destination,
+            nullptr, //pImgBTI - not needed for read
+            pXOffset,
+            pYOffset,
+            blockWidth,  //elements based
+            blockHeight,
+            elemSizeInBits,
+            numBlocksV,
+            isTranspose,
+            isVnni,
+            pFlatImageBaseoffset,
+            pFlatImageWidth,
+            pFlatImageHeight,
+            pFlatImagePitch,
+            cacheOpts);
         m_encoder->Push();
-        m_encoder->SetSrcSubVar(0, 1);
-        m_encoder->SetDstSubReg(m_destination->GetNumberElement() / 2);
-        m_encoder->Copy(m_destination, destination);
-        m_encoder->Push();
+        return;
     }
+
+    // emulation
+    bool emu_d8 = (elemSizeInBits == 8 && blockHeight == 32 &&
+        (blockWidth == 4 || blockWidth ==8 || blockWidth == 16));
+    bool emu_d16 = (elemSizeInBits == 16 && blockHeight == 16 &&
+        (blockWidth == 4 || blockWidth == 8 || blockWidth == 16));
+    if (emu_d8 || emu_d16) {
+        assert(m_currShader->m_Platform->getGRFSize() == 64 &&
+            "2d block d8/d16 transpose emulation is supported on PVC+ only");
+        assert(m_SimdMode >= SIMDMode::SIMD16);
+        //
+        // 1. Emulation of u8_m32k4 (u16_m32k4 is similar)
+        //    Use 2dBlock transform load.d8.4x32 (widthxheight).
+        //    Input:
+        //       a(0,0)   a(0,1)  a(0,2)  a(0,3)
+        //       a(1,0)   a(1,1)  a(1,2)  a(1,3)
+        //       a(2,0)   a(2,1)  a(2,2)  a(2,3)
+        //       a(3,0)   a(3,1)  a(3,2)  a(3,3)
+        //       a(4,0)   a(4,1)  a(4,2)  a(4,3)
+        //       a(5,0)   a(5,1)  a(5,2)  a(5,3)
+        //       a(6,0)   a(6,1)  a(6,2)  a(6,3)
+        //       a(7,0)   a(7,1)  a(7,2)  a(7,3)
+        //       ...... ......
+        //       a(31,0)  a(31,1) a(31,2) a(31,3)
+        //   after transform load, assume that the loaded value is in GRF r10 and r11,
+        //   shown in DW below:
+        //       DW0{a(0,0),a(1,0),a(2,0),a3,0)}  DW1{a(0,1),a(1,1),a(2,1),a(3,1)}
+        //       DW2{a(0,2),a(1,2),a(2,2),a3,2)}  DW3{a(0,3),a(1,3),a(2,3),a(3,3)}
+        //       DW4{a(4,0),a(5,0),a(6,0),a7,0)}  DW5{a(4,1),a(5,1),a(6,1),a(7,1)}
+        //       DW6{a(4,2),a(5,2),a(6,2),a7,2)}  DW7{a(4,3),a(5,3),a(6,3),a(7,3)}
+        //       ......
+        //       DW28{a(28,0),a(29,0),a(30,0),a(31,0)}  DW29{a(28,1),a(29,1),a(30,1),a(31,1)}
+        //       DW30{a(28,2),a(29,2),a(30,2),a(31,2)}  DW31{a(28,3),a(29,3),a(30,3),a(31,3)}
+        //
+        //   *** Using the following mov instruction to get data in the right position ***
+        //       (W) mov (8)  r20.0<1>:ud  r10.0<4;1,0>:ud
+        //       (W) mov (8)  r20.8<1>:ud  r10.1<4;1,0>:ud
+        //       (W) mov (8)  r21.0<1>:ud  r10.2<4;1,0>:ud
+        //       (W) mov (8)  r21.8<1>:ud  r10.3<4;1,0>:ud
+        //
+        //   The final data in GRF r20 (tranposed input):
+        //       DW0, DW4, ..., DW28     -> r20.0
+        //       DW1, DW5, ..., DW29     -> r20.8
+        //       DW2, DW6, ..., DW30     -> r21.0
+        //       DW3, DW7, ..., DW31     -> r21.8
+        //
+        //   ** Code example **
+        //           (r20,r21) = load.u8.4x32tn (transpose_u8_m32k4)
+        //      ==>
+        //           (r10,r11) = load.u8.4x32nt (transform 1 block of 32x4)
+        //           (W) mov (8|M0)   r20.0<1>:ud    r10.0<4;1,0>:ud
+        //           (W) mov (8|M0)   r20.8<1>:ud    r10.1<4;1,0>:ud
+        //           (W) mov (8|M0)   r21.0<1>:ud    r10.2<4;1,0>:ud
+        //           (W) mov (8|M0)   r21.8<1>:ud    r10.3<4;1,0>:ud
+        //
+        // 2. For m32k8/m32k16, divide larger blocks into multiple m32k4 and loaded
+        //    with a single tranform load. For each block, insert mov as shown in 1.
+        //
+        //    For example, u8_m32k8 is divided into 2 m32k4 and loaded with
+        //    transform load.d8.2x32x4 (numOfBlocks = 2). For each m32k4, insert
+        //    4 mov instructions, thus there are 8 mov instructions in total.
+        //
+        CVariable* tmpDest = m_currShader->GetNewVariable(destination);
+        // Each new block takes 4 columns, and the size of the new block is 2 GRFs.
+        int numBlocks = blockWidth / 4;
+        m_encoder->LSC_2DBlockMessage(
+            LSC_LOAD_BLOCK2D,
+            nullptr,
+            tmpDest,
+            nullptr, //pImgBTI - not needed for read
+            pXOffset,
+            pYOffset,
+            4,
+            blockHeight,
+            elemSizeInBits,
+            numBlocks,
+            false,
+            true,
+            pFlatImageBaseoffset,
+            pFlatImageWidth,
+            pFlatImageHeight,
+            pFlatImagePitch,
+            cacheOpts);
+        m_encoder->Push();
+
+        CVariable* tmpDestDW = m_currShader->GetNewAlias(tmpDest, ISA_TYPE_UD, 0, 0);
+        CVariable* destDW = m_currShader->GetNewAlias(destination, ISA_TYPE_UD, 0, 0);
+        for (int i = 0; i < numBlocks; ++i)
+        {
+            // Each new block is 32 DWs (2 GRF). One mov instruction for
+            // each original blockWidth
+            for (int j = 0; j < 4; ++j)
+            {
+                m_encoder->SetDstRegion(1);
+                m_encoder->SetDstSubReg(i * 32 + j * 8);
+                m_encoder->SetSrcRegion(0, 4, 1, 0);
+                m_encoder->SetSrcSubReg(0, i * 32 + j);
+                m_encoder->SetSimdSize(SIMDMode::SIMD8);
+                m_encoder->SetNoMask();
+                m_encoder->Copy(destDW, tmpDestDW);
+                m_encoder->Push();
+            }
+        }
+        return;
+    }
+    m_pCtx->EmitError("IGC: unhandled 2d block read!", inst);
+    IGC_ASSERT_MESSAGE(0, "Unhandled 2d block read");
 }
 
 void EmitPass::emitLSC2DBlockAddrPayload(GenIntrinsicInst* GII)
@@ -24921,18 +25784,19 @@ LSC_CACHE_OPTS EmitPass::getDefaultRaytracingCachePolicy(bool isLoad) const
         return DefaultCacheCtrl;
 
     LSC_L1_L3_CC Opts;
-
+    LSC_L1_L3_CC genMemLoadCacheControl = LSC_L1C_WT_L3C_WB;
+    LSC_L1_L3_CC genMemStoreCacheControl = LSC_L1IAR_WB_L3C_WB;
     if (isLoad)
     {
         Opts = IGC_IS_FLAG_ENABLED(ForceGenMemLoadCacheCtrl) ?
             (LSC_L1_L3_CC)IGC_GET_FLAG_VALUE(GenMemLoadCacheCtrl) :
-            LSC_L1C_WT_L3C_WB;
+            genMemLoadCacheControl;
     }
     else
     {
         Opts = IGC_IS_FLAG_ENABLED(ForceGenMemStoreCacheCtrl) ?
             (LSC_L1_L3_CC)IGC_GET_FLAG_VALUE(GenMemStoreCacheCtrl) :
-            LSC_L1IAR_WB_L3C_WB;
+            genMemStoreCacheControl;
     }
 
     return translateLSCCacheControlsEnum(Opts, isLoad, nullptr);

@@ -13,7 +13,6 @@ SPDX-License-Identifier: MIT
 #include "Compiler/IGCPassSupport.h"
 #include "Compiler/MetaDataApi/MetaDataApi.h"
 #include "common/LLVMWarningsPush.hpp"
-#include "llvm/Config/llvm-config.h"
 #include "llvmWrapper/IR/DerivedTypes.h"
 #include "llvmWrapper/IR/IRBuilder.h"
 #include "llvm/Support/CommandLine.h"
@@ -408,40 +407,33 @@ void Legalization::visitCallInst(llvm::CallInst& I)
         newInst->takeName(&I);
         I.eraseFromParent();
     }
-    else if (!m_ctx->platform.supportSamplerFp16Input())
+    else if (!m_ctx->platform.supportSamplerFp16Input() &&
+            (llvm::isa<SampleIntrinsic>(&I) ||
+             llvm::isa<SamplerGatherIntrinsic>(&I)) &&
+            I.getOperand(0)->getType()->isHalfTy())
     {
-        // promote FP16 sample_xxx to FP32 sample_xxx
-        if (llvm::isa<SampleIntrinsic>(&I) ||
-            llvm::isa<SamplerGatherIntrinsic>(&I))
-        {
-            if (I.getOperand(0)->getType()->isHalfTy())
-            {
-                PromoteFp16ToFp32OnGenSampleCall(I);
-            }
-        }
+        PromoteFp16ToFp32OnGenSampleCall(I);
     }
-    else if (m_ctx->platform.hasNoFullI64Support())
+    else if (auto* GII = dyn_cast<GenIntrinsicInst>(&I))
     {
-        if (auto* GII = dyn_cast<GenIntrinsicInst>(&I))
+        if (m_ctx->platform.hasNoFullI64Support() &&
+            (GII->getIntrinsicID() == GenISAIntrinsic::GenISA_imulH ||
+             GII->getIntrinsicID() == GenISAIntrinsic::GenISA_umulH) &&
+            GII->getArgOperand(0)->getType()->isIntegerTy(64))
         {
-            if ((GII->getIntrinsicID() == GenISAIntrinsic::GenISA_imulH ||
-                GII->getIntrinsicID() == GenISAIntrinsic::GenISA_umulH) &&
-                GII->getArgOperand(0)->getType()->isIntegerTy(64))
-            {
-                BasicBlock* const bb = GII->getParent();
-                IGC_ASSERT(nullptr != bb);
-                Function* const f = bb->getParent();
-                IGC_ASSERT(nullptr != f);
-                IGCLLVM::IRBuilder<> Builder(GII);
+            BasicBlock* const bb = GII->getParent();
+            IGC_ASSERT(nullptr != bb);
+            Function* const f = bb->getParent();
+            IGC_ASSERT(nullptr != f);
+            IGCLLVM::IRBuilder<> Builder(GII);
 
-                const bool isSigned = GII->getIntrinsicID() == GenISAIntrinsic::GenISA_imulH;
+            const bool isSigned = GII->getIntrinsicID() == GenISAIntrinsic::GenISA_imulH;
 
-                IGC_ASSERT(GII->getArgOperand(0)->getType() == GII->getArgOperand(1)->getType());
-                Value* newInst = CreateMulh(*f, Builder, isSigned, GII->getArgOperand(0), GII->getArgOperand(1));
-                IGC_ASSERT_MESSAGE(nullptr != newInst, "CreateMulh failed.");
-                GII->replaceAllUsesWith(newInst);
-                GII->eraseFromParent();
-            }
+            IGC_ASSERT(GII->getArgOperand(0)->getType() == GII->getArgOperand(1)->getType());
+            Value* newInst = CreateMulh(*f, Builder, isSigned, GII->getArgOperand(0), GII->getArgOperand(1));
+            IGC_ASSERT_MESSAGE(nullptr != newInst, "CreateMulh failed.");
+            GII->replaceAllUsesWith(newInst);
+            GII->eraseFromParent();
         }
     }
     m_ctx->m_instrTypes.numInsts++;
@@ -563,7 +555,7 @@ LegalizeGVNBitCastPattern(IRBuilder<>* Builder, const DataLayout* DL,
         // Assign null to BI if this is not ending with a bitcast.
         BI = dyn_cast<BitCastInst>(TI->user_back());
 
-        // This gurantees all uses of BI could be replaced by the source.
+        // This guarantees all uses of BI could be replaced by the source.
         if (BI && BI->getType() != EltTy)
             return false;
         else if (TI->getType()->getPrimitiveSizeInBits() !=
@@ -594,11 +586,11 @@ LegalizeGVNBitCastPattern(IRBuilder<>* Builder, const DataLayout* DL,
         if (!BI || !BI->getType()->isVectorTy())
             return false;
 
-        // All uses must be EEI.
+        // All uses must be EEI and must have the same element size as the original element type.
         for (auto U : BI->users())
         {
             auto EEI = dyn_cast<ExtractElementInst>(U);
-            if (!EEI)
+            if (!EEI || EEI->getType()->getPrimitiveSizeInBits() != EltTy->getPrimitiveSizeInBits())
                 return false;
             EEIs.push_back(EEI);
         }
@@ -2830,11 +2822,15 @@ bool IGC::expandFDIVInstructions(llvm::Function &F, ShaderType ShaderTy) {
                     V = Builder.CreateFMul(Y, X);
                 }
                 else {
-                    // Up cast to float, do rcp+mul in float, and down cast to half / bfloat.
+                    // Up cast to float, and down cast to half / bfloat.
+                    // div as float with additional checks for better precision and special cases like Inf, NaN. to be spec conformant.
                     Y = Builder.CreateFPExt(Y, Builder.getFloatTy());
-                    Y = Builder.CreateFDiv(ConstantFP::get(Ctx, APFloat(1.0f)), Y);
                     X = Builder.CreateFPExt(X, Builder.getFloatTy());
-                    V = Builder.CreateFMul(Y, X);
+                    V = Builder.CreateFDiv(X, Y);
+                    // Iterator at the begining of the loop is already at the next instruction,
+                    // so we want to set it back to handle this fdiv as normal one.
+                    Iter = BasicBlock::iterator(dyn_cast<Instruction>(V));
+
                     V = Builder.CreateFPTrunc(V, Inst->getType());
                 }
             }

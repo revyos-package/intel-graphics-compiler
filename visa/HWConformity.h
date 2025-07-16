@@ -89,6 +89,7 @@ class HWConformity {
   bool fixOpndType(INST_LIST_ITER it, G4_BB *bb);
   void fixPackedHFConversions(INST_LIST_ITER it, G4_BB *bb);
 
+  bool fixIndirectMoviSimd16ToSimd8(INST_LIST_ITER i, G4_BB *bb);
   bool fixIndirectOpnd(INST_LIST_ITER i, G4_BB *bb);
   bool fixIndirectSrcForCompressedInst(INST_LIST_ITER i, G4_BB *bb);
   void fix3SrcInst(INST_LIST_ITER i, G4_BB *bb);
@@ -102,6 +103,7 @@ class HWConformity {
   bool fixAcc(INST_LIST_ITER i, G4_BB *bb);
   void fixDstHstride(INST_LIST_ITER i, int extypesize);
   void fixMADInst(G4_BB *bb);
+  void fixBfnInst(G4_BB *bb);
   void fixSrcRegion(G4_INST *inst);
   bool fixOddAlignSrc1Region(INST_LIST_ITER i, G4_BB *bb);
   void conformBB(G4_BB *bb);

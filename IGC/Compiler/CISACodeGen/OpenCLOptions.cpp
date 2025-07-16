@@ -10,8 +10,6 @@ SPDX-License-Identifier: MIT
 #include "llvm/Option/ArgList.h"
 #include "llvm/Support/StringSaver.h"
 #include "llvm/Support/CommandLine.h"
-#include "llvmWrapper/Option/OptTable.h"
-#include "llvmWrapper/Support/Alignment.h"
 #include "common/LLVMWarningsPop.hpp"
 
 #include "Compiler/CISACodeGen/OpenCLOptions.hpp"
@@ -202,11 +200,6 @@ void InternalOptions::parseOptions(const char* internalOpts)
         {
             VectorCoalescingControl = val;
         }
-    }
-
-    if (internalOptions.hasArg(OPT_disable_zebin_common))
-    {
-        DisableZEBinary = true;
     }
 
     if (internalOptions.hasArg(OPT_exclude_ir_from_zebin_common))
@@ -606,6 +599,10 @@ void Options::parseOptions(const char* opts)
 
     if (apiOptions.hasArg(OPT_static_profile_guided_trimming_common)) {
         StaticProfileGuidedTrimming = true;
+    }
+
+    if (apiOptions.hasArg(OPT_enable_ieee_float_exception_trap_common)) {
+        EnableIEEEFloatExceptionTrap = true;
     }
 }
 } // namespace IGC

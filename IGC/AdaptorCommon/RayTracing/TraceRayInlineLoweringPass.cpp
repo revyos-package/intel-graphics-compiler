@@ -24,6 +24,7 @@ SPDX-License-Identifier: MIT
 #include <llvm/Analysis/LoopInfo.h>
 #include "common/LLVMWarningsPop.hpp"
 #include <vector>
+#include <unordered_map>
 #include "Probe/Assertion.h"
 
 using namespace IGC;
@@ -65,7 +66,7 @@ private:
     //FIXME: hack code, fix this hack in stage 2.
     bool singleRQProceed = true;
 
-    void LowerAllocateRayQuery(Function& F, unsigned numProceeds);
+    bool LowerAllocateRayQuery(Function& F, unsigned numProceeds);
     void LowerTraceRayInline(Function& F);
     void LowerTraceRaySyncProceedIntrinsic(Function& F);
     void LowerSyncStackToShadowMemory(Function& F);
@@ -101,7 +102,7 @@ private:
 
     std::pair<BasicBlock*, BasicBlock*> branchOnPotentialHitDone(
         RTBuilder &IRB,
-        RayQueryInstrisicBase *P);
+        RayQueryIntrinsicBase *P);
 
     void emitSingleRQMemRayWrite(RTBuilder& builder, Value* queryObjIndex);
     bool analyzeSingleRQMemRayWrite(const Function& F) const;
@@ -137,7 +138,9 @@ bool TraceRayInlineLoweringPass::runOnFunction(Function& F)
     unsigned numProceeds;
     std::tie(singleRQProceed, numProceeds) = analyzeSingleRQProceed(F);
 
-    LowerAllocateRayQuery(F, numProceeds);
+    if (!LowerAllocateRayQuery(F, numProceeds))
+        return false;
+
     LowerTraceRayInline(F);
     LowerTraceRaySyncProceedIntrinsic(F);
     LowerSyncStackToShadowMemory(F);
@@ -148,23 +151,37 @@ bool TraceRayInlineLoweringPass::runOnFunction(Function& F)
     LowerCommitNonOpaqueTriangleHit(F);
     LowerCommitProceduralPrimitiveHit(F);
 
+    auto* modMD = m_CGCtx->getModuleMetaData();
+    uint32_t numSyncRTStacks = m_CGCtx->syncRTCallsNeedSplitting() ? 2 : 1;
+
+    modMD->rtInfo.numSyncRTStacks =
+        std::max(modMD->rtInfo.numSyncRTStacks, numSyncRTStacks);
+
+    auto FMD = modMD->FuncMD.find(&F);
+    if (FMD != modMD->FuncMD.end()) {
+      FMD->second.rtInfo.numSyncRTStacks = numSyncRTStacks;
+    }
+
     DumpLLVMIR(m_CGCtx, "TraceRayInlineLoweringPass");
     return true;
 }
 
 
-void TraceRayInlineLoweringPass::LowerAllocateRayQuery(
+bool TraceRayInlineLoweringPass::LowerAllocateRayQuery(
     Function& F, unsigned numProceeds)
 {
-    vector<AllocateRayQueryIntrinsic*> AllocateRayQueries;
+    SmallVector<ConvertRayQueryHandleToRTStackPointerIntrinsic*> convertRayQueryToRTStackPointers;
+    SmallVector<AllocateRayQueryIntrinsic*> AllocateRayQueries;
     for (auto& I : instructions(F))
     {
         if (auto* ARQ = dyn_cast<AllocateRayQueryIntrinsic>(&I))
             AllocateRayQueries.push_back(ARQ);
+        else if (auto* II = dyn_cast<ConvertRayQueryHandleToRTStackPointerIntrinsic>(&I))
+            convertRayQueryToRTStackPointers.push_back(II);
     }
 
     if (AllocateRayQueries.empty())
-        return;
+        return false;
 
     ModuleMetaData* modMD = m_CGCtx->getModuleMetaData();
     if (modMD->FuncMD.find(&F) == modMD->FuncMD.end()) {
@@ -180,8 +197,8 @@ void TraceRayInlineLoweringPass::LowerAllocateRayQuery(
     //on the other hand, we DO need to make sure these RQOs won't overlap in which case we cannot shrink SharedMem like the current way
     //later, we might improve this w/ a more general way.
     //this way might cover quite some RQOs cases, though
-    bool bShrinkSMStack = (AllocateRayQueries.size() > numLanes(m_CGCtx->platform.getMaxRayQuerySIMDSize())
-        && numProceeds == 1);
+    bool bShrinkSMStack = (AllocateRayQueries.size() > numLanes(m_CGCtx->platform.getMaxRayQuerySIMDSize(m_CGCtx->type))
+        && numProceeds == 1 && convertRayQueryToRTStackPointers.empty());
 
     std::tie(m_ShMemRTStacks, m_ShMemRTCtrls) =
         builder.createAllocaRayQueryObjects(AllocateRayQueries.size(), bShrinkSMStack, VALUE_NAME("&ShadowMemory.RayQueryObjects"));
@@ -200,6 +217,16 @@ void TraceRayInlineLoweringPass::LowerAllocateRayQuery(
     {
         ARQ->eraseFromParent();
     }
+
+    for (auto* I : convertRayQueryToRTStackPointers)
+    {
+        builder.SetInsertPoint(I);
+        auto* rtstack = getShMemRayQueryRTStack(builder, I->getQueryObjIndex());
+        I->replaceAllUsesWith(rtstack);
+        I->eraseFromParent();
+    }
+
+    return true;
 }
 
 std::pair<bool, unsigned>
@@ -217,6 +244,14 @@ TraceRayInlineLoweringPass::analyzeSingleRQProceed(const Function& F) const
                 (!LI->getLoopFor(PI->getParent()) ||
                  (RQO && RQO->getParent() == PI->getParent()));
         }
+    }
+
+    // If STOC is enabled, it is possible to execute Proceed more than
+    // once, despite the application does not call it in the loop.
+    // In such case switch to multiple Proceeds mode.
+    if (m_CGCtx->isSWSubTriangleOpacityCullingEmulationEnabled())
+    {
+        Result = false;
     }
 
     return { Result, cntProceeds };
@@ -326,7 +361,7 @@ void TraceRayInlineLoweringPass::LowerTraceRayInline(Function& F)
 std::pair<BasicBlock*, BasicBlock*>
 TraceRayInlineLoweringPass::branchOnPotentialHitDone(
     RTBuilder& IRB,
-    RayQueryInstrisicBase* P)
+    RayQueryIntrinsicBase* P)
 {
     auto* const ShadowMemStackPointer = getShMemRayQueryRTStack(IRB, P->getQueryObjIndex());
     Value* NotDone = IRB.isDoneBitNotSet(ShadowMemStackPointer, false);
@@ -393,10 +428,12 @@ Value* TraceRayInlineLoweringPass::emitProceedMainBody(
         );
     }
 
+
     //TraceRay
     Value* retSyncRT = builder.createSyncTraceRay(
         builder.getBvhLevel(ShadowMemStackPointer, false),
         traceRayCtrl,
+        nullptr,
         VALUE_NAME("trace_ray_query"));
 
     return retSyncRT;
@@ -643,202 +680,38 @@ void TraceRayInlineLoweringPass::LowerRayInfo(Function& F)
     {
         builder.SetInsertPoint(I);
 
-        unsigned int infoKind = I->getInfoKind();
         auto* const ShadowMemStackPointer = getShMemRayQueryRTStack(builder, I->getQueryObjIndex());
 
-        switch (infoKind)
+        switch (I->getInfoKind())
         {
-        case RAY_FLAGS:
-        {
-            Value* rayFlags = builder.getRayFlags(ShadowMemStackPointer);
-            rayFlags = builder.CreateZExt(rayFlags, I->getType());
-            I->replaceAllUsesWith(rayFlags);
+        default:
+            I->replaceAllUsesWith(
+                builder.lowerRayInfo(ShadowMemStackPointer,
+                    I,
+                    builder.getInt32(I->isCommitted() ? ClosestHit : AnyHit),
+                    std::nullopt
+                )
+            );
+            I->eraseFromParent();
             break;
-        }
-        case WORLD_RAY_ORG:
-        {
-            Value* rayOrg = builder.getWorldRayOrig(ShadowMemStackPointer, (uint32_t)cast<ConstantInt>(I->getDim())->getZExtValue());
-            I->replaceAllUsesWith(rayOrg);
-            break;
-        }
-        case WORLD_RAY_DIR:
-        {
-            Value* valueAtDim = builder.getWorldRayDir(ShadowMemStackPointer, (uint32_t)cast<ConstantInt>(I->getDim())->getZExtValue());
-            I->replaceAllUsesWith(valueAtDim);
-            break;
-        }
-        case RAY_T_MIN:
-        {
-            Value* TMin = builder.getRayTMin(ShadowMemStackPointer);
-            I->replaceAllUsesWith(TMin);
-            break;
-        }
-        case RAY_T_CURRENT:
-        {
-            Value* rayT = builder.getRayTCurrent(ShadowMemStackPointer, CallableShaderTypeMD::ClosestHit);
-            I->replaceAllUsesWith(rayT);
-            break;
-        }
-        case CANDIDATE_TRIANGLE_T_CURRENT:
-        {
-            Value* rayT = builder.getRayTCurrent(ShadowMemStackPointer, CallableShaderTypeMD::AnyHit);
-            I->replaceAllUsesWith(rayT);
-            break;
-        }
-        case COMMITTED_TRIANGLE_FRONT_FACE:
-        case CANDIDATE_TRIANGLE_FRONT_FACE:
-        case CANDIDATE_PROCEDURAL_PRIM_NON_OPAQUE: // Procedural Primitive Opaque Info is stored in Front Face bit
-        {
-            IGC::CallableShaderTypeMD ShaderTy =
-                infoKind == COMMITTED_TRIANGLE_FRONT_FACE ?
-                CallableShaderTypeMD::ClosestHit :
-                CallableShaderTypeMD::AnyHit;
-            Value* frontFaceBit = builder.getIsFrontFace(ShadowMemStackPointer, ShaderTy);
-            if (infoKind == CANDIDATE_PROCEDURAL_PRIM_NON_OPAQUE)
-            {
-                frontFaceBit = builder.CreateICmpEQ(
-                    frontFaceBit, builder.getInt1(0), VALUE_NAME("is_nonopaque"));
-            }
-            I->replaceAllUsesWith(frontFaceBit);
-            break;
-        }
-        case COMMITTED_GEOMETRY_INDEX:
-        case CANDIDATE_GEOMETRY_INDEX:
+            // leave this in for now, until we prove we don't need the hack anymore
+        case GEOMETRY_INDEX:
         {
             bool specialPattern = false;
-            if (infoKind == COMMITTED_GEOMETRY_INDEX && IGC_GET_FLAG_VALUE(ForceRTShortCircuitingOR))
+            if (I->isCommitted() && IGC_GET_FLAG_VALUE(ForceRTShortCircuitingOR))
             {
                 specialPattern = forceShortCurcuitingOR_CommittedGeomIdx(builder, I);
             }
 
-            IGC::CallableShaderTypeMD ShaderTy =
-                infoKind == COMMITTED_GEOMETRY_INDEX ?
-                CallableShaderTypeMD::ClosestHit :
-                CallableShaderTypeMD::AnyHit;
-            Value* leafType = builder.getLeafType(ShadowMemStackPointer, ShaderTy == CallableShaderTypeMD::ClosestHit);
-            Value* geoIndex = builder.getGeometryIndex(ShadowMemStackPointer, I, leafType, ShaderTy, !specialPattern);
+            Value* leafType = builder.getLeafType(ShadowMemStackPointer, builder.getInt1(I->isCommitted()));
+            Value* geoIndex = builder.getGeometryIndex(ShadowMemStackPointer, I, leafType,
+                builder.getInt32(I->isCommitted() ? CallableShaderTypeMD::ClosestHit : CallableShaderTypeMD::AnyHit), !specialPattern);
             IGC_ASSERT_MESSAGE(I->getType()->isIntegerTy(), "Invalid geometryIndex type!");
             I->replaceAllUsesWith(geoIndex);
+            I->eraseFromParent();
             break;
         }
-        case COMMITTED_INSTANCE_INDEX:
-        case CANDIDATE_INSTANCE_INDEX:
-        case COMMITTED_INSTANCE_ID:
-        case CANDIDATE_INSTANCE_ID:
-        {
-            IGC::CallableShaderTypeMD ShaderTy =
-                (infoKind == COMMITTED_INSTANCE_INDEX || infoKind == COMMITTED_INSTANCE_ID) ?
-                CallableShaderTypeMD::ClosestHit :
-                CallableShaderTypeMD::AnyHit;
-            DISPATCH_SHADER_RAY_INFO_TYPE infoType =
-                (infoKind == COMMITTED_INSTANCE_ID || infoKind == CANDIDATE_INSTANCE_ID) ?
-                INSTANCE_ID :
-                INSTANCE_INDEX;
-            Value* inst = (infoType == INSTANCE_ID) ?
-                builder.getInstanceID(ShadowMemStackPointer, ShaderTy, I, true) :
-                builder.getInstanceIndex(ShadowMemStackPointer, ShaderTy, I, true);
-            I->replaceAllUsesWith(inst);
-            break;
         }
-        case COMMITTED_PRIMITIVE_INDEX:
-        case CANDIDATE_PRIMITIVE_INDEX:
-        {
-            IGC::CallableShaderTypeMD ShaderTy =
-                infoKind == COMMITTED_PRIMITIVE_INDEX ?
-                CallableShaderTypeMD::ClosestHit :
-                CallableShaderTypeMD::AnyHit;
-            Value* leafType = builder.getLeafType(ShadowMemStackPointer, ShaderTy == CallableShaderTypeMD::ClosestHit);
-            Value* primIndex = builder.getPrimitiveIndex(ShadowMemStackPointer, I, leafType, ShaderTy, true);
-            IGC_ASSERT_MESSAGE(I->getType()->isIntegerTy(), "Invalid primIndex type!");
-            I->replaceAllUsesWith(primIndex);
-
-            break;
-        }
-        case COMMITTED_BARYCENTRICS:
-        {
-            uint32_t idx = (uint32_t)cast<ConstantInt>(I->getDim())->getZExtValue();
-            Value* bary = builder.getHitBaryCentric(ShadowMemStackPointer, idx, true);
-            I->replaceAllUsesWith(bary);
-            break;
-        }
-        case CANDIDATE_BARYCENTRICS:
-        {
-            uint32_t idx = (uint32_t)cast<ConstantInt>(I->getDim())->getZExtValue();
-            Value* bary = builder.getHitBaryCentric(ShadowMemStackPointer, idx, false);
-            I->replaceAllUsesWith(bary);
-            break;
-        }
-        case COMMITTED_OBJECT_TO_WORLD:
-        case CANDIDATE_OBJECT_TO_WORLD:
-        {
-            IGC::CallableShaderTypeMD ShaderTy =
-                infoKind == COMMITTED_OBJECT_TO_WORLD ?
-                CallableShaderTypeMD::ClosestHit :
-                CallableShaderTypeMD::AnyHit;
-            uint32_t dim = (uint32_t)cast<ConstantInt>(I->getDim())->getZExtValue();
-            Value* matrixComp = builder.getObjToWorld(ShadowMemStackPointer, dim, ShaderTy, I, true);
-            I->replaceAllUsesWith(matrixComp);
-            break;
-        }
-        case COMMITTED_WORLD_TO_OBJECT:
-        case CANDIDATE_WORLD_TO_OBJECT:
-        {
-            IGC::CallableShaderTypeMD ShaderTy =
-                infoKind == COMMITTED_WORLD_TO_OBJECT ?
-                CallableShaderTypeMD::ClosestHit :
-                CallableShaderTypeMD::AnyHit;
-            uint32_t dim = (uint32_t)cast<ConstantInt>(I->getDim())->getZExtValue();
-            Value* matrixComp = builder.getWorldToObj(ShadowMemStackPointer, dim, ShaderTy, I, true);
-            I->replaceAllUsesWith(matrixComp);
-            break;
-
-            break;
-        }
-        case COMMITTED_OBJECT_RAY_ORG:
-        {
-            Value* rayInfo = builder.getObjRayOrig(ShadowMemStackPointer, (uint32_t)cast<ConstantInt>(I->getDim())->getZExtValue(), CallableShaderTypeMD::ClosestHit, I, true);
-            I->replaceAllUsesWith(rayInfo);
-            break;
-        }
-        case COMMITTED_OBJECT_RAY_DIR:
-        {
-            Value* rayInfo = builder.getObjRayDir(ShadowMemStackPointer, (uint32_t)cast<ConstantInt>(I->getDim())->getZExtValue(), CallableShaderTypeMD::ClosestHit, I, true);
-            I->replaceAllUsesWith(rayInfo);
-            break;
-        }
-        case CANDIDATE_OBJECT_RAY_ORG:
-        {
-            Value* valueAtDim = builder.getObjRayOrig(ShadowMemStackPointer, (uint32_t)cast<ConstantInt>(I->getDim())->getZExtValue(), CallableShaderTypeMD::AnyHit, I, true);
-            I->replaceAllUsesWith(valueAtDim);
-            break;
-        }
-        case CANDIDATE_OBJECT_RAY_DIR:
-        {
-            Value* valueAtDim = builder.getObjRayDir(ShadowMemStackPointer, (uint32_t)cast<ConstantInt>(I->getDim())->getZExtValue(), CallableShaderTypeMD::AnyHit, I, true);
-            I->replaceAllUsesWith(valueAtDim);
-            break;
-        }
-        case COMMITTED_INST_CONTRIBUTION_TO_HITGROUP_INDEX:
-        case CANDIDATE_INST_CONTRIBUTION_TO_HITGROUP_INDEX:
-        {
-            IGC::CallableShaderTypeMD ShaderTy =
-                infoKind == COMMITTED_INST_CONTRIBUTION_TO_HITGROUP_INDEX ?
-                CallableShaderTypeMD::ClosestHit :
-                CallableShaderTypeMD::AnyHit;
-            Value* info = builder.getInstanceContributionToHitGroupIndex(
-                ShadowMemStackPointer, ShaderTy);
-            I->replaceAllUsesWith(info);
-            break;
-        }
-        default:
-            IGC_ASSERT_MESSAGE(0, "Unsupported RayQuery Info");
-            break;
-        }
-    }
-
-    for (auto I : info)
-    {
-        I->eraseFromParent();
     }
 }
 

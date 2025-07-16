@@ -13,12 +13,10 @@ SPDX-License-Identifier: MIT
 #include "common/LLVMWarningsPush.hpp"
 #include "llvm/IR/Attributes.h"
 #include "llvmWrapper/IR/DerivedTypes.h"
-#include "llvmWrapper/IR/Intrinsics.h"
 #include "llvmWrapper/Support/Alignment.h"
 #include <llvm/IR/Module.h>
 #include <llvm/IR/Instruction.h>
 #include <llvm/IR/Instructions.h>
-#include <llvm/IR/InstIterator.h>
 #include "common/LLVMWarningsPop.hpp"
 #include "ShaderTypesEnum.h"
 #include "Probe/Assertion.h"
@@ -162,68 +160,6 @@ void OpenCLPrintfResolution::visitCallInst(CallInst& callInst)
     }
 }
 
-std::string OpenCLPrintfResolution::getEscapedString(const ConstantDataSequential* pCDS)
-{
-    std::string Name;
-    // This is to avoid unnecessary characters that exceed the char range
-    for (unsigned i = 0, len = pCDS->getNumElements() - 1; i != len; i++)
-    {
-        if (isa<ConstantInt>(pCDS->getElementAsConstant(i)))
-        {
-            if ((cast<ConstantInt>(pCDS->getElementAsConstant(i))->getZExtValue()) > 127)
-            {
-                Name = "";
-                return Name;
-            }
-            unsigned char C = (char)cast<ConstantInt>(pCDS->getElementAsConstant(i))->getZExtValue();
-
-            if (isprint(C) &&
-                (C != '\\') &&
-                (C != '"'))
-            {
-                Name.push_back(C);
-            }
-            else
-            {
-                Name.push_back('\\');
-                switch (C)
-                {
-                case '\a':
-                    Name.push_back('a');
-                    break;
-                case '\b':
-                    Name.push_back('b');
-                    break;
-                case '\f':
-                    Name.push_back('f');
-                    break;
-                case '\n':
-                    Name.push_back('n');
-                    break;
-                case '\r':
-                    Name.push_back('r');
-                    break;
-                case '\t':
-                    Name.push_back('t');
-                    break;
-                case '\v':
-                    Name.push_back('v');
-                    break;
-                default:
-                    Name.push_back(C);
-                    break;
-                }
-            }
-        }
-        else
-        {
-            Name = "";
-            return Name;
-        }
-    }
-    return Name;
-}
-
 Value* OpenCLPrintfResolution::processPrintfString(Value* arg, Function& F)
 {
     GlobalVariable* formatString = nullptr;
@@ -237,39 +173,7 @@ Value* OpenCLPrintfResolution::processPrintfString(Value* arg, Function& F)
             return ConstantInt::get(m_int32Type, -1);
         }
 
-        if (m_CGContext->enableZEBinary())
-        {
-            return arg;
-        }
-
-        ConstantDataArray* formatStringConst = dyn_cast<ConstantDataArray>(formatString->getInitializer());
-        std::string escaped_string = getEscapedString(formatStringConst);
-
-        // preventing MD enries duplication
-        if (m_MapStringStringIndex.find(escaped_string) != m_MapStringStringIndex.end()) {
-            return ConstantInt::get(m_int32Type, m_MapStringStringIndex[escaped_string]);
-        }
-
-
-        // Add new metadata node and put the printf string into it.
-        // The first element of metadata node is the string index,
-        // the second element is the string itself.
-        NamedMDNode* namedMDNode = m_module->getOrInsertNamedMetadata(getPrintfStringsMDNodeName(F));
-        SmallVector<Metadata*, 2>  args;
-        Metadata* stringIndexVal = ConstantAsMetadata::get(
-            ConstantInt::get(m_int32Type, m_stringIndex));
-
-        MDString* final_string = MDString::get(*m_context, escaped_string);
-
-        args.push_back(stringIndexVal);
-        args.push_back(final_string);
-
-        MDNode* itemMDNode = MDNode::get(*m_context, args);
-        namedMDNode->addOperand(itemMDNode);
-
-        m_MapStringStringIndex[escaped_string] = m_stringIndex;
-
-        return ConstantInt::get(m_int32Type, m_stringIndex++);
+        return arg;
     }
     else if (CastInst* castInst = dyn_cast<CastInst>(arg))
     {
@@ -602,7 +506,7 @@ void OpenCLPrintfResolution::expandPrintfCall(CallInst& printfCall, Function& F)
         writeOffsetPtr = generateCastToPtr(argDesc, writeOffset, bblockTrue);
         writeOffsetPtr->setDebugLoc(m_DL);
 
-        if (dataType == SHADER_PRINTF_STRING_LITERAL && m_CGContext->enableZEBinary())
+        if (dataType == SHADER_PRINTF_STRING_LITERAL)
         {
             printfArg = CastInst::Create(Instruction::CastOps::PtrToInt,
                 argDesc->value,
@@ -838,13 +742,8 @@ unsigned int OpenCLPrintfResolution::getArgTypeSize(IGC::SHADER_PRINTF_TYPE argT
         return vecSize * 8;
 
     case IGC::SHADER_PRINTF_STRING_LITERAL: {
-        if (m_CGContext->enableZEBinary()) {
-            // The size of the format string address
-            return 8;
-        } else {
-            // The size of the format string index
-            return 4;
-        }
+        // The size of the format string address
+        return 8;
     }
 
     default:
@@ -970,10 +869,7 @@ Instruction* OpenCLPrintfResolution::generateCastToPtr(SPrintfArgDescriptor* arg
     }
 
     case IGC::SHADER_PRINTF_STRING_LITERAL: {
-        if (m_CGContext->enableZEBinary())
-            castedType = Type::getInt64PtrTy(*m_context, ADDRESS_SPACE_GLOBAL);
-        else
-            castedType = Type::getInt32PtrTy(*m_context, ADDRESS_SPACE_GLOBAL);
+        castedType = Type::getInt64PtrTy(*m_context, ADDRESS_SPACE_GLOBAL);
         break;
     }
     case IGC::SHADER_PRINTF_POINTER:

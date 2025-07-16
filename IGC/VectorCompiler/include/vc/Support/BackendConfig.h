@@ -93,6 +93,8 @@ struct GenXBackendOptions {
   // Whether to enable dumps of kernel debug information
   bool EnableDebugInfoDumps = false;
   std::string DebugInfoDumpsNameOverride;
+  // Add instruction offsets as comments in the final assembly
+  bool EnableInstOffsetDumps = false;
 
   bool ForceArrayPromotion = false;
 
@@ -192,6 +194,9 @@ struct GenXBackendOptions {
 
   unsigned DepressurizerGRFThreshold = 2560;
   unsigned DepressurizerFlagGRFTolerance = 3840;
+
+  // Report LSC stores with non default L1 cache controls.
+  bool ReportLSCStoresWithNonDefaultL1CacheControls = false;
 
   // Calling enforceLLVMOptions queries the state of LLVM options and
   // updates BackendOptions accordingly.
@@ -314,6 +319,8 @@ public:
     return Options.DebugInfoDumpsNameOverride;
   }
 
+  bool emitInstOffsets() const { return Options.EnableInstOffsetDumps; }
+
   bool isArrayPromotionForced() const { return Options.ForceArrayPromotion; }
 
   bool localizeLiveRangesForAccUsage() const {
@@ -405,6 +412,10 @@ public:
   }
   unsigned getDepressurizerFlagGRFTolerance() const {
     return Options.DepressurizerFlagGRFTolerance;
+  }
+
+  bool reportLSCStoresWithNonDefaultL1CacheControls() const {
+    return Options.ReportLSCStoresWithNonDefaultL1CacheControls;
   }
 };
 

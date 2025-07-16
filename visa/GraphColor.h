@@ -1090,7 +1090,7 @@ class GraphColor {
   static unsigned edgeWeightWith4GRF(int lr1Align, int lr2Align,
                                      unsigned lr1_nreg, unsigned lr2_nreg) {
     if (lr1Align < 4 && lr2Align < 4)
-      return edgeWeightGRF(lr1Align % 2, lr2Align % 2, lr1_nreg, lr2_nreg);
+      return edgeWeightGRF(lr1Align == 2, lr2Align == 2, lr1_nreg, lr2_nreg);
 
     if (lr2Align == 4) {
       if (lr1Align < 2)
@@ -1234,6 +1234,7 @@ struct CustomHash {
   }
 };
 
+[[maybe_unused]]
 static bool operator==(const Interval &first, const Interval &second) {
   return first.start->getLexicalId() == second.start->getLexicalId();
 }
@@ -1954,15 +1955,18 @@ public:
   void removeUnreferencedDcls();
   LocalLiveRange *GetOrCreateLocalLiveRange(G4_Declare *topdcl);
 
-  GlobalRA(G4_Kernel &k, PhyRegPool &r, PointsToAnalysis &p2a)
-      : kernel(k), builder(*k.fg.builder), regPool(r), pointsToAnalysis(p2a),
-        fbdRegs(*k.fg.builder), incRA(*this),
-        useLscForSpillFill(k.fg.builder->supportsLSC()),
-        useLscForNonStackCallSpillFill(
-            k.fg.builder->useLscForNonStackSpillFill()),
-        useLscForScatterSpill(k.fg.builder->supportsLSC() &&
-                              k.fg.builder->getOption(vISA_scatterSpill)),
-        use4GRFAlign(k.fg.builder->supports4GRFAlign()) {
+  GlobalRA(G4_Kernel& k, PhyRegPool& r, PointsToAnalysis& p2a)
+    : fbdRegs(*k.fg.builder),
+      use4GRFAlign(k.fg.builder->supports4GRFAlign()),
+      kernel(k), builder(*k.fg.builder), regPool(r),
+      pointsToAnalysis(p2a),
+      useLscForSpillFill(k.fg.builder->supportsLSC()),
+      useLscForScatterSpill(k.fg.builder->supportsLSC() &&
+          k.fg.builder->getOption(vISA_scatterSpill)),
+      useLscForNonStackCallSpillFill(
+          k.fg.builder->useLscForNonStackSpillFill()),
+      incRA(*this)
+  {
     vars.resize(k.Declares.size());
 
     if (kernel.getOptions()->getOption(vISA_VerifyAugmentation)) {
@@ -2059,6 +2063,7 @@ public:
   void verifySpillFill();
   void resetGlobalRAStates();
   bool canSkipFDE() const;
+  void initSRAsScratch() const;
 
   void insertPhyRegDecls();
 

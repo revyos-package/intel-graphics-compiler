@@ -113,14 +113,15 @@ SpillManagerGRF::SpillManagerGRF(
     const Interference *intf, const LR_LIST *spilledLRs, bool failSafeSpill,
     unsigned spillRegSize, unsigned indrSpillRegSize,
     bool enableSpillSpaceCompression, bool useScratchMsg)
-    : gra(g), builder_(g.kernel.fg.builder), latestImplicitVarIdCount_(0),
-      lvInfo_(lvInfo), varIdCount_(lvInfo->getNumSelectedVar()),
-      lrInfo_(&g.incRA.getLRs()), spilledLRs_(spilledLRs),
-      nextSpillOffset_(spillAreaOffset),
-      doSpillSpaceCompression(enableSpillSpaceCompression),
-      failSafeSpill_(failSafeSpill), spillIntf_(intf),
-      useScratchMsg_(useScratchMsg), refs(g.kernel),
-      context(g, &g.incRA.getLRs()) {
+  : gra(g), builder_(g.kernel.fg.builder), varIdCount_(lvInfo->getNumSelectedVar()),
+    latestImplicitVarIdCount_(0),
+    lvInfo_(lvInfo), lrInfo_(&g.incRA.getLRs()), spilledLRs_(spilledLRs),
+    nextSpillOffset_(spillAreaOffset),
+    doSpillSpaceCompression(enableSpillSpaceCompression),
+    failSafeSpill_(failSafeSpill), spillIntf_(intf),
+    useScratchMsg_(useScratchMsg), refs(g.kernel),
+    context(g, &g.incRA.getLRs()) {
+
   spillAreaOffset_ = spillAreaOffset;
   builder_->instList.clear();
   spillRegStart_ = g.kernel.getNumRegTotal();
@@ -173,12 +174,12 @@ SpillManagerGRF::SpillManagerGRF(GlobalRA &g, unsigned spillAreaOffset,
                                  LSLR_LIST *spilledLSLRs,
                                  bool enableSpillSpaceCompression,
                                  bool useScratchMsg)
-    : gra(g), builder_(g.kernel.fg.builder), latestImplicitVarIdCount_(0),
-      lvInfo_(lvInfo), varIdCount_(lvInfo->getNumSelectedVar()),
-      spilledLSLRs_(spilledLSLRs), nextSpillOffset_(spillAreaOffset),
-      doSpillSpaceCompression(enableSpillSpaceCompression),
-      failSafeSpill_(false), useScratchMsg_(useScratchMsg), refs(g.kernel),
-      context(g), lrInfo_(nullptr) {
+  : gra(g), builder_(g.kernel.fg.builder), varIdCount_(lvInfo->getNumSelectedVar()),
+    latestImplicitVarIdCount_(0), lvInfo_(lvInfo), lrInfo_(nullptr),
+    spilledLSLRs_(spilledLSLRs), nextSpillOffset_(spillAreaOffset),
+    doSpillSpaceCompression(enableSpillSpaceCompression),
+    failSafeSpill_(false), useScratchMsg_(useScratchMsg), refs(g.kernel),
+    context(g) {
   spillAreaOffset_ = spillAreaOffset;
   builder_->instList.clear();
   curInst = nullptr;
@@ -363,7 +364,7 @@ unsigned SpillManagerGRF::calculateSpillDisp(G4_RegVar *regVar) const {
 
   using LocList = std::list<G4_RegVar *>;
   LocList locList;
-  unsigned lrId = (regVar->getId() >= varIdCount_)
+  [[maybe_unused]] unsigned lrId = (regVar->getId() >= varIdCount_)
                       ? regVar->getBaseRegVar()->getId()
                       : regVar->getId();
   vASSERT(lrId < varIdCount_);
@@ -425,7 +426,7 @@ unsigned SpillManagerGRF::calculateSpillDispForLS(G4_RegVar *regVar) const {
   // spilled live ranges and put them into a list in ascending order.
 
   std::vector<G4_RegVar *> locList;
-  unsigned lrId = (regVar->getId() >= varIdCount_)
+  [[maybe_unused]] unsigned lrId = (regVar->getId() >= varIdCount_)
                       ? regVar->getBaseRegVar()->getId()
                       : regVar->getId();
   vASSERT(lrId < varIdCount_);
@@ -745,13 +746,6 @@ unsigned SpillManagerGRF::getRegionByteSize(G4_SrcRegRegion *region,
   return size;
 }
 
-// Get the max exec size on a 256 bit vector for the input operand.
-static unsigned getMaxExecSize(G4_Operand *operand) {
-  const unsigned size = Type_UNDEF + 1;
-  static unsigned maxExecSize[size]{8, 8, 16, 16, 16, 16, 8, 8, 0};
-  return maxExecSize[operand->getType()];
-}
-
 // Check if the instruction is a SIMD 16 or 32 instruction that is logically
 // equivalent to two instructions the second of which uses register operands
 // at the following row with the same sub-register index.
@@ -963,8 +957,9 @@ static unsigned short getSpillRowSizeForSendDst(G4_INST *inst) {
     }
   } else {
     vASSERT(dst->getLinearizedStart() % builder.numEltPerGRF<Type_UB>() == 0);
-    nRows = (dst->getLinearizedEnd() - dst->getLinearizedStart() + 1) /
-            builder.numEltPerGRF<Type_UB>();
+    unsigned int rangeSize = (dst->getLinearizedEnd() - dst->getLinearizedStart() + 1);
+    unsigned int grfSize = builder.numEltPerGRF<Type_UB>();
+    nRows = (rangeSize / grfSize) + ((rangeSize % grfSize) == 0 ? 0 : 1);
   }
   return nRows;
 }
@@ -1127,14 +1122,17 @@ SpillManagerGRF::createTemporaryRangeDeclare(G4_DstRegRegion *spilledRegion,
   // non-zero
   byteSize += spilledRegion->getSubRegOff() * spilledRegion->getElemSize();
 
-  vASSERT(byteSize <= 2u * builder_->numEltPerGRF<Type_UB>());
+  vASSERT(byteSize <= 4u * builder_->numEltPerGRF<Type_UB>());
   vASSERT(byteSize % spilledRegion->getElemSize() == 0);
 
   G4_Type type = spilledRegion->getType();
   DeclareType regVarKind = DeclareType::Tmp;
 
   unsigned short width, height;
-  if (byteSize > builder_->numEltPerGRF<Type_UB>()) {
+  if (byteSize > (2 * builder_->numEltPerGRF<Type_UB>())) {
+    height = 4;
+    width = builder_->numEltPerGRF<Type_UB>() / spilledRegion->getElemSize();
+  } else if (byteSize > builder_->numEltPerGRF<Type_UB>()) {
     height = 2;
     width = builder_->numEltPerGRF<Type_UB>() / spilledRegion->getElemSize();
   } else {
@@ -2721,6 +2719,21 @@ bool SpillManagerGRF::checkUniqueDefAligned(G4_DstRegRegion *dst,
   return true;
 }
 
+bool SpillManagerGRF::isFirstLexicalDef(G4_DstRegRegion *dst) {
+  // Check whether dst is lexically first def
+  auto dcl = dst->getTopDcl();
+  auto *defs = refs.getDefs(dcl);
+
+  // Check whether any def has lower lexical id than dst
+  for (auto& def : *defs) {
+    auto *defInst = std::get<0>(def);
+    if (defInst->getLexicalId() < dst->getInst()->getLexicalId())
+      return false;
+  }
+
+  return true;
+}
+
 // This function checks whether each spill dst region requires a
 // read-modify-write operation when inserting spill code. Dominator/unique defs
 // don't require redundant read operation. Dst regions that do not need RMW are
@@ -2746,7 +2759,9 @@ void SpillManagerGRF::updateRMWNeeded() {
     //          inner loop nest,
     // Check3 : Flowgraph is reducible
     // Check4 : Dcl is not a split around loop temp
-    // RMW_Not_Needed = (Check0 || (Check1 && Check2 && Check3)) && Check4
+    // Check5 : bb is entryBB and spilledRegion is lexically first definition
+    // RMW_Not_Needed = Check5 || ((Check0 || (Check1 && Check2 && Check3)) &&
+    // Check4)
     bool RMW_Needed = true;
 
     // Reason for Check4:
@@ -2800,6 +2815,11 @@ void SpillManagerGRF::updateRMWNeeded() {
       }
     }
 
+    // Check5
+    if (RMW_Needed && bb == builder_->kernel.fg.getEntryBB()) {
+      RMW_Needed = !isFirstLexicalDef(spilledRegion);
+    }
+
     return RMW_Needed;
   };
 
@@ -2818,20 +2838,23 @@ void SpillManagerGRF::updateRMWNeeded() {
         continue;
 
       auto dst = inst->getDst();
-      if (dst) {
-        if (dst->getBase()->isRegVar()) {
-          auto dstRegVar = dst->getBase()->asRegVar();
-          if (dstRegVar && shouldSpillRegister(dstRegVar)) {
-            if (getRFType(dstRegVar) == G4_GRF) {
-              auto RMW_Needed = isRMWNeededForSpilledDst(bb, dst);
-              if (!RMW_Needed) {
-                // Any spilled dst region that doesnt need RMW
-                // is added to noRMWNeeded set. This set is later
-                // checked when inserting spill/fill code.
-                noRMWNeeded.insert(dst);
-              }
-            }
-          }
+      if (!dst)
+        continue;
+
+      if (!dst->getBase()->isRegVar())
+        continue;
+
+      auto dstRegVar = dst->getBase()->asRegVar();
+      if (dstRegVar && shouldSpillRegister(dstRegVar)) {
+        if (getRFType(dstRegVar) != G4_GRF)
+          continue;
+
+        auto RMW_Needed = isRMWNeededForSpilledDst(bb, dst);
+        if (!RMW_Needed) {
+          // Any spilled dst region that doesnt need RMW
+          // is added to noRMWNeeded set. This set is later
+          // checked when inserting spill/fill code.
+          noRMWNeeded.insert(dst);
         }
       }
     }

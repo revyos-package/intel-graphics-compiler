@@ -59,6 +59,7 @@ VISA_Exec_Size Get_VISA_Exec_Size_From_Raw_Size(unsigned int size);
 VISA_Oword_Num Get_VISA_Oword_Num_From_Number(unsigned num);
 VISA_Modifier Get_Common_ISA_SrcMod_From_G4_Mod(G4_SrcModifier mod);
 G4_Type getUnsignedType(unsigned short numByte);
+G4_Type getSignedType(unsigned short numByte);
 
 inline uint32_t getVersionAsInt(uint32_t major, uint32_t minor) {
   return major * 100 + minor;
@@ -212,6 +213,13 @@ namespace vISA {
 // binary, debug info), which may have longer lifetime than the vISA builder.
 // It is the caller's responsiblity to free such resources.
 void *allocCodeBlock(size_t sz);
+
+inline bool hasOV(LSC_SFID sfid, LSC_OP op) {
+  if ((sfid == LSC_UGM || sfid == LSC_URB) &&
+      (op == LSC_LOAD || op == LSC_LOAD_QUAD || op == LSC_LOAD_STATUS))
+    return true;
+  return false;
+}
 
 }
 
