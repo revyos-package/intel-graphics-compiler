@@ -1,2 +1,2 @@
-usr/lib/*/libiga??.so.*
-usr/lib/*/libigc.so.*
+usr/lib/*/libiga??.so*
+usr/lib/*/libigc.so*
