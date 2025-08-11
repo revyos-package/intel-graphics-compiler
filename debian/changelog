@@ -1,11 +1,11 @@
-intel-graphics-compiler2 (2.15.3-1) UNRELEASED; urgency=medium
+intel-graphics-compiler2 (2.15.3-1) unstable; urgency=medium
 
   * New upstream release.
   * rules: Clean up unwanted .so symlinks, but include libigdfcl.so.
   * libigdfcl-dev.lintian-overrides: Dropped, leftover from the old
     version.
 
- -- Timo Aaltonen <tjaalton@debian.org>  Mon, 11 Aug 2025 11:10:49 +0300
+ -- Timo Aaltonen <tjaalton@debian.org>  Mon, 11 Aug 2025 11:58:10 +0300
 
 intel-graphics-compiler2 (2.9.2-1) unstable; urgency=medium
 
