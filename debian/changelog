@@ -1,6 +1,7 @@
 intel-graphics-compiler2 (2.15.3-1) UNRELEASED; urgency=medium
 
   * New upstream release.
+  * rules: Clean up unwanted .so symlinks, but include libigdfcl.so.
 
  -- Timo Aaltonen <tjaalton@debian.org>  Mon, 11 Aug 2025 11:10:49 +0300
 

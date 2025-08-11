@@ -25,6 +25,9 @@ execute_after_dh_auto_install:
 	$(RM) -v debian/tmp/usr/include/igc/cif/cif/CMakeLists.txt
 	$(RM) -v debian/tmp/usr/include/igc/cif/readme.txt
 
+	$(RM) -v debian/tmp/usr/lib/*/libiga64.so
+	$(RM) -v debian/tmp/usr/lib/*/libigc.so
+
 override_dh_gencontrol:
 	dh_gencontrol -- \
 		-V'llvm:Version=$(LLVM_VERSION)'
