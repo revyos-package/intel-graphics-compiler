@@ -1,3 +1,10 @@
+intel-graphics-compiler2 (2.16.0-1) UNRELEASED; urgency=medium
+
+  * New upstream release.
+  * control: Bump build-dep on vc-intrinsics.
+
+ -- Timo Aaltonen <tjaalton@debian.org>  Tue, 19 Aug 2025 20:19:37 +0300
+
 intel-graphics-compiler2 (2.15.3-1) unstable; urgency=medium
 
   * New upstream release.
