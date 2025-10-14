@@ -1,0 +1,49 @@
+diff --git a/IGC/CMakeLists.txt b/IGC/CMakeLists.txt
+index ab372ae8d..b538d9fc0 100644
+--- a/IGC/CMakeLists.txt
++++ b/IGC/CMakeLists.txt
+@@ -896,6 +896,8 @@ foreach(_compilerFlagName IN ITEMS "CMAKE_CXX_FLAGS" "CMAKE_C_FLAGS")
+           -Wno-unknown-pragmas
+           -fPIC
+           -Bsymbolic
++          -Wno-error
++          -Wno-all
+     )
+     if(_igc_compiler_is_gnu)
+       igc_config_flag_apply_settings(
+@@ -950,6 +952,8 @@ foreach(_compilerFlagName IN ITEMS "CMAKE_CXX_FLAGS" "CMAKE_C_FLAGS")
+             -Wno-unknown-pragmas
+             -fPIC
+             -Bsymbolic
++            -Wno-error
++            -Wno-all
+       )
+     elseif("${IGC_OPTION__ARCHITECTURE_TARGET}" STREQUAL "LinuxRISCV")
+       igc_config_flag_apply_settings(
+@@ -982,6 +986,8 @@ foreach(_compilerFlagName IN ITEMS "CMAKE_CXX_FLAGS" "CMAKE_C_FLAGS")
+             -Wno-unknown-pragmas
+             -fPIC
+             -Bsymbolic
++            -Wno-error
++            -Wno-all
+       )
+     else()
+     igc_config_flag_apply_settings(
+@@ -1022,6 +1028,8 @@ foreach(_compilerFlagName IN ITEMS "CMAKE_CXX_FLAGS" "CMAKE_C_FLAGS")
+           -Wno-unknown-pragmas
+           -fPIC
+           -Bsymbolic
++          -Wno-error
++          -Wno-all
+     )
+     endif()
+     string(FIND ${CMAKE_CXX_FLAGS} "-D_FORTIFY_SOURCE=3" __FORTIFY_SOURCE_3_SET)
+@@ -1073,6 +1081,8 @@ foreach(_compilerFlagName IN ITEMS "CMAKE_CXX_FLAGS" "CMAKE_C_FLAGS")
+         -finline
+         -fkeep-inline-functions
+         -msse4.2
++        -Wno-error
++        -Wno-all
+     )
+     if(NOT CMAKE_C_COMPILER_VERSION LESS "4.0")
+       igc_config_flag_apply_settings(
