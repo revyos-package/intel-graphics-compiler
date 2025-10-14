@@ -244,8 +244,11 @@ void AddAnalysisPasses(CodeGenContext &ctx, IGCPassManager &mpm) {
         ctx.m_instrTypes.numInsts >= IGC_GET_FLAG_VALUE(CodeLoopSinkingMinSize)) {
       mpm.add(new CodeLoopSinking());
     }
-    if (IGC_IS_FLAG_DISABLED(DisableCodeScheduling) && (ctx.type == ShaderType::OPENCL_SHADER)) {
-      mpm.add(new CodeScheduling());
+    if (IGC_IS_FLAG_DISABLED(DisableCodeScheduling) && (ctx.type == ShaderType::OPENCL_SHADER) &&
+        (ctx.platform.isCoreChildOf(IGFX_XE_HPC_CORE) || ctx.platform.isCoreChildOf(IGFX_XE2_HPG_CORE))) {
+      if (IGC_IS_FLAG_DISABLED(CodeSchedulingOnlyRecompilation) || ctx.m_retryManager.AllowCodeScheduling()) {
+        mpm.add(new CodeScheduling());
+      }
     }
   }
 
@@ -1351,7 +1354,8 @@ void OptimizeIR(CodeGenContext *const pContext) {
         }
 
 
-        if (!pContext->m_retryManager.IsFirstTry()) {
+        // Can be completely repalced by LoopUnrollForCodeSizeOnly in GenTTI, Consider completely remove this pass
+        if (!pContext->m_retryManager.IsFirstTry() && pContext->m_retryManager.IsLastTry()) {
           mpm.add(new DisableLoopUnrollOnRetry());
         }
 

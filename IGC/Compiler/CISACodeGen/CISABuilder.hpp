@@ -49,17 +49,32 @@ struct SModifier {
 struct SAlias {
   CVariable *m_rootVar;
   VISA_Type m_type;
-  SAlias(CVariable *var, VISA_Type type) : m_rootVar(var), m_type(type) {}
+  // If m_aliasVar != null, visa GenVar's alias offset must be set to
+  // m_aliasVar->aliasOffset, not zero.
+  CVariable *m_aliasVar;
+  SAlias(CVariable *var, VISA_Type type, CVariable *aliasVar = nullptr)
+      : m_rootVar(var), m_type(type), m_aliasVar(aliasVar) {}
 };
 
 struct SAliasMapInfo {
-  static inline SAlias getEmptyKey() { return SAlias(nullptr, ISA_TYPE_UD); }
-  static inline SAlias getTombstoneKey() { return SAlias(nullptr, ISA_TYPE_D); }
+  static inline SAlias getEmptyKey() { return SAlias(nullptr, ISA_TYPE_UD, nullptr); }
+  static inline SAlias getTombstoneKey() { return SAlias(nullptr, ISA_TYPE_D, nullptr); }
   static unsigned getHashValue(const SAlias &Val) {
-    return llvm::DenseMapInfo<CVariable *>::getHashValue(Val.m_rootVar) ^ Val.m_type;
+    unsigned ty = (unsigned)Val.m_type;
+    if (Val.m_aliasVar)
+      ty += 0x011000;
+    return llvm::DenseMapInfo<CVariable *>::getHashValue(Val.m_rootVar) ^ ty;
   }
   static bool isEqual(const SAlias &LHS, const SAlias &RHS) {
-    return LHS.m_rootVar == RHS.m_rootVar && LHS.m_type == RHS.m_type;
+    if (!LHS.m_aliasVar && !RHS.m_aliasVar) {
+      // common case
+      return LHS.m_rootVar == RHS.m_rootVar && LHS.m_type == RHS.m_type;
+    } else if (LHS.m_aliasVar && RHS.m_aliasVar) {
+      // inline asm only
+      return LHS.m_rootVar == RHS.m_rootVar && LHS.m_type == RHS.m_type &&
+             LHS.m_aliasVar->GetAliasOffset() == RHS.m_aliasVar->GetAliasOffset();
+    }
+    return false;
   }
 };
 
@@ -121,7 +136,7 @@ public:
   void SetExternFunctionFlag();
 
   void GetVISAPredefinedVar(CVariable *pVar, PreDefined_Vars var);
-  void CreateVISAVar(CVariable *var);
+  void CreateVISAVar(CVariable *var, bool UseAliasOffset = false);
   void DeclareInput(CVariable *var, uint offset, uint instance);
   void DeclarePred(CVariable *var, uint offset);
   void MarkAsOutput(CVariable *var);
@@ -507,32 +522,22 @@ private:
   // save compile time by avoiding retry if the amount of spill is (very) small
   bool AvoidRetryOnSmallSpill() const;
 
-  // CreateSymbolTable, CreateRelocationTable and CreateFuncAttributeTable will
-  // create symbols, relococations and FuncAttributes in two formats. One in
-  // given buffer that will be later parsed as patch token based format, another
-  // as struct type that will be parsed as ZE binary format
-
   // CreateSymbolTable
   // Note that this function should be called only once even if there are
   // multiple kernels in a program. Current IGC flow will create all symbols in
   // the first kernel and all the other kernels won't contain symbols
-  typedef std::vector<std::pair<llvm::Value *, vISA::GenSymEntry>> ValueToSymbolList;
+  typedef std::vector<std::pair<llvm::Value *, vISA::ZESymEntry>> ValueToSymbolList;
   void CreateSymbolTable(ValueToSymbolList &symbolTableList);
-  // input/output: buffer, bufferSize, tableEntries: for patch-token-based
-  // format.
-  void CreateSymbolTable(void *&buffer, unsigned &bufferSize, unsigned &tableEntries);
-  // input/output: symbols: for ZEBinary foramt
-  void CreateSymbolTable(SProgramOutput::ZEBinFuncSymbolTable &funcSyms,
-                         SOpenCLProgramInfo::ZEBinProgramSymbolTable &programSyms);
-  // Create local symbols for kernels. This is ZEBinary format only.
+  // Create function symbols
+  void CreateFunctionSymbolTable(ValueToSymbolList &symbolTableList, SProgramOutput::ZEBinFuncSymbolTable &funcSyms);
+  // Create program symbols
+  void CreateProgramSymbolTable(ValueToSymbolList &symbolTableList,
+                                SOpenCLProgramInfo::ZEBinProgramSymbolTable &programSyms);
+  // Create local symbols for kernels
   void CreateLocalSymbol(const std::string &kernelName, vISA::GenSymType type, unsigned offset, unsigned size,
                          SProgramOutput::ZEBinFuncSymbolTable &symbols);
 
-  // CreateRelocationTable
-  // input/output: buffer, bufferSize, tableEntries: for patch-token-based
-  // format.
-  void CreateRelocationTable(VISAKernel *pMainKernel, void *&buffer, unsigned &bufferSize, unsigned &tableEntries);
-  // input/output: relocations: for ZEBinary foramt
+  // input/output: relocations
   void CreateRelocationTable(VISAKernel *pMainKernel, SProgramOutput::RelocListTy &relocations);
 
   // CreateFuncAttributeTable
@@ -540,10 +545,8 @@ private:
 
   // CreateGlobalHostAccessTable
   typedef std::vector<vISA::HostAccessEntry> HostAccessList;
-  void CreateGlobalHostAccessTable(void *&buffer, unsigned &bufferSize, unsigned &tableEntries);
-  // input/output: hostAccessMap: for patch-token-based format.
   void CreateGlobalHostAccessTable(HostAccessList &hostAccessMap);
-  // input/output: global host access names: for ZEBinary format
+  // input/output: global host access names
   void CreateGlobalHostAccessTable(SOpenCLProgramInfo::ZEBinGlobalHostAccessTable &globalHostAccessTable);
 
   uint32_t getGRFSize() const;
@@ -612,11 +615,10 @@ private:
   // setup m_retryManager according to jitinfo and other factors
   void SetKernelRetryState(CodeGenContext *context, vISA::FINALIZER_INFO *jitInfo, GenXFunctionGroupAnalysis *&pFGA);
 
-  /// create symbol tables and GlobalHostAccessTable according to if it's zebin
-  /// or patch-token formats
+  /// create symbol tables and GlobalHostAccessTable
   void createSymbolAndGlobalHostAccessTables(bool hasSymbolTable, VISAKernel &pMainKernel, unsigned int scratchOffset);
 
-  /// create relocation according to if it's zebin or patch-token formats
+  /// create relocation tables according
   void createRelocationTables(VISAKernel &pMainKernel);
 
   /// Estimate vISA stack size according to FunctionGroup information.

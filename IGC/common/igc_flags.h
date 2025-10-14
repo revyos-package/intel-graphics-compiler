@@ -279,14 +279,27 @@ DECLARE_IGC_REGKEY(DWORD, LS_splitThresholdDelta_GRF, 2,
                    "Register pressure must exceed total GRFs by this much for the load splitting to fire up.", false)
 
 // Code Scheduling
-DECLARE_IGC_REGKEY(bool, DisableCodeScheduling, true, "Disable local code scheduling", true)
+DECLARE_IGC_REGKEY(bool, DisableCodeScheduling, false, "Disable local code scheduling", true)
+DECLARE_IGC_REGKEY(bool, CodeSchedulingOnlyRecompilation, false, "Enable code scheduling only on 2nd try", true)
 
 DECLARE_IGC_REGKEY(bool, EnableCodeSchedulingIfNoSpills, false, "Try rescheduling also when there are no spills", true)
+DECLARE_IGC_REGKEY(bool, CodeSchedulingGreedyRPHigherRPCommit, false, "If GreedyRP was chosen, commit it also if the estimated RP "
+                   "is higher than the original schedule RP", true)
+DECLARE_IGC_REGKEY(bool, CodeSchedulingMWOptimizedHigherRPCommit, true, "If the new schedule is expected to have better latency hiding, "
+                   "commit it also if the estimated RP is higher than the original schedule RP", true)
 DECLARE_IGC_REGKEY(bool, CodeSchedulingForceMWOnly, false, "Force scheduling to consider only latency", true)
 DECLARE_IGC_REGKEY(bool, CodeSchedulingForceRPOnly, false, "Force scheduling to consider only register pressure", true)
-DECLARE_IGC_REGKEY(DWORD, CodeSchedulingAttemptsLimit, 5, "Limit the number of scheduling attempts", true)
-DECLARE_IGC_REGKEY(DWORD, CodeSchedulingRPMargin, 20,
+DECLARE_IGC_REGKEY(DWORD, CodeSchedulingAttemptsLimit, 10, "Limit the number of scheduling attempts", true)
+DECLARE_IGC_REGKEY(DWORD, CodeSchedulingRPMargin, 15,
                    "Schedule so that the register pressure is less than #grf - margin", true)
+DECLARE_IGC_REGKEY(bool, CodeSchedulingCommitGreedyRP, true,
+                   "Commit greedy regpressure scheduling in case better "
+                   "scheduling has not succeed",
+                   true)
+DECLARE_IGC_REGKEY(DWORD, CodeSchedulingRPThreshold, 0,
+                   "Do scheduling only if the original register pressure is "
+                   "higher than #GRF - margin + threshold",
+                   true)
 
 DECLARE_IGC_REGKEY(bool, DumpCodeScheduling, false, "Dump code scheduling", true)
 DECLARE_IGC_REGKEY(DWORD, CodeSchedulingDumpLevel, 1, "Code scheduling dump verbosity level", true)
@@ -420,11 +433,30 @@ DECLARE_IGC_REGKEY(
     "The mask is casted to IGC::SyncInstMask and informs which synchronization objects should not be coalesced. Note "
     "that synchronization objects classified in multiple types are not disabled if any bit describing them is off.",
     true)
+DECLARE_IGC_REGKEY(bool, UnrollLoopForCodeSizeOnly, false,
+                   "Only unroll the loop if it can reduce program size/register pressure. Ignore all other threshold "
+                   "setting but still enable EnablePromoteLoopUnrollwithAlloca due to high likelyhood to reduce size.",
+                   true)
 DECLARE_IGC_REGKEY(DWORD, SetLoopUnrollThreshold, 0,
                    "Set the loop unroll threshold. Value 0 will use the default threshold.", false)
 DECLARE_IGC_REGKEY(
-    DWORD, SetLoopUnrollThresholdForHighRegPressure, 0,
-    "Set the loop unroll threshold for shaders with high reg pressure. Value 0 will use the default threshold.", false)
+    DWORD, SetLoopUnrollThresholdForHighRegPressure, 200,
+    "Set the loop unroll threshold for shaders with high reg pressure.", false)
+DECLARE_IGC_REGKEY(DWORD, SetLoopUnrollMaxPercentThresholdBoostForHighRegPressure, 100,
+                   "Set the loop unroll max allowed threshold boost in percentage for shaders with high reg pressure. "
+                   "The LLVM internal value is 400. Setting 100 here because the cost model is currently based on "
+                   "latency instead of code size where the latter is what we need.",
+                   false)
+DECLARE_IGC_REGKEY(
+    bool, EnablePromoteLoopUnrollwithAlloca, true,
+    "Loop cost estimation assumes Load/Store who accesses Alloca with index deductible to loop count having 0 cost. "
+    "Disable this flag makes them always cost something as well as disables dynamic threshold increase based on the "
+    "size of alloca and number of GEP to the alloca in the loop, leading to the loop less likely to be unrolled.",
+    false)
+DECLARE_IGC_REGKEY(DWORD, PromoteLoopUnrollwithAllocaCountThreshold, 256,
+                   "The loop trip count OR number of alloca elements cutoff to stop regkey "
+                   "EnablePromoteLoopUnrollwithAlloca (Check regkey description).",
+                   false)
 DECLARE_IGC_REGKEY(DWORD, SetRegisterPressureThresholdForLoopUnroll, 96,
                    "Set the register pressure threshold for limiting the loop unroll to smaller loops", false)
 DECLARE_IGC_REGKEY(DWORD, SetBranchSwapThreshold, 400, "Set the branch swaping threshold.", false)
@@ -516,7 +548,7 @@ DECLARE_IGC_REGKEY(
     "Enable Stateless To Stateful transformation for global and constant address space in OpenCL kernels", false)
 DECLARE_IGC_REGKEY(
     bool, EnableStatefulToken, true,
-    "Enable generating patch token to indicate a ptr argument is fully converted to stateful (temporary)", false)
+    "Enable to indicate ptr arguments are fully converted to stateful (temporary)", false)
 DECLARE_IGC_REGKEY(bool, DisableConstBaseGlobalBaseArg, false,
                    "Do no generate kernel implicit arguments: constBase and globalBase", false)
 DECLARE_IGC_REGKEY(bool, EnableGenUpdateCB, false, "Enable derived constant optimization.", false)
@@ -927,6 +959,8 @@ DECLARE_IGC_REGKEY(bool, EnableScalarTypedAtomics, true, "Enable the Scalar Type
 DECLARE_IGC_REGKEY(bool, EnableScalarPhisMerger, true,
                    "enable optimization that merges scalar phi nodes into vector ones", true)
 DECLARE_IGC_REGKEY(bool, EnableVectorizer, true, "Enable IGCVectorizer pass", true)
+DECLARE_IGC_REGKEY(DWORD, VectorizerDepWindowMultiplier, 2,
+                   "Multiplier for the slice size to account for vectorizer dependency check window", true)
 DECLARE_IGC_REGKEY(bool, VectorizerCheckScalarizer, false, "Add scalariser after vectorizer to check performance", true)
 DECLARE_IGC_REGKEY(DWORD, VectorizerList, -1, "Vectorize only one seed instruction with the provided number", true)
 DECLARE_IGC_REGKEY(bool, EnableVectorEmitter, true, "Enable Vector Emission for a vectorizer", true)
@@ -937,6 +971,9 @@ DECLARE_IGC_REGKEY(bool, VectorizerAllowFADD, true, "Allow FADD instructions ins
 DECLARE_IGC_REGKEY(bool, VectorizerAllowFSUB, true, "Allow FSUB instructions inside vectorizer", true)
 DECLARE_IGC_REGKEY(bool, VectorizerAllowEXP2, true, "Allow EXP2 instructions inside vectorizer", true)
 DECLARE_IGC_REGKEY(bool, VectorizerAllowMAXNUM, true, "Allow MAXNUM instructions inside vectorizer", true)
+DECLARE_IGC_REGKEY(bool, VectorizerAllowWAVEALL, false, "Allow WAVEALL instructions inside vectorizer", true)
+DECLARE_IGC_REGKEY(bool, VectorizerAllowCMP, false, "Allow CMP instructions inside vectorizer", true)
+DECLARE_IGC_REGKEY(bool, VectorizerAllowSelect, false, "Allow Select instructions inside vectorizer", true)
 DECLARE_IGC_REGKEY(bool, VectorizerAllowFMADMatching, true,
                    "Allow FADD and FMUL instructions to be matched later in the pattern match pass", true)
 DECLARE_IGC_REGKEY(bool, VectorizerUniformValueVectorizationEnabled, true,
@@ -965,6 +1002,9 @@ DECLARE_IGC_REGKEY(bool, EnablePreRARematFlag, true, "Enable PreRA Rematerializa
 DECLARE_IGC_REGKEY(bool, EnableGASResolver, true, "Enable GAS Resolver", false)
 DECLARE_IGC_REGKEY(bool, EnableLowerGPCallArg, true, "Enable pass to lower generic pointers in function arguments",
                    false)
+DECLARE_IGC_REGKEY(
+    bool, EnableGenericCastToPtrOpt, true,
+    "Enable simplification of GenericCastToPtrExplicit_ToGlobal calls", false)
 DECLARE_IGC_REGKEY(bool, DisableRecompilation, false, "Disable recompilation, skip retry stage", true)
 DECLARE_IGC_REGKEY(bool, SampleMultiversioning, false,
                    "Create branches aroung samplers which can be redundant with some values", false)
@@ -1527,11 +1567,13 @@ DECLARE_IGC_REGKEY(bool, DumpRegPressureEstimate, false, "Dump RegPressureEstima
 DECLARE_IGC_REGKEY(debugString, DumpRegPressureEstimateFilter, 0,
                    "Only dump RegPressureEstimate for functions matching the given regex", false)
 DECLARE_IGC_REGKEY(bool, VectorizerLog, false, "Dump Vectorizer Log, usefull for analyzing vectorization issues", true)
+DECLARE_IGC_REGKEY(bool, VectorizerLogToErr, false, "Dump Vectorizer Log to stdErr", true)
 DECLARE_IGC_REGKEY(bool, EnableReusingXYZWStoreConstPayload, true, "Enable reusing XYZW stores const payload", false)
 DECLARE_IGC_REGKEY(bool, EnableReusingLSCStoreConstPayload, false, "Enable reusing LSC stores const payload", false)
 DECLARE_IGC_REGKEY(bool, AllowSIMD16DropForXE2, true, "Controls the switch for XE2 simd16 drop", false)
 DECLARE_IGC_REGKEY(bool, AllowSIMD16DropForXE3, true, "Controls the switch for XE3 simd16 drop", false)
-DECLARE_IGC_REGKEY(bool, AllowEarlySIMD16DropForXE3, true, "Controls the early drop to simd16 for XE3", false)
+DECLARE_IGC_REGKEY(bool, AllowEarlySIMD16DropForXE3, true,
+                   "Controls the early drop to simd16 for XE3", false)
 DECLARE_IGC_REGKEY(DWORD, EarlySIMD16DropForXE3Threshold, 190, "Threshold for the early drop to simd16 for XE3", false)
 DECLARE_IGC_REGKEY(DWORD, RegPressureVerbocity, 2, "Different printing types", false)
 DECLARE_IGC_REGKEY(DWORD, RetryRevertExcessiveSpillingKernelThreshold, 10000,

@@ -6,6 +6,7 @@ SPDX-License-Identifier: MIT
 
 ============================= end_copyright_notice ===========================*/
 
+#include <utility>
 #include "Compiler/GenTTI.h"
 #include "GenISAIntrinsics/GenIntrinsics.h"
 #include "GenISAIntrinsics/GenIntrinsicInst.h"
@@ -18,6 +19,7 @@ SPDX-License-Identifier: MIT
 #include "llvm/Analysis/CodeMetrics.h"
 #include "llvm/Analysis/LoopInfo.h"
 #include "llvm/Analysis/ScalarEvolution.h"
+#include "llvm/Support/InstructionCost.h"
 #include "llvmWrapper/Transforms/Utils/LoopUtils.h"
 #include "common/LLVMWarningsPop.hpp"
 
@@ -25,6 +27,8 @@ SPDX-License-Identifier: MIT
 
 using namespace llvm;
 using namespace IGC;
+
+#define DEBUG_TYPE "GENtti"
 
 namespace llvm {
 
@@ -81,48 +85,78 @@ unsigned countTotalInstructions(const Function *F, bool CheckSendMsg = true) {
 
 unsigned GenIntrinsicsTTIImpl::getFlatAddressSpace() { return ADDRESS_SPACE_PRIVATE; }
 
-/// Returns true if load instruction source address calculation
-/// depends only on base address, constants, and loop induction variables
-bool canReplaceWithRegisters(const LoadInst *LI, const Loop *L, ScalarEvolution &SE) {
-  auto Pointer = LI->getPointerOperand();
-  auto Base = LI->getPointerOperand()->stripInBoundsOffsets();
+bool GenIntrinsicsTTIImpl::isGEPLoopConstDerived(GetElementPtrInst *GEP, const Loop *L, ScalarEvolution &SE) {
+  if (!GEP)
+    return false;
 
-  // Start with load source address
-  SmallVector<const Value *, 16> WorkList = {Pointer};
+  const SCEV *SGEP = SE.getSCEV(GEP);
 
-  // Traverse the source address calculation dependency tree
-  while (!WorkList.empty()) {
-    auto V = WorkList.pop_back_val();
-
-    if (V == Base || isa<Constant>(V)) {
-      // Do nothing if we meet base address or some constant
-    } else if (isa<CallBase>(V)) {
-      // Stop at calls
-      return false;
-    } else if (auto U = dyn_cast<User>(V)) {
-      // In case of Instuction/Operator append
-      // all the operands to the work list,
-      // skip PHI nodes to prevent infinite while-loop
-      for (unsigned i = 0; i < U->getNumOperands(); ++i) {
-        auto O = U->getOperand(i);
-        if (auto P = dyn_cast<PHINode>(O)) {
-          if (!L->isAuxiliaryInductionVariable(*P, SE)) {
-            // Stop at non-auxilary IV
-            return false;
-          }
-        } else
-          WorkList.push_back(O);
-      }
-    } else {
-      // Stop if we meet something apart from
-      // base address, constant value, IV
-      return false;
-    }
+  if (auto *AR = dyn_cast<SCEVAddRecExpr>(SGEP)) {
+    if (AR->getLoop() == L)
+      return true;
   }
 
-  // If nothing was found above, consider load instruction source
-  // being a candidate to be replaced by registers
-  return true;
+  // Don't let pointer base interfere the traversal. This is due to some frontends
+  // generate GEP without inbound.
+  const SCEV *SGEPMinusPointerBase = SE.removePointerBase(SGEP);
+
+  struct CheckConstDerived {
+    bool TraversalDone = false;
+    bool AddRecFound = false;
+    bool isConstDerived = true;
+
+    const Loop *L = nullptr;
+    const SCEV *S = nullptr;
+
+    CheckConstDerived(const Loop *L) : L(L) {}
+
+    bool setNotConstDerived() {
+      TraversalDone = true;
+      isConstDerived = false;
+      return false;
+    }
+
+    bool follow(const SCEV *S) {
+      switch (S->getSCEVType()) {
+      case scConstant:
+      case scPtrToInt:
+      case scTruncate:
+      case scZeroExtend:
+      case scSignExtend:
+      case scAddExpr:
+      case scMulExpr:
+      case scUMaxExpr:
+      case scSMaxExpr:
+      case scUMinExpr:
+      case scSMinExpr:
+      case scSequentialUMinExpr:
+      case scUDivExpr:
+        return true;
+
+      case scAddRecExpr: {
+        const auto *ARLoop = cast<SCEVAddRecExpr>(S)->getLoop();
+        if (L && (ARLoop == L || ARLoop->contains(L))) {
+          AddRecFound = true;
+          return false; // Don't traverse into it
+        }
+
+        return setNotConstDerived();
+      }
+
+      case scUnknown:
+      case scCouldNotCompute:
+        return setNotConstDerived();
+      }
+      llvm_unreachable("Unknown SCEV kind!");
+    }
+
+    bool isDone() { return TraversalDone; }
+  };
+
+  CheckConstDerived CCD(L);
+  SCEVTraversal<CheckConstDerived> ST(CCD);
+  ST.visitAll(SGEPMinusPointerBase);
+  return (CCD.isConstDerived && CCD.AddRecFound);
 }
 
 void GenIntrinsicsTTIImpl::getUnrollingPreferences(Loop *L, ScalarEvolution &SE, TTI::UnrollingPreferences &UP,
@@ -141,6 +175,8 @@ void GenIntrinsicsTTIImpl::getUnrollingPreferences(Loop *L, ScalarEvolution &SE,
   }
 
   unsigned LoopUnrollThreshold = ctx->m_DriverInfo.GetLoopUnrollThreshold();
+  bool UnrollLoopForCodeSizeOnly =
+      IGC_IS_FLAG_ENABLED(UnrollLoopForCodeSizeOnly) || (!ctx->m_retryManager.IsFirstTry());
 
   // override the LoopUnrollThreshold if the registry key is set
   if (IGC_GET_FLAG_VALUE(SetLoopUnrollThreshold) != 0) {
@@ -230,10 +266,9 @@ void GenIntrinsicsTTIImpl::getUnrollingPreferences(Loop *L, ScalarEvolution &SE,
     UP.Partial = true;
   } else // for high registry pressure shaders, limit the unrolling to small loops and only fully unroll
   {
-    if (IGC_GET_FLAG_VALUE(SetLoopUnrollThresholdForHighRegPressure) != 0)
-      UP.Threshold = IGC_GET_FLAG_VALUE(SetLoopUnrollThresholdForHighRegPressure);
-    else
-      UP.Threshold = 200;
+    UP.Threshold = IGC_GET_FLAG_VALUE(SetLoopUnrollThresholdForHighRegPressure);
+    // This is similiar to LLVM OptForSize scenario in LoopUnrollPass
+    UP.MaxPercentThresholdBoost = IGC_GET_FLAG_VALUE(SetLoopUnrollMaxPercentThresholdBoostForHighRegPressure);
   }
 
   unsigned MaxTripCount = SE.getSmallConstantMaxTripCount(L);
@@ -243,41 +278,103 @@ void GenIntrinsicsTTIImpl::getUnrollingPreferences(Loop *L, ScalarEvolution &SE,
     UP.Force = true;
   }
 
-  const unsigned MaxTripCountToUseUpperBoundForLoopWithLoads = 16;
-  if (MaxTripCount && MaxTripCount <= MaxTripCountToUseUpperBoundForLoopWithLoads) {
-    // Check if loop contains LoadInst from an array
-    // that can potentially be replaced by registers
+  if (UnrollLoopForCodeSizeOnly) {
+    UP.Threshold = getLoopSize(L, *this) + 1;
+    UP.MaxPercentThresholdBoost = 100;
+    UP.Partial = false;
+  }
 
-    // Group all load instructions by base address
-    // of the source posinter
-    DenseMap<Value *, SmallSet<LoadInst *, 4>> LoadInstructions;
+  // For all the load/store who (having a GEP to),
+  // 1. Accessing a fixed size Alloca
+  // 2. Having an loop-iteration-inducted-only index
+  // For exmaple,
+  //
+  // bb:
+  //   %ALLOC = alloca [32 x float], align 4
+  // Loop1:
+  //   %i8 = phi i32 [ 0, %bb ], [ %i23, %Loop1 ]
+  //   %i19 = getelementptr [32 x float], ptr %ALLOC, i64 0, i64 %i8
+  //   %i23 = add i32 %i8, 1
+  //   %i14 = fmul ...
+  //   store float %i14, ptr %i19, align 4
+  //   %i24 = icmp eq i32 %i23, 32
+  //   br i1 %i24, label %..., label %Loop1
+  // ...
+  // Loop5:
+  //   %i93 = phi i32 [ %i115, %Loop5 ], [ 0, %... ]
+  //   %i99 = getelementptr [32 x float], ptr %ALLOC, i64 0, i64 %i93
+  //   %i103 = load float, ptr %i99, align 4
+  //   %i107 = fmul float %i103, 0x3F699999A0000000
+  //   %i115 = add i32 %i93, 1
+  //   %i116 = icmp eq i32 %i115, 32
+  //   br i1 %i116, label %bb117, label %Loop5
+  //
+  // Fully unrolling both loops leads SROA pass eliminate the entire access chain of the alloca. This is one of most
+  // impacted yet super common pattern across all application types. In many cases, especially when the only values that
+  // stored into alloca are compiler-detectable constant, these loops need to be unroll regardless how high the register
+  // pressure is.
+  //
+  // TODO: Having an analysis pass to link alloca with loops globally so that they are either unrolled together or not.
+  //       It can potentially do some global cost estimations.
+  const unsigned UnrollMaxCountForAlloca = IGC_GET_FLAG_VALUE(PromoteLoopUnrollwithAllocaCountThreshold);
+  bool AllocaFound = false;
+  if (MaxTripCount && MaxTripCount <= UnrollMaxCountForAlloca &&
+      IGC_IS_FLAG_ENABLED(EnablePromoteLoopUnrollwithAlloca)) {
+    unsigned int ThresholdBoost = 0;
     for (auto BB : L->blocks()) {
       for (auto &I : *BB) {
-        if (auto LI = dyn_cast<LoadInst>(&I)) {
-          auto Base = LI->getPointerOperand()->stripInBoundsOffsets();
-          if (isa<AllocaInst>(Base)) {
-            auto LIIterator = LoadInstructions.find(Base);
-            if (LIIterator == LoadInstructions.end())
-              LIIterator = LoadInstructions.insert(std::make_pair(Base, SmallSet<LoadInst *, 4>())).first;
-            LIIterator->second.insert(LI);
-          }
-        }
+        AllocaInst *AI = nullptr;
+        GetElementPtrInst *GEP = nullptr;
+
+        if (auto *LI = dyn_cast<LoadInst>(&I))
+          AI = dyn_cast<AllocaInst>(LI->getPointerOperand());
+        else if ((GEP = dyn_cast<GetElementPtrInst>(&I))) {
+          // Test if the GEP index is a function of the loop induction variable.
+          if (!isGEPLoopConstDerived(GEP, L, SE))
+            continue;
+
+          auto *SBase = dyn_cast<SCEVUnknown>(SE.getPointerBase(SE.getSCEV(GEP)));
+          AI = dyn_cast<AllocaInst>(SBase->getValue());
+        } else
+          continue;
+
+        if (!AI)
+          continue;
+        // Not fixed size or not in entry block
+        // TODO: Can a alloca with a fixed size not reside in the entry block?
+        if (!AI->isStaticAlloca())
+          continue;
+        // Assume every iteration consumes 1 alloca element.
+        if (cast<ConstantInt>(AI->getArraySize())->getZExtValue() > UnrollMaxCountForAlloca)
+          continue;
+
+        // Using alloca size in bytes as the threshold boost seems a bit tricky.
+        unsigned AllocaSize = *(AI->getAllocationSizeInBits(DL)) / 8;
+        ThresholdBoost += AllocaSize;
+        if (GEP)
+          isGEPLoopInduction[GEP] = true;
+        AllocaFound = true;
       }
     }
+    if (AllocaFound) {
+      // LLVM default only to 10, boost to UnrollMaxCountForAlloca
+      UP.MaxIterationsCountToAnalyze = UnrollMaxCountForAlloca;
+      UP.UpperBound = true;
+      UP.Force = UnrollLoopForCodeSizeOnly ? false : true;
 
-    // Find at least one base address, such that all loads
-    // from it can be replaced by registers
-    for (const auto &LIIterator : LoadInstructions) {
-      bool Found = true;
-      for (const auto &LI : LIIterator.second)
-        Found &= canReplaceWithRegisters(LI, L, SE);
-      if (Found) {
-        UP.UpperBound = true;
-        UP.Force = true;
-        break;
+      if (ctx->type != ShaderType::OPENCL_SHADER) {
+        UP.Threshold += ThresholdBoost;
+        LLVM_DEBUG(dbgs() << "Increasing L:" << L->getName() << " threshold to " << UP.Threshold
+                          << " due to Alloca accessed by:");
+        for (const auto &pair : isGEPLoopInduction)
+          LLVM_DEBUG(dbgs() << " " << pair.first->getName());
+        LLVM_DEBUG(dbgs() << " \n");
       }
     }
   }
+
+  if (IGC_IS_FLAG_ENABLED(UnrollLoopForCodeSizeOnly))
+    return;
 
   unsigned sendMessage = 0;
   unsigned TripCount = 0;
@@ -469,11 +566,13 @@ void GenIntrinsicsTTIImpl::getUnrollingPreferences(Loop *L, ScalarEvolution &SE,
     }
   }
 
-  UP.Runtime = true;
-  UP.Count = 4;
-  UP.MaxCount = UP.Count;
-  // The following is only available and required from LLVM 3.7+.
-  UP.AllowExpensiveTripCount = true;
+  if (!limitUnrolling) {
+    UP.Runtime = true;
+    UP.Count = 4;
+    UP.MaxCount = UP.Count;
+    // The following is only available and required from LLVM 3.7+.
+    UP.AllowExpensiveTripCount = true;
+  }
 
   if (MDNode *LoopID = L->getLoopID()) {
     const llvm::StringRef maxIterMetadataNames = "spv.loop.iterations.max";
@@ -559,6 +658,19 @@ llvm::InstructionCost GenIntrinsicsTTIImpl::internalCalculateCost(const User *U,
     }
   }
 
+  if (IGC_IS_FLAG_ENABLED(EnablePromoteLoopUnrollwithAlloca)) {
+    const GetElementPtrInst *GEP = nullptr;
+    if (Operator::getOpcode(U) == Instruction::Load)
+      GEP = dyn_cast<GetElementPtrInst>(cast<LoadInst>(U)->getPointerOperand());
+    if (Operator::getOpcode(U) == Instruction::Store)
+      GEP = dyn_cast<GetElementPtrInst>(cast<StoreInst>(U)->getPointerOperand());
+
+    if (GEP) {
+      if (isGEPLoopInduction.find(GEP) != isGEPLoopInduction.end())
+        return TTI::TCC_Free;
+    }
+  }
+
   const Function *F = dyn_cast<Function>(U);
   if (F != nullptr) {
     IGC::CodeGenContext *CGC = this->ctx;
@@ -580,4 +692,20 @@ llvm::InstructionCost GenIntrinsicsTTIImpl::internalCalculateCost(const User *U,
 
   return BaseT::getInstructionCost(U, Operands, CostKind);
 }
+
+// Strip from LLVM::LoopUnrollPass::ApproximateLoopSize
+unsigned getLoopSize(const Loop *L, const TargetTransformInfo &TTI) {
+  SmallPtrSet<const Value *, 32> EphValues;
+
+  CodeMetrics Metrics;
+  for (BasicBlock *BB : L->blocks())
+    Metrics.analyzeBasicBlock(BB, TTI, EphValues);
+
+  InstructionCost LoopSize;
+  LoopSize = Metrics.NumInsts;
+
+  LoopSize = (LoopSize > 3/*BEInsns + 1*/) ? LoopSize : 3;
+  return *LoopSize.getValue();
+}
+
 } // namespace llvm

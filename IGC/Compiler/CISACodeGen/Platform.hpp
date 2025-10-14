@@ -186,7 +186,9 @@ public:
 
   bool isCoreXE2() const { return (m_platformInfo.eRenderCoreFamily == IGFX_XE2_HPG_CORE); }
 
-  bool isCoreXE3() const { return (m_platformInfo.eRenderCoreFamily == IGFX_XE3_CORE); }
+  bool isCoreXE3() const {
+    return (m_platformInfo.eRenderCoreFamily == IGFX_XE3_CORE);
+  }
 
   // This function checks if core is child of another core
   bool isCoreChildOf(GFXCORE_FAMILY core) const { return m_platformInfo.eRenderCoreFamily >= core; }
@@ -552,26 +554,6 @@ public:
 
   bool supportQWRotateInstructions() const {
     return m_platformInfo.eRenderCoreFamily == IGFX_XE_HPC_CORE && IGC_IS_FLAG_ENABLED(EnableQWRotateInstructions);
-  }
-
-  // Some workloads use handcrafted ISA kernels and generate patch tokens for them by compiling a
-  // dummy kernel. They depend on static BTIs allocation in IGC, that's why dynamic allocation
-  // can't be enabled by default for all platforms. That is not an issue when ZEBin is enabled by
-  // default since a workload can generate ZEBin sections by itself, without depending on a dummy kernel
-  // compilation by IGC.
-  bool supportDynamicBTIsAllocation() const { return supportsZEBin(); }
-
-  bool supportsZEBin() const {
-    switch (m_platformInfo.eProductFamily) {
-    default:
-      return true;
-    case IGFX_BROADWELL:
-    case IGFX_BROXTON:
-    case IGFX_GEMINILAKE:
-    case IGFX_LAKEFIELD:
-    case IGFX_ELKHARTLAKE:
-      return false;
-    }
   }
 
   bool isIntegratedGraphics() const {

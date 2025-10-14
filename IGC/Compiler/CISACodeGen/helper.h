@@ -174,6 +174,7 @@ bool IsSIMDBlockIntrinsic(const llvm::Instruction *inst);
 bool isSubGroupIntrinsic(const llvm::Instruction *I);
 bool isSubGroupIntrinsicPVC(const llvm::Instruction *I);
 bool isSubGroupShuffleVariant(const llvm::Instruction *I);
+bool subgroupIntrinsicHasHelperLanes(const llvm::Instruction &I);
 bool hasSubGroupIntrinsicPVC(llvm::Function &F);
 
 bool isBarrierIntrinsic(const llvm::Instruction *I);
@@ -472,6 +473,8 @@ inline float GetThreadOccupancyPerSubslice(SIMDMode simdMode, unsigned threadGro
 // Duplicate of the LLVM function in llvm/Transforms/Utils/ModuleUtils.h
 // Global can now be any pointer type that uses addrspace
 void appendToUsed(llvm::Module &M, llvm::ArrayRef<llvm::GlobalValue *> Values);
+
+void setupTriple(CodeGenContext &Ctx, llvm::StringRef OS = "");
 
 bool safeScheduleUp(llvm::BasicBlock *BB, llvm::Value *V, llvm::Instruction *&InsertPos,
                     llvm::DenseSet<llvm::Instruction *> Scheduled);

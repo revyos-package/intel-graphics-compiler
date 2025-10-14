@@ -4774,11 +4774,45 @@ void CEncoder::GetVISAPredefinedVar(CVariable *pVar, PreDefined_Vars var) {
   pVar->visaGenVariable[0] = pAliasGenVar;
 }
 
-void CEncoder::CreateVISAVar(CVariable *var) {
+// UseAliasOffset is valid for alias var only. It is true only for
+// inline asm and this function will creates a GenVar with non-zero
+// alias offset.
+void CEncoder::CreateVISAVar(CVariable *var, bool UseAliasOffset) {
   IGC_ASSERT(nullptr != var);
 
   if (var->GetAlias() != NULL) {
     var->ResolveAlias();
+
+    // If UseAliasOffset = false, an alias CVariable reuses its root's
+    // genVar unless their types are different. When their types are
+    // different, a new genVar is needed for the alias, but the alias
+    // offset of the new genVar is always set to zero (as its alias
+    // offset has been converted into regno/subregno already in code
+    // emit).
+    //
+    // If UseAliasOffset = true, it is used for inline asm only. As an
+    // alias offset isn't converted into regno/subregno as regno/subregno
+    // are provided by users in inline asm string. We use an alias genVar
+    // with non-zero alias offset. (See EmitPass::EmitInlineAsm())
+    if (UseAliasOffset && var->GetAliasOffset() > 0) {
+      SAlias alias(var->GetAlias(), var->GetType(), var);
+      auto aliasPair = m_aliasesMap.insert(std::pair<SAlias, CVariable *>(alias, var));
+      if (aliasPair.second == false) {
+        for (uint i = 0; i < var->GetNumberInstance(); i++)
+          var->visaGenVariable[i] = aliasPair.first->second->visaGenVariable[i];
+      } else {
+        IGC_ASSERT_MESSAGE(var->GetType() != ISA_TYPE_BOOL, "boolean cannot have alias");
+        IGC_ASSERT((var->GetSize() + var->GetAliasOffset()) <= var->GetAlias()->GetSize());
+        uint16_t nbElement = var->GetNumberElement();
+        for (uint i = 0; i < var->GetNumberInstance(); i++) {
+          V(vKernel->CreateVISAGenVar(var->visaGenVariable[i], var->getVisaCString(), nbElement, var->GetType(),
+                                      GetVISAAlign(var->GetAlias()), var->GetAlias()->visaGenVariable[i],
+                                      var->GetAliasOffset()));
+        }
+      }
+      return;
+    }
+
     // In case the alias is an exact copy or just a sub variable just re-use the
     // variable
     if (var->GetAlias()->GetType() == var->GetType()) {
@@ -4919,16 +4953,14 @@ void CEncoder::CreateSymbolTable(ValueToSymbolList &symbolTableList) {
         auto Iter = stackFuncMap.find(VFDef);
         IGC_ASSERT_MESSAGE(Iter != stackFuncMap.end(), "vISA function not found");
 
-        vISA::GenSymEntry fEntry;
-        IGC_ASSERT(F.getName().size() <= vISA::MAX_SYMBOL_NAME_LENGTH);
-        strcpy_s(fEntry.s_name, vISA::MAX_SYMBOL_NAME_LENGTH, F.getName().str().c_str());
-        fEntry.s_name[vISA::MAX_SYMBOL_NAME_LENGTH - 1] = 0; // ensure null termination when buffer is too small
+        vISA::ZESymEntry fEntry;
+        fEntry.s_name = F.getName().str();
 
         // Query vISA for the function's byte offset within the compiled module
         // The actual binary offset data should point to the function definition
         VISAFunction *visaFunc = Iter->second;
         fEntry.s_type = vISA::GenSymType::S_FUNC;
-        fEntry.s_offset = (uint32_t)visaFunc->getGenOffset();
+        fEntry.s_offset = (size_t)visaFunc->getGenOffset();
         fEntry.s_size = (uint32_t)visaFunc->getGenSize();
 
         symbolTableList.push_back(std::make_pair(&F, fEntry));
@@ -4946,10 +4978,8 @@ void CEncoder::CreateSymbolTable(ValueToSymbolList &symbolTableList) {
         }
       }
 
-      vISA::GenSymEntry fEntry;
-      IGC_ASSERT(F.getName().size() <= vISA::MAX_SYMBOL_NAME_LENGTH);
-      strcpy_s(fEntry.s_name, vISA::MAX_SYMBOL_NAME_LENGTH, F.getName().str().c_str());
-      fEntry.s_name[vISA::MAX_SYMBOL_NAME_LENGTH - 1] = 0; // ensure null termination when buffer is too small
+      vISA::ZESymEntry fEntry;
+      fEntry.s_name = F.getName().str();
 
       if (F.isDeclaration()) {
         // If the function is only declared, set as undefined type
@@ -4963,7 +4993,7 @@ void CEncoder::CreateSymbolTable(ValueToSymbolList &symbolTableList) {
         // Query vISA for the function's byte offset within the compiled module
         VISAFunction *visaFunc = Iter->second;
         fEntry.s_type = vISA::GenSymType::S_FUNC;
-        fEntry.s_offset = (uint32_t)visaFunc->getGenOffset();
+        fEntry.s_offset = (size_t)visaFunc->getGenOffset();
         fEntry.s_size = (uint32_t)visaFunc->getGenSize();
       }
       symbolTableList.push_back(std::make_pair(&F, fEntry));
@@ -4992,8 +5022,9 @@ void CEncoder::CreateSymbolTable(ValueToSymbolList &symbolTableList) {
       unsigned addrSpace = pGlobal->getType()->getAddressSpace();
       IGC_ASSERT(name.size() <= vISA::MAX_SYMBOL_NAME_LENGTH);
 
-      vISA::GenSymEntry sEntry;
-      strcpy_s(sEntry.s_name, vISA::MAX_SYMBOL_NAME_LENGTH, name.str().c_str());
+      vISA::ZESymEntry sEntry;
+      sEntry.s_name = name.str();
+
       MDNode *md = pGlobal->getMetadata("ConstSampler");
       if (md) {
         // Constant Sampler: s_offset contains the sampler ID
@@ -5001,11 +5032,10 @@ void CEncoder::CreateSymbolTable(ValueToSymbolList &symbolTableList) {
         sEntry.s_size = 0;
         sEntry.s_offset = static_cast<size_t>(global.second);
       } else {
-        uint32_t type = vISA::GenSymType::S_GLOBAL_VAR_CONST;
+        vISA::GenSymType type = vISA::GenSymType::S_GLOBAL_VAR_CONST;
         // For Zebin always use constant type for string constants
         // because of the relaxed address space requirement of
         // printf strings.
-        IGC_ASSERT(modMD->stringConstants.empty() || m_program->GetContext()->enableZEBinary());
         if (addrSpace == ADDRESS_SPACE_GLOBAL && !modMD->stringConstants.count(pGlobal))
           type = vISA::GenSymType::S_GLOBAL_VAR;
         if (!pGlobal->hasInitializer())
@@ -5020,68 +5050,48 @@ void CEncoder::CreateSymbolTable(ValueToSymbolList &symbolTableList) {
   }
 }
 
-void CEncoder::CreateSymbolTable(void *&buffer, unsigned &bufferSize, unsigned &tableEntries) {
-  buffer = nullptr;
-  bufferSize = 0;
-  tableEntries = 0;
-
-  ValueToSymbolList symbolTableList;
-  CreateSymbolTable(symbolTableList);
-
-  // Get the data for patch token
-  if (!symbolTableList.empty()) {
-    std::vector<vISA::GenSymEntry> tempBufferData;
-    // Collect the data just for the symbol table entries
-    for (const auto &I : symbolTableList) {
-      auto symbolEntry = I.second;
-      tempBufferData.push_back(symbolEntry);
-    }
-
-    tableEntries = tempBufferData.size();
-    bufferSize = tableEntries * sizeof(vISA::GenSymEntry);
-    buffer = malloc(bufferSize);
-    IGC_ASSERT_MESSAGE(nullptr != buffer, "Symbol table cannot be allocated");
-    memcpy_s(buffer, bufferSize, tempBufferData.data(), bufferSize);
-  }
-}
-
-void CEncoder::CreateSymbolTable(SProgramOutput::ZEBinFuncSymbolTable &funcSyms,
-                                 SOpenCLProgramInfo::ZEBinProgramSymbolTable &programSyms) {
-  ValueToSymbolList symbolTableList;
-  CreateSymbolTable(symbolTableList);
-  ModuleMetaData *modMD = m_program->GetContext()->getModuleMetaData();
-
-  // Get the data for zebin
+void CEncoder::CreateFunctionSymbolTable(ValueToSymbolList &symbolTableList,
+                                         SProgramOutput::ZEBinFuncSymbolTable &funcSyms) {
   for (const auto &I : symbolTableList) {
     Value *symbolValue = I.first;
     auto symbolEntry = I.second;
 
     if (Function *F = dyn_cast<Function>(symbolValue)) {
       funcSyms.function.emplace_back((vISA::GenSymType)symbolEntry.s_type, symbolEntry.s_offset, symbolEntry.s_size,
-                                     F->getName().str());
+                                      F->getName().str());
     } else if (GlobalVariable *G = dyn_cast<GlobalVariable>(symbolValue)) {
-      // const sampler
+      // Const sampler
       if (symbolEntry.s_type == vISA::GenSymType::S_CONST_SAMPLER) {
         funcSyms.sampler.emplace_back((vISA::GenSymType)symbolEntry.s_type, symbolEntry.s_offset, symbolEntry.s_size,
                                       G->getName().str());
       }
-      // global variables, including external variables (S_UNDEF)
-      else if (symbolEntry.s_type == vISA::GenSymType::S_GLOBAL_VAR ||
-               symbolEntry.s_type == vISA::GenSymType::S_UNDEF) {
+    }
+  }
+}
+
+void CEncoder::CreateProgramSymbolTable(ValueToSymbolList &symbolTableList,
+                                        SOpenCLProgramInfo::ZEBinProgramSymbolTable &programSyms) {
+  ModuleMetaData *modMD = m_program->GetContext()->getModuleMetaData();
+
+  for (const auto &I : symbolTableList) {
+    Value *symbolValue = I.first;
+    auto symbolEntry = I.second;
+
+    if (GlobalVariable* G = dyn_cast<GlobalVariable>(symbolValue)) {
+      // Global variables, including external variables (S_UNDEF)
+      if (symbolEntry.s_type == vISA::GenSymType::S_GLOBAL_VAR || symbolEntry.s_type == vISA::GenSymType::S_UNDEF) {
         programSyms.global.emplace_back((vISA::GenSymType)symbolEntry.s_type, symbolEntry.s_offset, symbolEntry.s_size,
-                                        G->getName().str());
+                                         G->getName().str());
       }
-      // global constants and string literals
+      // Global constants and string literals
       else {
         if (modMD->stringConstants.count(G)) {
           programSyms.globalStringConst.emplace_back((vISA::GenSymType)symbolEntry.s_type, symbolEntry.s_offset,
-                                                     symbolEntry.s_size, G->getName().str());
+                                                      symbolEntry.s_size, G->getName().str());
         } else
           programSyms.globalConst.emplace_back((vISA::GenSymType)symbolEntry.s_type, symbolEntry.s_offset,
-                                               symbolEntry.s_size, G->getName().str());
+                                                symbolEntry.s_size, G->getName().str());
       }
-    } else {
-      IGC_ASSERT(0);
     }
   }
 }
@@ -5094,21 +5104,7 @@ void CEncoder::CreateGlobalHostAccessTable(SOpenCLProgramInfo::ZEBinGlobalHostAc
     globalHostAccessTable.push_back(vISA::ZEHostAccessEntry{I.device_name, I.host_name});
 }
 
-void CEncoder::CreateRelocationTable(VISAKernel *pMainKernel, void *&buffer, unsigned &bufferSize,
-                                     unsigned &tableEntries) {
-  // for patch-token-based binary format
-  buffer = nullptr;
-  bufferSize = 0;
-  tableEntries = 0;
-
-  // vISA will directly return the buffer with GenRelocEntry layout
-  IGC_ASSERT(nullptr != pMainKernel);
-  V(pMainKernel->GetGenRelocEntryBuffer(buffer, bufferSize, tableEntries));
-  IGC_ASSERT((sizeof(vISA::GenRelocEntry) * tableEntries) == bufferSize);
-}
-
 void CEncoder::CreateRelocationTable(VISAKernel *pMainKernel, SProgramOutput::RelocListTy &relocations) {
-  // for ZEBinary format
   IGC_ASSERT(nullptr != pMainKernel);
   V(pMainKernel->GetRelocations(relocations));
 }
@@ -5145,23 +5141,6 @@ void CEncoder::CreateFuncAttributeTable(VISAKernel *pMainKernel, GenXFunctionGro
 
     attrs.emplace_back((uint8_t)isKernel, isExternal, barrierCount, privateMemPerThread, spillMemPerThread,
                        F->getName().str(), hasRTCalls);
-  }
-}
-
-void CEncoder::CreateGlobalHostAccessTable(void *&buffer, unsigned &bufferSize, unsigned &tableEntries) {
-  buffer = nullptr;
-  bufferSize = 0;
-  tableEntries = 0;
-
-  HostAccessList hostAccessList;
-  CreateGlobalHostAccessTable(hostAccessList);
-
-  if (!hostAccessList.empty()) {
-    tableEntries = hostAccessList.size();
-    bufferSize = tableEntries * sizeof(vISA::HostAccessEntry);
-    buffer = malloc(bufferSize);
-    IGC_ASSERT_MESSAGE(nullptr != buffer, "Host access table cannot be allocated");
-    memcpy_s(buffer, bufferSize, hostAccessList.data(), bufferSize);
   }
 }
 
@@ -5624,9 +5603,10 @@ void CEncoder::Compile(bool hasSymbolTable, GenXFunctionGroupAnalysis *&pFGA) {
       }
     }
 
-    dbgInfo = IGC::aligned_malloc(dbgSize, sizeof(void *));
-
-    memcpy_s(dbgInfo, dbgSize, genxdbgInfo, dbgSize);
+    if (dbgSize > 0) {
+      dbgInfo = IGC::aligned_malloc(dbgSize, sizeof(void *));
+      memcpy_s(dbgInfo, dbgSize, genxdbgInfo, dbgSize);
+    }
 
     freeBlock(genxdbgInfo);
   }
@@ -5654,8 +5634,7 @@ void CEncoder::Compile(bool hasSymbolTable, GenXFunctionGroupAnalysis *&pFGA) {
 
   createSymbolAndGlobalHostAccessTables(hasSymbolTable, *pMainKernel, pOutput->m_scratchSpaceUsedBySpills);
   createRelocationTables(*pMainKernel);
-  if (context->enableZEBinary())
-    CreateFuncAttributeTable(pMainKernel, pFGA);
+  CreateFuncAttributeTable(pMainKernel, pFGA);
 
   pOutput->m_numGRFSpillFill = jitInfo->stats.numGRFSpillFillWeighted;
 
@@ -5672,7 +5651,7 @@ void CEncoder::Compile(bool hasSymbolTable, GenXFunctionGroupAnalysis *&pFGA) {
 
   pOutput->m_perThreadArgumentStackSize = m_argumentStackSize;
 
-  if (context->enableZEBinary() && context->type == ShaderType::OPENCL_SHADER &&
+  if (context->type == ShaderType::OPENCL_SHADER &&
       IGC_IS_FLAG_ENABLED(EnableKernelCostInfo)) {
     kci = createKernelCostInfo(*pMainKernel);
   }
@@ -5715,28 +5694,21 @@ uint32_t CEncoder::getSpillMemSizeWithFG(const llvm::Function &curFunc, uint32_t
 void CEncoder::createRelocationTables(VISAKernel &pMainKernel) {
   CodeGenContext *context = m_program->GetContext();
   SProgramOutput *pOutput = m_program->ProgramOutput();
-  bool ZEBinEnabled = context->enableZEBinary();
-  if (ZEBinEnabled) {
-    CreateRelocationTable(&pMainKernel, pOutput->m_relocs);
+  CreateRelocationTable(&pMainKernel, pOutput->m_relocs);
+  if (context->type == ShaderType::OPENCL_SHADER) {
     for (const auto &reloc : pOutput->m_relocs) {
       if (reloc.r_symbol == vISA::CROSS_THREAD_OFF_R0_RELOCATION_NAME) {
-        IGC_ASSERT(context->type == ShaderType::OPENCL_SHADER);
         auto cl_context = static_cast<OpenCLProgramContext *>(context);
         cl_context->m_programInfo.m_hasCrossThreadOffsetRelocations = true;
       } else if (reloc.r_symbol == vISA::PER_THREAD_OFF_RELOCATION_NAME) {
-        IGC_ASSERT(context->type == ShaderType::OPENCL_SHADER);
         auto cl_context = static_cast<OpenCLProgramContext *>(context);
         cl_context->m_programInfo.m_hasPerThreadOffsetRelocations = true;
       }
     }
-  } else {
-    CreateRelocationTable(&pMainKernel, pOutput->m_funcRelocationTable, pOutput->m_funcRelocationTableSize,
-                          pOutput->m_funcRelocationTableEntries);
   }
 }
+
 const vISA::KernelCostInfo *CEncoder::createKernelCostInfo(VISAKernel &pMainKernel) {
-  CodeGenContext *context = m_program->GetContext();
-  IGC_ASSERT(context->enableZEBinary());
   const vISA::KernelCostInfo *KCI = nullptr;
   pMainKernel.getKernelCostInfo(KCI);
   if (!KCI) {
@@ -5771,67 +5743,66 @@ void CEncoder::createSymbolAndGlobalHostAccessTables(bool hasSymbolTable, VISAKe
                                                      unsigned int scratchOffset) {
   CodeGenContext *context = m_program->GetContext();
   SProgramOutput *pOutput = m_program->ProgramOutput();
-  bool ZEBinEnabled = context->enableZEBinary();
   vISA::FINALIZER_INFO *jitInfo = nullptr;
   pMainKernel.GetJitInfo(jitInfo);
   if (hasSymbolTable) {
-    if (ZEBinEnabled) {
-      // we can only support zebin symbols for OPENCL_SHADER for now
-      IGC_ASSERT(context->type == ShaderType::OPENCL_SHADER);
-      auto cl_context = static_cast<OpenCLProgramContext *>(context);
-      CreateSymbolTable(pOutput->m_symbols, cl_context->m_programInfo.m_zebinSymbolTable);
-      // Set up per-function GTPIN information for indirect functions.
-      for (auto &sym : pOutput->m_symbols.function) {
-        void *buffer = nullptr;
-        unsigned size = 0;
-        if (sym.s_type != vISA::GenSymType::S_UNDEF) {
-          IGC_ASSERT(vbuilder->GetVISAKernel(sym.s_name) != nullptr);
-          vbuilder->GetVISAKernel(sym.s_name)->GetGTPinBuffer(buffer, size, scratchOffset);
-          pOutput->m_FuncGTPinInfoList.push_back({sym.s_name, buffer, size});
-        }
-      }
-      CreateGlobalHostAccessTable(cl_context->m_programInfo.m_zebinGlobalHostAccessTable);
-    } else {
-      CreateSymbolTable(pOutput->m_funcSymbolTable, pOutput->m_funcSymbolTableSize, pOutput->m_funcSymbolTableEntries);
+    ValueToSymbolList symbolTableList;
+    CreateSymbolTable(symbolTableList);
+    CreateFunctionSymbolTable(symbolTableList, pOutput->m_symbols);
 
-      CreateGlobalHostAccessTable(pOutput->m_globalHostAccessTable, pOutput->m_globalHostAccessTableSize,
-                                  pOutput->m_globalHostAccessTableEntries);
+    if (context->type == ShaderType::OPENCL_SHADER) {
+      auto cl_context = static_cast<OpenCLProgramContext *>(context);
+      CreateProgramSymbolTable(symbolTableList, cl_context->m_programInfo.m_zebinSymbolTable);
+    }
+
+    // Set up per-function GTPIN information for indirect functions.
+    for (auto &sym : pOutput->m_symbols.function) {
+      void *buffer = nullptr;
+      unsigned size = 0;
+      if (sym.s_type != vISA::GenSymType::S_UNDEF) {
+        IGC_ASSERT(vbuilder->GetVISAKernel(sym.s_name) != nullptr);
+        vbuilder->GetVISAKernel(sym.s_name)->GetGTPinBuffer(buffer, size, scratchOffset);
+        pOutput->m_FuncGTPinInfoList.push_back({sym.s_name, buffer, size});
+      }
+    }
+
+    if (context->type == ShaderType::OPENCL_SHADER) {
+      auto cl_context = static_cast<OpenCLProgramContext *>(context);
+      CreateGlobalHostAccessTable(cl_context->m_programInfo.m_zebinGlobalHostAccessTable);
     }
   }
 
-  if (ZEBinEnabled) {
-    // create symbols for kernel.
-    // The kernel Symbol has the same name as the kernel, and offset
-    // pointed to 0.
-    CreateLocalSymbol(m_program->entry->getName().str(), vISA::GenSymType::S_KERNEL, 0,
-                      (unsigned)pMainKernel.getGenSize(), pOutput->m_symbols);
+  // create symbols for kernel.
+  // The kernel Symbol has the same name as the kernel, and offset
+  // pointed to 0.
+  CreateLocalSymbol(m_program->entry->getName().str(), vISA::GenSymType::S_KERNEL, 0,
+                    (unsigned)pMainKernel.getGenSize(), pOutput->m_symbols);
 
-    // Emit symbol "_entry' as the actual kernel start. Maybe we can
-    // consider to use the value of the _main label in this case. Now
-    // set the symbol value as the max offset next to the per-thread
-    // prolog, the cross-thread prolog, or the compute-FFID prolog.
-    unsigned actual_kernel_start_off =
-        std::max(std::max(jitInfo->offsetToSkipPerThreadDataLoad, jitInfo->offsetToSkipCrossThreadDataLoad),
-                 jitInfo->offsetToSkipSetFFIDGP1);
-    CreateLocalSymbol("_entry", vISA::GenSymType::S_NOTYPE, actual_kernel_start_off, 0, pOutput->m_symbols);
+  // Emit symbol "_entry' as the actual kernel start. Maybe we can
+  // consider to use the value of the _main label in this case. Now
+  // set the symbol value as the max offset next to the per-thread
+  // prolog, the cross-thread prolog, or the compute-FFID prolog.
+  unsigned actual_kernel_start_off =
+      std::max(std::max(jitInfo->offsetToSkipPerThreadDataLoad, jitInfo->offsetToSkipCrossThreadDataLoad),
+                jitInfo->offsetToSkipSetFFIDGP1);
+  CreateLocalSymbol("_entry", vISA::GenSymType::S_NOTYPE, actual_kernel_start_off, 0, pOutput->m_symbols);
 
-    // Create local function symbols for direct stackcall functions.
-    for (auto &stackFunc : stackFuncMap) {
-      Function *func = stackFunc.first;
-      if (func->hasFnAttribute("referenced-indirectly"))
-        continue;
+  // Create local function symbols for direct stackcall functions.
+  for (auto &stackFunc : stackFuncMap) {
+    Function *func = stackFunc.first;
+    if (func->hasFnAttribute("referenced-indirectly"))
+      continue;
 
-      const std::string funcName = func->getName().str();
-      VISAFunction *visaFunc = stackFunc.second;
-      CreateLocalSymbol(funcName, vISA::GenSymType::S_FUNC, (uint32_t)visaFunc->getGenOffset(),
-                        (uint32_t)visaFunc->getGenSize(), pOutput->m_symbols);
-      // Set up per-function GTPIN information for direct stackcall
-      // functions as well.
-      void *buffer = nullptr;
-      unsigned size = 0;
-      visaFunc->GetGTPinBuffer(buffer, size, 0);
-      pOutput->m_FuncGTPinInfoList.push_back({funcName, buffer, size});
-    }
+    const std::string funcName = func->getName().str();
+    VISAFunction *visaFunc = stackFunc.second;
+    CreateLocalSymbol(funcName, vISA::GenSymType::S_FUNC, (uint32_t)visaFunc->getGenOffset(),
+                      (uint32_t)visaFunc->getGenSize(), pOutput->m_symbols);
+    // Set up per-function GTPIN information for direct stackcall
+    // functions as well.
+    void *buffer = nullptr;
+    unsigned size = 0;
+    visaFunc->GetGTPinBuffer(buffer, size, 0);
+    pOutput->m_FuncGTPinInfoList.push_back({funcName, buffer, size});
   }
 }
 

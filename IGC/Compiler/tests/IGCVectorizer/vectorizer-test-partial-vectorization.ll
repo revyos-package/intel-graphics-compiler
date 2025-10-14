@@ -11,8 +11,8 @@
 ; CHECK: [[vec_insert6:%vector.*]] = insertelement <8 x float> [[vec_insert5]]
 ; CHECK: [[vec_insert7:%vector.*]] = insertelement <8 x float> [[vec_insert6]]
 ; CHECK: %vectorized_binary = fmul fast <8 x float> [[vec_insert7]], %vectorized_phi
-; CHECK: %vector_extract16 = extractelement <8 x float> %vectorized_binary, i32 1
 ; CHECK: %vector_extract15 = extractelement <8 x float> %vectorized_binary, i32 0
+; CHECK: %vector_extract16 = extractelement <8 x float> %vectorized_binary, i32 1
 ; CHECK: call <8 x float> @llvm.genx.GenISA.sub.group.dpas.v8f32.v8f32.v8i16.v8i32(<8 x float> %vectorized_binary
 ; CHECK: store float %vector_extract15, float* null, align 4
 ; CHECK: store float %vector_extract16, float* null, align 4
