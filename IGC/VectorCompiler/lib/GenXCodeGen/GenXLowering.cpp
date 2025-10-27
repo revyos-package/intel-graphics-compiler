@@ -3495,14 +3495,30 @@ bool GenXLowering::lowerUAddWithSat(CallInst *CI) {
   return true;
 }
 
+// common subroutine for sub+sat: builds uadd (uus) with sat
+static CallInst *buildUUSAddWithSat(CallInst *CI, Value *Arg0, Value *Arg1,
+                                    Instruction *InsertPoint) {
+  IGC_ASSERT(CI);
+  const DebugLoc &DL = CI->getDebugLoc();
+  Module *M = CI->getModule();
+  IRBuilder<> Builder(InsertPoint);
+  Type *ArgTypes[] = {Arg0->getType(), Arg1->getType()};
+  Value *Args[] = {Arg0, Arg1};
+  auto *Fn =
+      vc::getAnyDeclaration(M, vc::InternalIntrinsic::add_uus_sat, ArgTypes);
+  auto *Res = Builder.CreateCall(Fn, Args, CI->getName());
+  Res->setDebugLoc(DL);
+  return Res;
+}
+
 // llvm.usub.sat i.e. sat(a - b) we can treat as sat(a + (-b))
 // i.e. we are building -b and then uadd with saturation
 bool GenXLowering::lowerUSubWithSat(CallInst *CI) {
   IGC_ASSERT(CI);
   Value *Arg0 = CI->getArgOperand(0);
   Value *Arg1 = IRBuilder<>(CI).CreateNeg(CI->getArgOperand(1), CI->getName());
-  auto *UUAddInst = buildUAddWithSat(CI, Arg0, Arg1, CI, /*IsSignedSrc*/ true);
-  CI->replaceAllUsesWith(UUAddInst);
+  Value *Res = buildUUSAddWithSat(CI, Arg0, Arg1, CI);
+  CI->replaceAllUsesWith(Res);
   ToErase.push_back(CI);
   return true;
 }
@@ -4831,6 +4847,7 @@ bool GenXLowering::lowerHardwareThreadID(CallInst *CI) {
 static Value *extractBitfields(IRBuilder<> &IRB, Value *To, Value *From,
                                ArrayRef<std::pair<int, int>> Fields,
                                int &InsertTo) {
+  IGC_ASSERT_EXIT(!Fields.empty());
   auto *Ty = From->getType();
   for (auto &[Offset, Width] : Fields) {
     auto Mask = ((1 << Width) - 1) << Offset;

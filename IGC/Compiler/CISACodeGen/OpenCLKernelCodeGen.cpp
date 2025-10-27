@@ -771,19 +771,20 @@ bool COpenCLKernel::CreateZEPayloadArguments(IGC::KernelArg *kernelArg, uint pay
   case KernelArg::ArgType::BINDLESS_IMAGE_CUBE_ARRAY:
   case KernelArg::ArgType::IMAGE_CUBE_DEPTH_ARRAY:
   case KernelArg::ArgType::BINDLESS_IMAGE_CUBE_DEPTH_ARRAY: {
-    // the image arg is either bindless or stateful. check from "kernelArg->needsAllocation()"
+    // the image arg is either bindless or stateful.
     // For stateful image argument, the arg has 0 offset and 0 size
-    zebin::PreDefinedAttrGetter::ArgAddrMode arg_addrmode = zebin::PreDefinedAttrGetter::ArgAddrMode::stateful;
+    zebin::PreDefinedAttrGetter::ArgAddrMode arg_addrmode = m_ModuleMetadata->UseBindlessImage
+                                                                ? zebin::PreDefinedAttrGetter::ArgAddrMode::bindless
+                                                                : zebin::PreDefinedAttrGetter::ArgAddrMode::stateful;
     uint arg_off = 0;
     uint arg_size = 0;
 
     int arg_idx = kernelArg->getAssociatedArgNo();
     if (kernelArg->needsAllocation()) {
-      // set to bindless
-      arg_addrmode = zebin::PreDefinedAttrGetter::ArgAddrMode::bindless;
+      // bindless
       arg_off = payloadPosition;
       arg_size = kernelArg->getSize();
-    } else {
+    } else if (arg_addrmode == zebin::PreDefinedAttrGetter::ArgAddrMode::stateful) {
       // add bti index for this arg if it's stateful
       SOpenCLKernelInfo::SResourceInfo resInfo = getResourceInfo(arg_idx);
       zebin::ZEInfoBuilder::addBindingTableIndex(m_kernelInfo.m_zeBTIArgs, getBTI(resInfo), arg_idx);
@@ -904,15 +905,16 @@ bool COpenCLKernel::CreateZEPayloadArguments(IGC::KernelArg *kernelArg, uint pay
   // sampler
   case KernelArg::ArgType::SAMPLER:
   case KernelArg::ArgType::BINDLESS_SAMPLER: {
-    // the sampler arg is either bindless or stateful. check from "kernelArg->needsAllocation()"
+    // the sampler arg is either bindless or stateful.
     // For stateful image argument, the arg has 0 offset and 0 size
     // NOTE: we only have stateful sampler now
-    zebin::PreDefinedAttrGetter::ArgAddrMode arg_addrmode = zebin::PreDefinedAttrGetter::ArgAddrMode::stateful;
+    zebin::PreDefinedAttrGetter::ArgAddrMode arg_addrmode = m_ModuleMetadata->UseBindlessImage
+                                                                ? zebin::PreDefinedAttrGetter::ArgAddrMode::bindless
+                                                                : zebin::PreDefinedAttrGetter::ArgAddrMode::stateful;
     uint arg_off = 0;
     uint arg_size = 0;
     if (kernelArg->needsAllocation()) {
-      // set to bindless
-      arg_addrmode = zebin::PreDefinedAttrGetter::ArgAddrMode::bindless;
+      // bindless
       arg_off = payloadPosition;
       arg_size = kernelArg->getSize();
     }
@@ -2415,6 +2417,19 @@ bool COpenCLKernel::CompileSIMDSize(SIMDMode simdMode, EmitPass &EP, llvm::Funct
   return simdStatus == SIMDStatus::SIMD_PASS;
 }
 
+static bool shouldDropToSIMD16(uint32_t maxPressure, SIMDMode simdMode, CodeGenContext *pCtx, MetaDataUtils *pMdUtils,
+                               llvm::Function *F) {
+  if (simdMode != SIMDMode::SIMD32 || !isEntryFunc(pMdUtils, F)) {
+    return false;
+  }
+  if (!pCtx->isAutoGRFSelectionEnabled() || pCtx->getNumGRFPerThread(false) != 0) {
+    return false;
+  }
+  auto threshold = IGC_GET_FLAG_VALUE(EarlySIMD16DropForXE3Threshold);
+  bool shouldDrop = maxPressure > threshold;
+  return shouldDrop;
+}
+
 SIMDStatus COpenCLKernel::checkSIMDCompileCondsForMin16(SIMDMode simdMode, EmitPass &EP, llvm::Function &F,
                                                         bool hasSyncRTCalls) {
   if (simdMode == SIMDMode::SIMD8) {
@@ -2442,9 +2457,9 @@ SIMDStatus COpenCLKernel::checkSIMDCompileCondsForMin16(SIMDMode simdMode, EmitP
   uint32_t requiredSimdSize = getReqdSubGroupSize(F, pMdUtils);
 
   // there is a requirement for specific compilation size, we can't abort on simd32
-  if (requiredSimdSize != 0)
+  if (requiredSimdSize != 0 && !(requiredSimdSize < 32 && SIMDMode::SIMD32 == simdMode)) {
     EP.m_canAbortOnSpill = false;
-
+  }
   bool hasSubGroupForce = hasSubGroupIntrinsicPVC(F);
   uint32_t maxPressure = getMaxPressure(F, pMdUtils);
 
@@ -2519,6 +2534,14 @@ SIMDStatus COpenCLKernel::checkSIMDCompileCondsForMin16(SIMDMode simdMode, EmitP
     }
 
     if (simdMode == SIMDMode::SIMD32 && hasSubGroupForce) {
+      pCtx->SetSIMDInfo(SIMD_SKIP_PERF, simdMode, ShaderDispatchMode::NOT_APPLICABLE);
+      return SIMDStatus::SIMD_FUNC_FAIL;
+    }
+  }
+
+  if (EP.m_canAbortOnSpill && pCtx->platform.isCoreXE3() && IGC_IS_FLAG_ENABLED(AllowEarlySIMD16DropForXE3)) {
+    bool shouldDrop = shouldDropToSIMD16(maxPressure, simdMode, pCtx, pMdUtils, &F);
+    if (shouldDrop) {
       pCtx->SetSIMDInfo(SIMD_SKIP_PERF, simdMode, ShaderDispatchMode::NOT_APPLICABLE);
       return SIMDStatus::SIMD_FUNC_FAIL;
     }

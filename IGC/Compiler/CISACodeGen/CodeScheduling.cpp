@@ -7,29 +7,31 @@ SPDX-License-Identifier: MIT
 ============================= end_copyright_notice ===========================*/
 
 #include <fstream>
+
 #include "common/debug/Debug.hpp"
 #include "common/debug/Dump.hpp"
 // #include "common/Stats.hpp"
 #include "common/LLVMUtils.h"
 #include "common/LLVMWarningsPush.hpp"
-#include "llvm/IR/Dominators.h"
 #include "llvm/Analysis/LoopInfo.h"
-#include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/CFG.h"
+#include "llvm/IR/Dominators.h"
+#include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/Verifier.h"
+#include "common/LLVMWarningsPop.hpp"
 
 // #include "llvm/ADT/PostOrderIterator.h"
-#include "llvmWrapper/IR/Function.h"
-#include "llvmWrapper/IR/Value.h"
-#include "llvmWrapper/IR/DerivedTypes.h"
-#include <llvmWrapper/Analysis/TargetLibraryInfo.h>
-#include "common/LLVMWarningsPop.hpp"
-#include "Compiler/CodeGenPublic.h"
 #include "Compiler/CISACodeGen/CodeScheduling.hpp"
-#include "Compiler/CISACodeGen/helper.h"
 #include "Compiler/CISACodeGen/ShaderCodeGen.hpp"
+#include "Compiler/CISACodeGen/helper.h"
+#include "Compiler/CodeGenPublic.h"
 #include "Compiler/IGCPassSupport.h"
 #include "Probe/Assertion.h"
+
+#include "llvmWrapper/IR/DerivedTypes.h"
+#include "llvmWrapper/IR/Function.h"
+#include "llvmWrapper/IR/Value.h"
+#include <llvmWrapper/Analysis/TargetLibraryInfo.h>
 
 using namespace llvm;
 using namespace IGC::Debug;
@@ -111,6 +113,7 @@ static std::string getName(Value *V) {
 IGC_INITIALIZE_PASS_BEGIN(CodeScheduling, PASS_FLAG, PASS_DESCRIPTION, PASS_CFG_ONLY, PASS_ANALYSIS)
 IGC_INITIALIZE_PASS_DEPENDENCY(CodeGenContextWrapper)
 IGC_INITIALIZE_PASS_DEPENDENCY(VectorShuffleAnalysis)
+IGC_INITIALIZE_PASS_DEPENDENCY(RematChainsAnalysis)
 IGC_INITIALIZE_PASS_DEPENDENCY(IGCLivenessAnalysis)
 IGC_INITIALIZE_PASS_DEPENDENCY(IGCFunctionExternalRegPressureAnalysis)
 IGC_INITIALIZE_PASS_END(CodeScheduling, PASS_FLAG, PASS_DESCRIPTION, PASS_CFG_ONLY, PASS_ANALYSIS)
@@ -204,9 +207,9 @@ public:
 class RegisterPressureTracker {
 public:
   RegisterPressureTracker(BasicBlock *BB, IGCLivenessAnalysis *RPE, IGCFunctionExternalRegPressureAnalysis *FRPE,
-                          VectorShuffleAnalysis *VSA, WIAnalysisRunner *WI, CodeGenContext *CTX,
+                          VectorShuffleAnalysis *VSA, RematChainsAnalysis *RCA, WIAnalysisRunner *WI, CodeGenContext *CTX,
                           SchedulingConfig *Config, llvm::raw_ostream *LogStream)
-      : BB(BB), RPE(RPE), FRPE(FRPE), VSA(VSA), WI(WI), CTX(CTX), C(Config), LogStream(LogStream) {
+      : BB(BB), RPE(RPE), FRPE(FRPE), VSA(VSA), RCA(RCA), WI(WI), CTX(CTX), C(Config), LogStream(LogStream) {
     F = BB->getParent();
     SIMD = C->get(SchedulingConfig::Option::ForceSIMDSize) > 0 ? C->get(SchedulingConfig::Option::ForceSIMDSize)
                                                                : numLanes(RPE->bestGuessSIMDSize(F));
@@ -221,6 +224,7 @@ public:
     RPE = RPT.RPE;
     FRPE = RPT.FRPE;
     VSA = RPT.VSA;
+    RCA = RPT.RCA;
     WI = RPT.WI;
     CTX = RPT.CTX;
     C = RPT.C;
@@ -236,7 +240,12 @@ public:
     BBOut = RPT.BBOut;
     BBCurrent = RPT.BBCurrent;
     CurrentPressure = RPT.CurrentPressure;
-    PressureMap = RPT.PressureMap;
+    EstimationCache = RPT.EstimationCache;
+    RealUsesCache = RPT.RealUsesCache;
+    ValueSizeCache = RPT.ValueSizeCache;
+
+    CurrentNumOf2dLoads = RPT.CurrentNumOf2dLoads;
+    TotalNumOf2dLoads = RPT.TotalNumOf2dLoads;
 
     // deepcopy HangingLiveVarsVec and HangingLiveVars
     HangingLiveVarsVec.clear();
@@ -254,20 +263,52 @@ public:
   RegisterPressureTracker() = delete;
   ~RegisterPressureTracker() = default;
 
-  // TODO reuse instead of copy from IGCLivenessAnalysis.cpp
+  int getNumGRF() {
+    int NGRF = static_cast<int>(CTX->getNumGRFPerThread(false));
+    if (NGRF == 0) { // GRF info is not set, using the default value
+      if (CTX->isAutoGRFSelectionEnabled()) {
+        NGRF = C->get(SchedulingConfig::Option::DefaultNumGRFAuto);
+      } else {
+        NGRF = C->get(SchedulingConfig::Option::DefaultNumGRF);
+      }
+    }
+    return NGRF;
+  }
+
   unsigned int computeSizeInBytes(Value *V, unsigned int SIMD, WIAnalysisRunner *WI, const DataLayout &DL) {
-    // when we check size of operands, this check is redundant
-    // but allows for a nicer code
-    bool NoRetVal = V->getType()->isVoidTy();
+    auto It = ValueSizeCache.find({V, SIMD});
+    if (It != ValueSizeCache.end()) {
+      return It->second;
+    }
+    unsigned int Size = computeSizeInBytesImpl(V, SIMD, WI, DL);
+    ValueSizeCache[{V, SIMD}] = Size;
+    return Size;
+  }
+
+  unsigned int computeSizeInBytesImpl(Value *V, unsigned int SIMD, WIAnalysisRunner *WI, const DataLayout &DL) {
+    auto Type = V->getType();
+
+    bool NoRetVal = Type->isVoidTy();
     if (NoRetVal)
       return 0;
 
-    auto Type = V->getType();
-    unsigned int TypeSizeInBits = (unsigned int)DL.getTypeSizeInBits(Type);
-    unsigned int Multiplier = SIMD;
+    if (auto *Intr = dyn_cast<GenIntrinsicInst>(V)) {
+      switch (Intr->getIntrinsicID()) {
+      case GenISAIntrinsic::GenISA_ftobf:
+        // use the size of the input type, because bf is GRF-aligned
+        Type = Intr->getOperand(0)->getType();
+        break;
+      default:
+        break;
+      }
+    }
+
+    auto TypeSizeInBits = static_cast<int>(DL.getTypeSizeInBits(Type));
+
+    int Multiplier = static_cast<int>(SIMD);
     if (WI && WI->isUniform(V))
       Multiplier = 1;
-    unsigned int SizeInBytes = TypeSizeInBits * Multiplier / 8;
+    int SizeInBytes = TypeSizeInBits * Multiplier / 8;
     return SizeInBytes;
   }
 
@@ -286,8 +327,15 @@ public:
       auto *I = dyn_cast<Instruction>(V);
       if (!I)
         continue;
+
       IGC_ASSERT(!IGCLLVM::isDebugOrPseudoInst(*I));
-      BBCurrent.insert(I);
+
+      auto *DV = VSA->getDestVector(I);
+      if (DV && DV->isVectorShuffle()) {
+        BBCurrent.insert(DV->getSourceVec());
+      } else {
+        BBCurrent.insert(I);
+      }
     }
 
     // Add all Phi instructions from BB to BBCurrent
@@ -312,16 +360,15 @@ public:
 
     PrintDump("\n\n");
     const int ReservedRegisters = C->get(SchedulingConfig::Option::ReservedRegisters);
-    const int RegisterSize = RPE->registerSizeInBytes();
-    CurrentPressure = RPE->estimateSizeInBytes(BBCurrent, *F, SIMD, WI) + ReservedRegisters * RegisterSize;
+    const int RegisterSize = static_cast<int>(RPE->registerSizeInBytes());
+    CurrentPressure =
+        static_cast<int32_t>(RPE->estimateSizeInBytes(BBCurrent, *F, SIMD, WI)) + ReservedRegisters * RegisterSize;
     PrintDump("Initial CurrentPressure: " << CurrentPressure << "\n");
-    int32_t CurrentPressureInRegisters = int32_t(RPE->bytesToRegisters(CurrentPressure));
+    int32_t CurrentPressureInRegisters = static_cast<int32_t>(RPE->bytesToRegisters(CurrentPressure));
     PrintDump("Initial CurrentPressure in registers: " << CurrentPressureInRegisters << "\n\n");
 
-    PressureMap.clear();
-    for (auto *V : BBCurrent) {
-      PressureMap[V] = CurrentPressure;
-    }
+    CurrentNumOf2dLoads = 0;
+    TotalNumOf2dLoads = std::count_if(BB->begin(), BB->end(), [](Instruction &I) { return is2dBlockRead(&I); });
   }
 
   bool isRegpressureLow(Instruction *I = nullptr) {
@@ -329,20 +376,44 @@ public:
   }
 
   bool isRegpressureHigh(Instruction *I = nullptr) {
-    return compareRPWithThreshold<true>(
-        C->get(SchedulingConfig::Option::GreedyRPThresholdDelta) + IGC_GET_FLAG_VALUE(CodeSchedulingRPMargin), I);
+    return compareRPWithThreshold<true>(C->get(SchedulingConfig::Option::GreedyRPThresholdDelta) +
+                                            static_cast<int>(IGC_GET_FLAG_VALUE(CodeSchedulingRPMargin)),
+                                        I);
   }
 
   bool isRegpressureCritical(Instruction *I = nullptr) {
-    return compareRPWithThreshold<true>(IGC_GET_FLAG_VALUE(CodeSchedulingRPMargin), I);
+    int AdjustmentForFragmentation = 0;
+    if (I && is2dBlockRead(I) && (getNumGRF() >= C->get(SchedulingConfig::Option::FragmentationAdjustmentsMinGRF))) {
+      if (!C->get(SchedulingConfig::Option::IgnoreFragmentationForLastLoad) ||
+          (CurrentNumOf2dLoads < (TotalNumOf2dLoads - 1))) {
+        auto *VectorType = dyn_cast<IGCLLVM::FixedVectorType>(I->getType());
+        if (VectorType) {
+          if (static_cast<int>(VectorType->getNumElements()) >=
+              C->get(SchedulingConfig::Option::LargeLoadSizeForFragmentationAdjustment)) {
+            AdjustmentForFragmentation = C->get(SchedulingConfig::Option::RPMarginIncreaseForFragmentationAdjustment);
+          }
+        }
+      }
+    }
+    return compareRPWithThreshold<true>(
+        static_cast<int>(IGC_GET_FLAG_VALUE(CodeSchedulingRPMargin)) + AdjustmentForFragmentation, I);
+  }
+
+  template <bool checkIfHigher> bool compareRPWithThreshold(int Threshold, Instruction *I = nullptr) {
+    if constexpr (checkIfHigher) {
+      return getCurrentPressure(I) > getNumGRF() - Threshold;
+    } else {
+      return getCurrentPressure(I) <= getNumGRF() - Threshold;
+    }
   }
 
   int32_t getCurrentPressure(Instruction *I = nullptr) {
     auto CurrentPressureAdjusted = CurrentPressure;
     if (I != nullptr)
       CurrentPressureAdjusted += estimate(I);
-    auto ExternalPressure = int32_t(FRPE->getExternalPressureForFunction(F));
-    auto CurrentPressureInRegisters = int32_t(RPE->bytesToRegisters(CurrentPressureAdjusted)) + ExternalPressure;
+    auto ExternalPressure = static_cast<int32_t>(FRPE->getExternalPressureForFunction(F));
+    auto CurrentPressureInRegisters =
+        static_cast<int32_t>(RPE->bytesToRegisters(CurrentPressureAdjusted)) + ExternalPressure;
     return CurrentPressureInRegisters;
   }
 
@@ -350,25 +421,32 @@ public:
 
   int32_t update(Instruction *I) { return estimateOrUpdate(I, true); }
 
-  int32_t getMaxPressure(Value *V) { return RPE->bytesToRegisters(PressureMap[V]); }
+  llvm::DenseSet<Value *> getRealUses(Value *I) {
+    auto It = RealUsesCache.find(I);
+    if (It != RealUsesCache.end()) {
+      return It->second;
+    }
 
-  llvm::SmallSet<Value *, 8> getRealUses(Value *I) {
-    llvm::SmallSet<Value *, 8> Uses;
-    for (auto *U : I->users()) {
-      if (Instruction *UI = dyn_cast<Instruction>(U)) {
-        if (isDbgIntrinsic(UI))
-          continue;
+    llvm::DenseSet<Value *> &Uses = RealUsesCache.try_emplace(I).first->second;
 
-        if (isNoOpInst(UI, CTX)) {
-          for (auto *UU : getRealUses(UI)) {
-            Uses.insert(UU);
+    std::function<void(Value *)> collectRealUses = [&](Value *V) {
+      for (auto *U : V->users()) {
+        if (Instruction *UI = dyn_cast<Instruction>(U)) {
+          if (isDbgIntrinsic(UI))
+            continue;
+
+          if (isNoOpInst(UI, CTX)) {
+            collectRealUses(UI);
+          } else {
+            Uses.insert(UI);
           }
-        } else {
-          Uses.insert(UI);
         }
       }
-    }
-    return std::move(Uses);
+    };
+
+    collectRealUses(I);
+
+    return Uses;
   }
 
   bool inBBCurrent(Value *V) { return BBCurrent.count(V); }
@@ -387,12 +465,28 @@ public:
     return V;
   }
 
+  DenseSet<Instruction *> getHangingS2VInstructions() {
+    // return all the vectors that are created of scalars, but not fully populated yet
+    DenseSet<Instruction *> HangingInstructions;
+    for (const auto &HangingLiveVar : HangingLiveVarsVec) {
+      if (HangingLiveVar->Type == HangingLiveVarsType::HANGING_SCALARS_TO_VECTOR) {
+        for (auto *V : HangingLiveVar->LiveVars) {
+          if (Instruction *I = dyn_cast<Instruction>(V)) {
+            HangingInstructions.insert(I);
+          }
+        }
+      }
+    }
+    return HangingInstructions;
+  }
+
 private:
   BasicBlock *BB;
   Function *F;
   IGCLivenessAnalysis *RPE;
   IGCFunctionExternalRegPressureAnalysis *FRPE;
   VectorShuffleAnalysis *VSA;
+  RematChainsAnalysis *RCA;
   WIAnalysisRunner *WI;
   CodeGenContext *CTX;
   const DataLayout *DL;
@@ -402,13 +496,18 @@ private:
   int32_t SIMD;
   int32_t CurrentPressure = 0;
 
+  int32_t TotalNumOf2dLoads = 0;
+  int32_t CurrentNumOf2dLoads = 0;
+
   ValueSet BBIn;
   ValueSet BBOut;
   ValueSet BBCurrent;
 
-  llvm::DenseMap<Value *, int32_t> PressureMap;
+  llvm::DenseMap<Value *, int32_t> EstimationCache;
+  llvm::DenseMap<Value *, DenseSet<Value *>> RealUsesCache;
+  llvm::DenseMap<std::pair<Value *, int32_t>, int32_t> ValueSizeCache;
 
-  typedef enum { HANGING_SCALARS, HANGING_VECTORS, HANGING_NOOP_VECTORS } HangingLiveVarsType;
+  typedef enum { HANGING_SCALARS_TO_VECTOR, HANGING_VECTOR_TO_SCALARS, HANGING_VECTORS, HANGING_NOOP_VECTORS } HangingLiveVarsType;
 
   // POD structure to keep information about hanging values
   struct HangingLiveVarsInfo {
@@ -420,22 +519,6 @@ private:
   };
   std::vector<std::unique_ptr<HangingLiveVarsInfo>> HangingLiveVarsVec;
   DenseMap<Value *, HangingLiveVarsInfo *> HangingLiveVars;
-
-  template <bool checkIfHigher> bool compareRPWithThreshold(int Threshold, Instruction *I = nullptr) {
-    int NGRF = (int)CTX->getNumGRFPerThread(false);
-    if (NGRF == 0) { // GRF info is not set, using the default value
-      if (CTX->isAutoGRFSelectionEnabled()) {
-        NGRF = C->get(SchedulingConfig::Option::DefaultNumGRFAuto);
-      } else {
-        NGRF = C->get(SchedulingConfig::Option::DefaultNumGRF);
-      }
-    }
-    if constexpr (checkIfHigher) {
-      return getCurrentPressure(I) > NGRF - Threshold;
-    } else {
-      return getCurrentPressure(I) <= NGRF - Threshold;
-    }
-  }
 
   // Check if the value dies on the instruction CurrentI. Looks through no-op instructions,
   // but doesn't check if the value "hangs". Handling the value that looks dead is in fact "hangs"
@@ -471,11 +554,35 @@ private:
   // Or updates the state to reflect that we add the instruction I (if Update is true)
   // Returns the estimated or updated register pressure in bytes
   int32_t estimateOrUpdate(Instruction *I, bool Update) {
+    if (Update) {
+      EstimationCache.clear();
+      return estimateOrUpdateImpl(I, Update);
+    }
+    auto It = EstimationCache.find(I);
+    if (It != EstimationCache.end()) {
+      return It->second;
+    }
+    int32_t Result = estimateOrUpdateImpl(I, Update);
+    EstimationCache[I] = Result;
+    return Result;
+  }
+
+  int32_t estimateOrUpdateImpl(Instruction *I, bool Update) {
     if (IGCLLVM::isDebugOrPseudoInst(*I) || I->isLifetimeStartOrEnd() || isNoOpInst(I, CTX)) {
       // NoOp instructions do not change register pressure
       if (Update)
         PrintDumpLevel(VerbosityLevel::High, "NoOp instruction: " << getName(I) << "\n");
       return 0;
+    }
+
+    // Check for remat chain patterns
+    if (RCA && !Update) {
+      RematChainPattern *RCP = RCA->getRematChainPattern(I);
+      if (RCP && (RCP->getFirstInst() == I)) {
+        // if it's a remat chain we are going to use the remat target instruction (if it's load or store)
+        Instruction *TargetInst = RCP->getRematTargetInst();
+        return estimateOrUpdateImpl(TargetInst, false);
+      }
     }
 
     if (Update)
@@ -486,6 +593,10 @@ private:
     // First check how does the instruction increase the register pressure
     // It takes the register for the output value...
     int RPIncrease = computeSizeInBytes(I, SIMD, WI, *DL);
+
+    if (!Update && isShuffled2dBlockRead(I)) {
+      RPIncrease *= 2;
+    }
 
     // ... if is not a special case
 
@@ -611,7 +722,7 @@ private:
         auto *FirstIE = DTI->getFirstIE();
         auto *FirstScalar = FirstIE->getOperand(1);
         if (!HangingLiveVars.count(FirstScalar)) {
-          HangingLiveVarsVec.emplace_back(std::make_unique<HangingLiveVarsInfo>(0, HANGING_SCALARS));
+          HangingLiveVarsVec.emplace_back(std::make_unique<HangingLiveVarsInfo>(0, HANGING_SCALARS_TO_VECTOR));
           auto *HLV = HangingLiveVarsVec.back().get();
 
           for (Value *V : DTI->getSourceScalars()) {
@@ -653,7 +764,7 @@ private:
         if (!HangingLiveVars.count(I)) {
           IGC_ASSERT(V2SP->getSourceVec() == EE->getVectorOperand());
           HangingLiveVarsVec.emplace_back(std::make_unique<HangingLiveVarsInfo>(
-              computeSizeInBytes(V2SP->getSourceVec(), SIMD, WI, *DL), HANGING_SCALARS));
+              computeSizeInBytes(V2SP->getSourceVec(), SIMD, WI, *DL), HANGING_VECTOR_TO_SCALARS));
           auto *HLV = HangingLiveVarsVec.back().get();
           for (Value *V : V2SP->getEEs()) {
             IGC_ASSERT(!HLV->LiveVars.count(V));
@@ -755,7 +866,8 @@ private:
           {
             if (Update)
               PrintDumpLevel(VerbosityLevel::High, " (hanging vector dies)");
-            if (HLV->Type == HANGING_SCALARS) {
+            if (HLV->Type == HANGING_SCALARS_TO_VECTOR ||
+                HLV->Type == HANGING_VECTOR_TO_SCALARS) {
               // only scalars die
               RPDecrease = HLV->Size;
             } else {
@@ -768,7 +880,8 @@ private:
                              " (hanging vector, left vars: "
                                  << (HLV->LiveVars.count(RealOp) ? HLV->LiveVars.size() - 1 : HLV->LiveVars.size())
                                  << ")");
-            if (HLV->Type == HANGING_SCALARS) {
+            if (HLV->Type == HANGING_SCALARS_TO_VECTOR ||
+                HLV->Type == HANGING_VECTOR_TO_SCALARS) {
               RPDecrease = 0; // We don't decrease pressure, because the vector is still alive
             }
           }
@@ -795,8 +908,8 @@ private:
       BBCurrent.insert(I);
       CurrentPressure += ResultSizeInBytes;
 
-      for (auto *V : BBCurrent) {
-        PressureMap[V] = std::max(PressureMap[V], CurrentPressure);
+      if (is2dBlockRead(I)) {
+        CurrentNumOf2dLoads++;
       }
 
       // Print log dump only on Update in order not to output duplicating information
@@ -804,6 +917,28 @@ private:
     }
 
     return ResultSizeInBytes;
+  }
+
+  bool isShuffled2dBlockRead(Instruction *I) {
+    if (!is2dBlockRead(I)) {
+      return false;
+    }
+    auto RealUses = getRealUses(I);
+    for (auto *U : RealUses) {
+      Instruction *UI = dyn_cast<Instruction>(U);
+      if (!UI || (UI->getParent() != BB))
+        return false;
+      auto *DV = VSA->getDestVector(UI);
+      if (!DV)
+        return false;
+      if (!DV->isVectorShuffle())
+        return false;
+      if (DV->isNoOp()) {
+        // No-op vector shuffle does not increase register pressure
+        return false;
+      }
+    }
+    return true;
   }
 };
 
@@ -835,8 +970,8 @@ public:
   typedef std::vector<InstructionNode *> InstNodePtrList;
 
   BBScheduler(BasicBlock *BB, IGCLivenessAnalysis *RPE, IGCFunctionExternalRegPressureAnalysis *FRPE, AAResults *AA,
-              VectorShuffleAnalysis *VSA, CodeGenContext *CTX, SchedulingConfig *Config, llvm::raw_ostream *LogStream)
-      : BB(BB), RPE(RPE), FRPE(FRPE), AA(AA), VSA(VSA), CTX(CTX), C(*Config), LogStream(LogStream) {
+              VectorShuffleAnalysis *VSA, RematChainsAnalysis *RCA, CodeGenContext *CTX, SchedulingConfig *Config, llvm::raw_ostream *LogStream)
+      : BB(BB), RPE(RPE), FRPE(FRPE), AA(AA), VSA(VSA), RCA(RCA), CTX(CTX), C(*Config), LogStream(LogStream) {
     F = BB->getParent();
     WI = &FRPE->getWIAnalysis(F);
   }
@@ -854,20 +989,31 @@ public:
     // Check if the original schedule can have spills
     // Do nothing if the original schedule can not have spills and rescheduling is not forced
 
-    RegisterPressureTracker RPT(BB, RPE, FRPE, VSA, WI, CTX, &C, LogStream);
+    RegisterPressureTracker RPT(BB, RPE, FRPE, VSA, RCA, WI, CTX, &C, LogStream);
 
+    int32_t MaxOriginalRegpressure = 0;
     bool OriginalScheduleCanHaveSpills = false;
     for (auto &I : *BB) {
       RPT.update(&I);
+      MaxOriginalRegpressure = std::max(MaxOriginalRegpressure, RPT.getCurrentPressure());
       if (RPT.isRegpressureCritical()) {
         OriginalScheduleCanHaveSpills = true;
-        PrintDump("Original schedule achieved the critical regpressure: " << RPT.getCurrentPressure() << "\n");
-        break;
       }
     }
+    PrintDump("Max original regpressure: " << MaxOriginalRegpressure << "\n");
 
     if (!OriginalScheduleCanHaveSpills && !IGC_IS_FLAG_ENABLED(EnableCodeSchedulingIfNoSpills)) {
       PrintDump("Original schedule can not have spills, skipping scheduling\n");
+      PrintDump("Schedule is not changed" << "\n");
+      return false;
+    }
+
+    int NumGRF = RPT.getNumGRF();
+    int ThresholdValue = NumGRF - static_cast<int>(IGC_GET_FLAG_VALUE(CodeSchedulingRPMargin)) +
+                         static_cast<int>(IGC_GET_FLAG_VALUE(CodeSchedulingRPThreshold));
+    if (MaxOriginalRegpressure < ThresholdValue) {
+      PrintDump("Max original regpressure is below threshold: " << MaxOriginalRegpressure << " < " << ThresholdValue
+                                                                << ", skipping scheduling\n");
       PrintDump("Schedule is not changed" << "\n");
       return false;
     }
@@ -876,7 +1022,8 @@ public:
     // Schedule is a copyable object, so we can make a copy to save a "checkpoint".
 
     std::vector<std::unique_ptr<Schedule>> Schedules;
-    Schedules.push_back(std::make_unique<Schedule>(BB, RPE, FRPE, VSA, WI, CTX, &C, LogStream));
+
+    std::unique_ptr<Schedule> DefaultSchedule = std::make_unique<Schedule>(BB, RPE, FRPE, VSA, RCA, WI, CTX, &C, LogStream);
 
     // First try if "GreedyMW" scheduling can be applied
     // This approach prioritizes scheduling by the edge weights
@@ -884,19 +1031,39 @@ public:
 
     // We'll commit it if it has no spills
 
-    std::unique_ptr<Schedule> GreedyMWSchedule = std::make_unique<Schedule>(*Schedules.front());
+    std::unique_ptr<Schedule> GreedyMWSchedule = std::make_unique<Schedule>(*DefaultSchedule);
     GreedyMWSchedule->setGreedyMW(true);
 
     if (!IGC_IS_FLAG_ENABLED(CodeSchedulingForceRPOnly)) {
+      std::vector<std::unique_ptr<Schedule>> NewSchedules;
       PrintDump("Greedy MW attempt\n");
+
       while (!GreedyMWSchedule->isComplete()) {
-        GreedyMWSchedule->scheduleNextInstruction();
+        std::unique_ptr<Schedule> Checkpoint = GreedyMWSchedule->scheduleNextInstruction();
+        if (Checkpoint) {
+          NewSchedules.push_back(std::move(Checkpoint));
+        }
       }
 
       if (IGC_IS_FLAG_ENABLED(CodeSchedulingForceMWOnly) || !GreedyMWSchedule->canEverHaveSpills()) {
         PrintDump("Greedy MW schedule is forced or has no spills.\n");
+        if (((GreedyMWSchedule->getMaxRegpressure() > MaxOriginalRegpressure)) &&
+          IGC_IS_FLAG_DISABLED(CodeSchedulingMWOptimizedHigherRPCommit))
+        {
+          PrintDump("Greedy MW schedule has higher regpressure that the original (" <<
+                    GreedyMWSchedule->getMaxRegpressure() << " > " << MaxOriginalRegpressure <<
+                    "), skipping commit\n");
+          PrintDump("Schedule is not changed" << "\n");
+          return false;
+        }
         GreedyMWSchedule->commit();
         return true;
+      }
+
+      // push NewSchedules to Schedules in the reverse order
+      for (auto It = NewSchedules.rbegin(); It != NewSchedules.rend(); ++It) {
+        It->get()->setGreedyMW(false); // Reset the GreedyMW flag for the new schedules
+        Schedules.push_back(std::move(*It));
       }
     }
 
@@ -904,61 +1071,87 @@ public:
     // Schedule only for the pressure minimization
     // If it still has spills or is forced, we will commit it
 
-    std::unique_ptr<Schedule> GreedyRPSchedule = std::make_unique<Schedule>(*Schedules.front());
-    GreedyRPSchedule->setGreedyRP(true);
-    PrintDump("Greedy RP attempt\n");
+    std::unique_ptr<Schedule> GreedyRPSchedule = nullptr;
+
+    if(!IGC_IS_FLAG_ENABLED(CodeSchedulingForceRPOnly) && GreedyMWSchedule->isComplete() && GreedyMWSchedule->isEqualGreedyRP()) {
+      PrintDump("Greedy MW schedule is equal to Greedy RP schedule, skipping Greedy RP attempt\n");
+      GreedyRPSchedule = std::make_unique<Schedule>(*GreedyMWSchedule);
+    } else {
+      PrintDump("Greedy RP attempt\n");
+      GreedyRPSchedule = std::make_unique<Schedule>(*DefaultSchedule);
+      GreedyRPSchedule->setGreedyRP(true);
+    }
 
     // PrintDump("DepGraph dump\n");
-    // DepGraph G(BB, RPE, FRPE, VSA, WI, CTX, C, LogStream);
+    // DepGraph G(BB, RPE, FRPE, VSA, RCA, WI, CTX, C, LogStream);
     // G.print(*LogStream);
 
     while (!GreedyRPSchedule->isComplete()) {
       GreedyRPSchedule->scheduleNextInstruction();
     }
 
-    bool canCompileWithNoSpills = !GreedyRPSchedule->canEverHaveSpills();
+    bool CanCompileWithNoSpills = !GreedyRPSchedule->canEverHaveSpills();
 
-    if (IGC_IS_FLAG_ENABLED(CodeSchedulingForceRPOnly) ||
-        ((IGC_GET_FLAG_VALUE(CodeSchedulingAttemptsLimit) <= 0 || !canCompileWithNoSpills) &&
-         OriginalScheduleCanHaveSpills)) {
-      PrintDump("Greedy RP schedule can have spills or is forced, commiting it and stopping.\n");
+    if (IGC_IS_FLAG_ENABLED(CodeSchedulingForceRPOnly)) {
+      PrintDump("Greedy RP schedule is forced\n");
+      if (((GreedyRPSchedule->getMaxRegpressure() > MaxOriginalRegpressure)) &&
+          IGC_IS_FLAG_DISABLED(CodeSchedulingGreedyRPHigherRPCommit)) {
+        PrintDump("Greedy RP schedule has higher regpressure that the original (" <<
+                  GreedyRPSchedule->getMaxRegpressure() << " > " << MaxOriginalRegpressure <<
+                  "), skipping commit\n");
+        PrintDump("Schedule is not changed" << "\n");
+        return false;
+      }
+      PrintDump("Commiting RP schedule and stopping.\n")
+      PrintDump("Schedule is changed" << "\n");
       GreedyRPSchedule->commit();
       return true;
     }
 
-    IGC_ASSERT(Schedules.size() == 1);
-
     // Try several attempts with backtracking to find the best schedule with no spills
-    Schedules.front()->setRefLiveIntervals(GreedyMWSchedule->getMaxLiveIntervals());
+    for (auto &S : Schedules) {
+      S->setRefLiveIntervals(GreedyMWSchedule->getMaxLiveIntervals());
+    }
 
-    uint attempt = 1;
-    do {
+    PrintDump("Schedules left in the queue: " << Schedules.size() << "\n");
+
+    uint Attempt = 1;
+    while (!Schedules.empty()) {
       Schedule *S = Schedules.back().get();
-      PrintDump("Attempt #" << attempt << "\n");
+      PrintDump("Attempt #" << Attempt << "\n");
 
       std::vector<std::unique_ptr<Schedule>> NewSchedules;
 
       while (!S->isComplete()) {
-        // Schedule the next instruction and add the checkpoint if it returns the previous state
+        // Schedule the next instruction and add the checkpoint if it
+        // returns the previous state
         std::unique_ptr<Schedule> Checkpoint = S->scheduleNextInstruction();
         if (Checkpoint) {
           NewSchedules.push_back(std::move(Checkpoint));
         }
-        if (canCompileWithNoSpills && S->canEverHaveSpills()) {
+        if (CanCompileWithNoSpills && S->canEverHaveSpills()) {
           break;
         }
       }
 
-      bool Success = S->isComplete();
+      bool Success = S->isComplete() && !S->canEverHaveSpills();
       if (Success) {
         PrintDump("Schedule is complete\n");
+        if (((S->getMaxRegpressure() > MaxOriginalRegpressure)) &&
+            IGC_IS_FLAG_DISABLED(CodeSchedulingMWOptimizedHigherRPCommit)) {
+          PrintDump("Completed schedule on attempt #" << Attempt << " has higher regpressure that the original (" <<
+                    S->getMaxRegpressure() << " > " << MaxOriginalRegpressure <<
+                    "), skipping commit\n");
+          PrintDump("Schedule is not changed" << "\n");
+          return false;
+        }
         S->commit();
         Changed = true;
         break;
       } else {
-        PrintDump("Schedule of attempt #" << attempt << " is not complete\n");
+        PrintDump("Schedule of attempt #" << Attempt << " is not complete\n");
         PrintDump("Can ever have spills? " << S->canEverHaveSpills() << "\n");
-        PrintDump("Can compile with no spills? " << canCompileWithNoSpills << "\n");
+        PrintDump("Can compile with no spills? " << CanCompileWithNoSpills << "\n");
         Schedules.pop_back();
 
         // push NewSchedules to Schedules in the reverse order
@@ -968,12 +1161,28 @@ public:
 
         PrintDump("Schedules left in the queue: " << Schedules.size() << "\n");
       }
-      if (attempt > int(IGC_GET_FLAG_VALUE(CodeSchedulingAttemptsLimit))) {
+      if (Attempt > static_cast<int>(IGC_GET_FLAG_VALUE(CodeSchedulingAttemptsLimit))) {
         PrintDump("Attempts limit reached\n");
         break;
       }
-      attempt++;
-    } while (!Schedules.empty());
+      Attempt++;
+    };
+
+    if (!Changed && IGC_IS_FLAG_ENABLED(CodeSchedulingCommitGreedyRP) && OriginalScheduleCanHaveSpills) {
+      PrintDump("No schedule is complete, so GreedyRP schedule is the best.\n");
+      if (((GreedyRPSchedule->getMaxRegpressure() > MaxOriginalRegpressure)) &&
+          IGC_IS_FLAG_DISABLED(CodeSchedulingGreedyRPHigherRPCommit)) {
+        PrintDump("Greedy RP schedule has higher regpressure that the original (" <<
+                  GreedyRPSchedule->getMaxRegpressure() << " > " << MaxOriginalRegpressure <<
+                  "), skipping commit\n");
+        PrintDump("Schedule is not changed" << "\n");
+        return false;
+      }
+      PrintDump("Commiting Greedy RP schedule as the best one.\n");
+      PrintDump("Schedule is changed" << "\n");
+      GreedyRPSchedule->commit();
+      Changed = true;
+    }
 
     PrintDump("Schedule is " << (Changed ? "changed" : "not changed") << "\n");
 
@@ -989,6 +1198,7 @@ private:
   AAResults *AA;
   VectorShuffleAnalysis *VSA;
   CodeGenContext *CTX;
+  RematChainsAnalysis *RCA;
   SchedulingConfig &C;
   llvm::raw_ostream *LogStream;
 
@@ -1077,7 +1287,7 @@ private:
     DepGraph &operator=(const DepGraph &) = delete;
 
     DepGraph(BasicBlock *BB, IGCLivenessAnalysis *RPE, IGCFunctionExternalRegPressureAnalysis *FRPE,
-             VectorShuffleAnalysis *VSA, WIAnalysisRunner *WI, CodeGenContext *CTX, SchedulingConfig &C,
+             VectorShuffleAnalysis *VSA, RematChainsAnalysis *RCA, WIAnalysisRunner *WI, CodeGenContext *CTX, SchedulingConfig &C,
              llvm::raw_ostream *LogStream) {
       InstNodes.reserve(BB->size() * sizeof(InstructionNode));
       InstToNode.reserve(BB->size() * sizeof(InstToNodeMap));
@@ -1113,12 +1323,38 @@ private:
         }
       };
 
+      auto isNoOpSingleElementVectorEE = [&](Instruction *I) -> bool {
+        if (auto *EE = dyn_cast<ExtractElementInst>(I)) {
+          if (auto *VectorType = dyn_cast<IGCLLVM::FixedVectorType>(EE->getVectorOperand()->getType())) {
+            if (VectorType->getNumElements() == 1 && VectorType->getElementType()->isSingleValueType()) {
+              return true;
+            }
+          }
+        }
+        return false;
+      };
+
       std::vector<Instruction *> UnknownStores;
       std::vector<Instruction *> AllMemoryAccesses;
 
       // Structures to track non-ssa dependencies of the decomposed loads
       DenseMap<Instruction *, llvm::SmallVector<Instruction *, 32>> Prev2DBlockReadPayloads;
       DenseMap<Instruction *, DenseMap<uint32_t, Instruction *>> Last2DBlockSetAddrPayloadField;
+
+      // Returns the size of the load in bytes for simple cases (vector of
+      // single value type)
+      // TODO handle more complex cases
+      auto getLoadSize = [&](GenIntrinsicInst *Intr) -> uint32_t {
+        auto VectorType = dyn_cast<IGCLLVM::FixedVectorType>(Intr->getType());
+        if (!VectorType)
+          return 0;
+        auto ElemType = VectorType->getElementType();
+        if (!ElemType->isSingleValueType())
+          return 0;
+        uint32_t ElemSize = ElemType->getPrimitiveSizeInBits() / 8;
+        uint32_t NumElements = VectorType->getNumElements();
+        return NumElements * ElemSize;
+      };
 
       auto getSSAEdgeWeight = [&](Instruction *Src, Instruction *Dst, bool HighRP = false) {
         if (IsExtendedMathInstruction(Src)) {
@@ -1130,9 +1366,14 @@ private:
           }
           switch (Intr->getIntrinsicID()) {
           case GenISAIntrinsic::GenISA_LSC2DBlockRead:
-          case GenISAIntrinsic::GenISA_LSC2DBlockReadAddrPayload:
-            return HighRP ? C[Option::Weight2dBlockReadDstDepHighRP] : C[Option::Weight2dBlockReadDstDep];
-
+          case GenISAIntrinsic::GenISA_LSC2DBlockReadAddrPayload: {
+            int AdditionalWeight =
+                C[Option::LoadSizeAdditionalWeight] * C[Option::LoadSizeWeightFactor] * getLoadSize(Intr);
+            return (HighRP ? C[Option::Weight2dBlockReadDstDepHighRP] : C[Option::Weight2dBlockReadDstDep]) +
+                   AdditionalWeight;
+          }
+          case GenISAIntrinsic::GenISA_WaveAll:
+            return HighRP ? C[Option::WeightWaveAllDstDepHighRP] : C[Option::WeightWaveAllDstDep];
           default:
             break;
           }
@@ -1185,6 +1426,13 @@ private:
               }
             }
 
+            RematChainPattern *RCP = RCA->getRematChainPattern(Src);
+            if (RCP) {
+              if (RCP->isRematInst(Dst) || (RCP->getRematTargetInst() == Dst)) {
+                ForceSubsequent = true;
+              }
+            }
+
             // Edge from some instruction TO the no-op or vector shuffle
             // Weight is 0 and it makes sense to place it right after the source
 
@@ -1196,7 +1444,8 @@ private:
             DestVector *DstDV = VSA->getDestVector(Dst);
             VectorToScalarsPattern *V2SP = VSA->getVectorToScalarsPattern(Dst);
             if (IGCLLVM::isDebugOrPseudoInst(*Dst) || Dst->isLifetimeStartOrEnd() || isNoOpInst(Dst, CTX) ||
-                (DstDV && (DstDV->isNoOp())) || (DstDV && (DstDV->isVectorShuffle()) && !DstDV->isNoOp()) || V2SP) {
+                (DstDV && (DstDV->isNoOp())) || (DstDV && (DstDV->isVectorShuffle()) && !DstDV->isNoOp()) ||
+                (DstDV && !DstDV->isVectorShuffle()) || V2SP || isNoOpSingleElementVectorEE(Dst)) {
               Weight = 0;
               WeightHighRP = 0;
               ForceSubsequent = true;
@@ -1265,6 +1514,11 @@ private:
             break;
           }
 
+          case GenISAIntrinsic::GenISA_WaveAll:
+          case GenISAIntrinsic::GenISA_ftobf:
+            isUnknownStore = false;
+            break;
+
           default:
             break;
           }
@@ -1275,7 +1529,11 @@ private:
         }
 
         if (isUnknownStore || isPrefetch) {
-          PrintDumpLevel(VerbosityLevel::High, "Unknown store:\n");
+          if (isUnknownStore) {
+            PrintDumpLevel(VerbosityLevel::High, "Unknown store:\n");
+          } else {
+            PrintDumpLevel(VerbosityLevel::High, "Prefetch:\n");
+          }
           PrintInstructionDumpLevel(VerbosityLevel::High, &I);
 
           UnknownStores.push_back(&I);
@@ -1283,16 +1541,22 @@ private:
           // Every unknown store depends on all the memory accesses
           // We also assume the same for the prefetch in order to preserve its place
           for (auto &MemAccess : AllMemoryAccesses) {
+            if (isDPAS(MemAccess) && isPrefetch) {
+              // Don't add the edge from the DPAS to the prefetch, prefetch benefits from being
+              // executed earlier
+              continue;
+            }
             addEdge(MemAccess, &I, 0, 0);
           }
         }
 
         Instruction *Terminator = BB->getTerminator();
 
-        // Terminator "depends" on all the instruction - they need to be placed before
-        // TODO consider if we need to add a weight to this edge
+        // Terminator "depends" on all the instructions - they need to
+        // be placed before
         if ((&I != Terminator) && (!isPrefetch)) {
-          addEdge(&I, Terminator, 0, 0);
+          addEdge(&I, Terminator, C[Option::AddWeightToTerminatorEdge] ? getSSAEdgeWeight(&I, Terminator, false) : 0,
+                  C[Option::AddWeightToTerminatorEdge] ? getSSAEdgeWeight(&I, Terminator, true) : 0);
         }
 
         if (isPrefetch) {
@@ -1364,11 +1628,11 @@ private:
   class Schedule {
   public:
     Schedule(BasicBlock *BB, IGCLivenessAnalysis *RPE, IGCFunctionExternalRegPressureAnalysis *FRPE,
-             VectorShuffleAnalysis *VSA, WIAnalysisRunner *WI, CodeGenContext *CTX, SchedulingConfig *C,
+             VectorShuffleAnalysis *VSA, RematChainsAnalysis *RCA, WIAnalysisRunner *WI, CodeGenContext *CTX, SchedulingConfig *C,
              llvm::raw_ostream *LogStream)
-        : BB(BB), C(*C), CTX(CTX), VSA(VSA), LogStream(LogStream),
-          G(DepGraph(BB, RPE, FRPE, VSA, WI, CTX, *C, LogStream)),
-          RT(RegisterPressureTracker(BB, RPE, FRPE, VSA, WI, CTX, C, LogStream)) {
+        : BB(BB), C(*C), CTX(CTX), VSA(VSA), RCA(RCA), LogStream(LogStream),
+          G(DepGraph(BB, RPE, FRPE, VSA, RCA, WI, CTX, *C, LogStream)),
+          RT(RegisterPressureTracker(BB, RPE, FRPE, VSA, RCA, WI, CTX, C, LogStream)) {
       // init ready list
       for (auto &Node : G.InstNodes) {
         if (Node.Preds.empty()) {
@@ -1385,7 +1649,7 @@ private:
     // Copy constructor for Schedule
     Schedule(const Schedule &S)
         : LogStream(S.LogStream), RT(S.RT), // RT is copyable
-          BB(S.BB), C(S.C), CTX(S.CTX), VSA(S.VSA), Handicapped(S.Handicapped), GreedyRP(S.GreedyRP),
+          BB(S.BB), C(S.C), CTX(S.CTX), VSA(S.VSA), RCA(S.RCA), Handicapped(S.Handicapped), GreedyRP(S.GreedyRP),
           GreedyMW(S.GreedyMW), RegpressureWasCritical(S.RegpressureWasCritical), RefLiveIntervals(S.RefLiveIntervals) {
       G.InstNodes.reserve(S.G.InstNodes.size());
       G.DepEdges.reserve(S.G.DepEdges.size());
@@ -1431,8 +1695,8 @@ private:
 
       InstructionNode *Node = std::get<0>(ChosenNode);
       bool CanClone = std::get<1>(ChosenNode);
-      if (!GreedyMW && CanClone) {
-        bool NeedToClone = needToClone(Node);
+      if (CanClone) {
+        bool NeedToClone = needToClone(Node, !GreedyMW);
         if (NeedToClone) {
           Checkpoint = std::make_unique<Schedule>(*this);
           Checkpoint->addHandicapped(Node->I, RT.getCurrentPressure());
@@ -1446,6 +1710,7 @@ private:
 
       ScheduledList.push_back(Node);
       RT.update(Node->I);
+      MaxRegpressure = std::max(MaxRegpressure, RT.getCurrentPressure());
       if (RT.isRegpressureCritical()) {
         RegpressureWasCritical = true;
       }
@@ -1463,18 +1728,6 @@ private:
         }
       }
 
-      for (auto &Node : G.InstNodes) {
-        if (Node.Preds.empty()) {
-          bool IsInReadyList = std::find(ReadyList.begin(), ReadyList.end(), &Node) != ReadyList.end();
-          bool IsInImmediateReadyList =
-              std::find(ImmediateReadyList.begin(), ImmediateReadyList.end(), &Node) != ImmediateReadyList.end();
-          if (!IsInReadyList && !IsInImmediateReadyList) {
-            IGC_ASSERT(std::find(ScheduledList.begin(), ScheduledList.end(), &Node) != ScheduledList.end());
-          }
-        }
-      }
-
-      IGC_ASSERT(ReadyList.size() + ImmediateReadyList.size() > 0 || ScheduledList.size() == G.InstNodes.size());
 
       return std::move(Checkpoint);
     }
@@ -1484,6 +1737,10 @@ private:
     bool canHaveSpills() { return RT.isRegpressureCritical(); }
 
     bool canEverHaveSpills() { return RegpressureWasCritical; }
+
+    int32_t getMaxRegpressure() { return MaxRegpressure; }
+
+    bool isEqualGreedyRP() { return GreedyRP || AllInstructionsScheduledByRP; }
 
     void setGreedyRP(bool Greedy) { GreedyRP = Greedy; }
 
@@ -1561,6 +1818,7 @@ private:
     BasicBlock *BB;
     SchedulingConfig &C;
     VectorShuffleAnalysis *VSA;
+    RematChainsAnalysis *RCA;
     CodeGenContext *CTX;
 
     InstNodePtrList ScheduledList;
@@ -1574,6 +1832,8 @@ private:
     bool GreedyRP = false;
     bool GreedyMW = false;
     bool RegpressureWasCritical = false;
+    bool AllInstructionsScheduledByRP = true;
+    int32_t MaxRegpressure = 0;
 
     DenseMap<Instruction *, int32_t> RefLiveIntervals;
 
@@ -1587,10 +1847,15 @@ private:
         // Sort in ascending order using RT->estimate(Node->I) as a key
         std::sort(Nodes.begin(), Nodes.end(),
                   [&](InstructionNode *A, InstructionNode *B) { return RT.estimate(A->I) < RT.estimate(B->I); });
-        auto LowestRP = RT.estimate(Nodes.front()->I);
+        int32_t LowestRP = RT.estimate(Nodes.front()->I);
         InstNodePtrList LowestRPNodes;
+        if (C[Option::AllowLargerRPWindowRPThreshold] > 0 &&
+            LowestRP >= static_cast<int32_t>(C[Option::AllowLargerRPWindowRPThreshold])) {
+            // If the lowest RP is larger than the threshold, we can allow larger RP window
+            LowestRP += static_cast<int32_t>(C[Option::AllowLargerRPWindowSize]);
+        }
         for (InstructionNode *Node : Nodes) {
-          if (RT.estimate(Node->I) == LowestRP) {
+          if (RT.estimate(Node->I) <= LowestRP) {
             LowestRPNodes.push_back(Node);
           } else {
             break;
@@ -1643,7 +1908,8 @@ private:
           if (is2dBlockRead(Node->I)) {
             auto *VectorType = dyn_cast<IGCLLVM::FixedVectorType>(Node->I->getType());
             if (VectorType) {
-              if (VectorType->getNumElements() >= uint(C[Option::PrioritizeLargeBlockLoadsInRP])) {
+              if ((C[Option::PrioritizeLargeBlockLoadsInRP] > 0) &&
+                  (static_cast<int>(VectorType->getNumElements()) >= C[Option::PrioritizeLargeBlockLoadsInRP])) {
                 LargeBlockLoads.push_back(Node);
               }
             }
@@ -1655,14 +1921,88 @@ private:
         return Nodes;
       };
 
-      // experimental heuristic
-      auto getLoadsThatUnlockDPASes = [&](InstNodePtrList &Nodes) -> InstNodePtrList & {
+      auto getRealOpThroughVS = [&](Instruction *I) -> Instruction * {
+        Instruction *OpI = dyn_cast<Instruction>(RT.getRealOp(I));
+        if (!OpI) {
+          return nullptr;
+        }
+        auto *DV = VSA->getDestVector(OpI);
+        if (DV && DV->isVectorShuffle()) {
+          auto *SourceVec = dyn_cast<Instruction>(DV->getSourceVec());
+          if (!SourceVec) {
+            return nullptr;
+          }
+          return dyn_cast<Instruction>(RT.getRealOp(SourceVec));
+        }
+        return OpI;
+      };
+
+      std::function<llvm::DenseSet<Value *>(Instruction *)> getRealUsesThroughVS;
+      getRealUsesThroughVS = [&](Instruction *I) -> llvm::DenseSet<Value *> {
+        llvm::DenseSet<Value *> Uses;
+
+        std::function<void(Value *)> collectUses = [&](Value *V) {
+          for (auto *U : RT.getRealUses(V)) {
+            auto *DV = VSA->getDestVector(U);
+            if (DV && DV->isVectorShuffle()) {
+              collectUses(DV->getLastIE());
+            } else {
+              Uses.insert(U);
+            }
+          }
+        };
+
+        collectUses(I);
+        return Uses;
+      };
+
+      std::function<llvm::DenseSet<Value *>(Instruction *)> getRealUsesThroughRematChains;
+      getRealUsesThroughRematChains = [&](Instruction *I) -> llvm::DenseSet<Value *> {
+        llvm::DenseSet<Value *> Uses;
+
+        std::function<void(Value *)> collectUses = [&](Value *V) {
+          for (auto *U : RT.getRealUses(V)) {
+            auto *RematChainPattern = RCA->getRematChainPattern(U);
+            if (RematChainPattern) {
+              // If the use is a remat chain, collect the last instruction in the chain
+              Uses.insert(RematChainPattern->getRematTargetInst());
+            } else {
+              Uses.insert(U);
+            }
+          }
+        };
+
+        collectUses(I);
+        return Uses;
+      };
+
+      auto getLoadsThatUnlockDPASes = [&](InstNodePtrList &Nodes, uint MaxLoadSize) -> InstNodePtrList & {
+        // We first prioritize the DPASes that don't increase regpressure
+        // if there are loads that unlock these DPASes - filter out all ther instructions
+        // But if there are no DPASes that don't increase regpressure
+        // - we can also consider the ones that do increase
+
+        auto getLoadWidth = [&](Instruction *I) -> uint {
+          if (GenIntrinsicInst *Intr = dyn_cast<GenIntrinsicInst>(I)) {
+            if (Intr->getIntrinsicID() == GenISAIntrinsic::GenISA_LSC2DBlockRead ||
+                Intr->getIntrinsicID() == GenISAIntrinsic::GenISA_LSC2DBlockReadAddrPayload) {
+              auto VectorType = dyn_cast<IGCLLVM::FixedVectorType>(Intr->getType());
+              if (VectorType) {
+                return VectorType->getNumElements();
+              }
+            }
+          }
+          return 0;
+        };
+
         InstNodePtrList LoadsThatUnlockDPASes;
+        InstNodePtrList LoadsThatUnlockDPASesNoRPIncreasing;
+
         for (InstructionNode *Node : Nodes) {
-          if (!is2dBlockRead(Node->I)) {
+          if (!is2dBlockRead(Node->I) || getLoadWidth(Node->I) > MaxLoadSize) {
             continue;
           }
-          for (auto *U : RT.getRealUses(Node->I)) {
+          for (auto *U : getRealUsesThroughVS(Node->I)) {
             auto *I = dyn_cast<Instruction>(U);
             if (!I) {
               continue;
@@ -1671,7 +2011,14 @@ private:
             if (isDPAS(I)) {
 
               bool OneOpIsDPAS = false;
-              uint NumOps = I->getNumOperands();
+              bool FirstOpIsZero = false;
+
+              auto *FirstOp = dyn_cast<Constant>(I->getOperand(0));
+              if (FirstOp && (isa<UndefValue>(FirstOp) || FirstOp->isNullValue())) {
+                FirstOpIsZero = true;
+              }
+
+              int NumOps = static_cast<int>(I->getNumOperands());
               for (auto &Op : I->operands()) {
                 Instruction *OpI = dyn_cast<Instruction>(Op.get());
                 if (!OpI) {
@@ -1683,32 +2030,239 @@ private:
                   if (OpI && isDPAS(OpI)) {
                     OneOpIsDPAS = true;
                   }
-                } else if (RT.getRealOp(OpI) == Node->I) {
+                } else if (getRealOpThroughVS(OpI) == Node->I) {
                   NumOps--;
                 }
               }
               if (NumOps == 0) {
                 LoadsThatUnlockDPASes.push_back(Node);
+                if (!FirstOpIsZero) {
+                  LoadsThatUnlockDPASesNoRPIncreasing.push_back(Node);
+                }
                 break;
               }
             }
           }
         }
-        if (LoadsThatUnlockDPASes.size() > 0) {
+
+        if (LoadsThatUnlockDPASesNoRPIncreasing.size() > 0) {
+          Nodes = std::move(LoadsThatUnlockDPASesNoRPIncreasing);
+        } else if (LoadsThatUnlockDPASes.size() > 0) {
           Nodes = std::move(LoadsThatUnlockDPASes);
         }
         return Nodes;
       };
 
-      auto getDPASIfExist = [&](InstNodePtrList &Nodes) -> InstNodePtrList & {
+      auto getDPASIfExist = [&](InstNodePtrList &Nodes, bool ForceDPAS = false) -> InstNodePtrList & {
         InstNodePtrList DPASNodes;
         for (InstructionNode *Node : Nodes) {
           if (isDPAS(Node->I)) {
             DPASNodes.push_back(Node);
           }
         }
-        if (DPASNodes.size() > 0) {
+        if (DPASNodes.size() > 0 || ForceDPAS) { // is ForceDPAS we can also return empty list
           Nodes = std::move(DPASNodes);
+        }
+        return Nodes;
+      };
+
+      auto isLargeLoad = [&](Instruction *I) -> bool {
+        if (GenIntrinsicInst *Intr = dyn_cast<GenIntrinsicInst>(I)) {
+          if (Intr->getIntrinsicID() == GenISAIntrinsic::GenISA_LSC2DBlockRead ||
+              Intr->getIntrinsicID() == GenISAIntrinsic::GenISA_LSC2DBlockReadAddrPayload) {
+            auto VectorType = dyn_cast<IGCLLVM::FixedVectorType>(Intr->getType());
+            if (VectorType) {
+              return static_cast<int>(VectorType->getNumElements()) >= static_cast<int>(C[Option::LargeBlockLoadSize]);
+            }
+          }
+        }
+        return false;
+      };
+
+      auto filterOutNotReadyRematInstructions = [&](InstNodePtrList &Nodes) -> InstNodePtrList & {
+        InstNodePtrList NonFilteredNodes;
+        for (InstructionNode *Node : Nodes) {
+          auto *RCP = RCA->getRematChainPattern(Node->I);
+          if (!RCP || (RCP->getLastInst() == Node->I)) {
+            NonFilteredNodes.push_back(Node);
+          } else {
+            // if the target instruction is not ready, we need to filter out the first remated instruction
+            bool IsReady = true;
+            Instruction *TargetInst = RCP->getRematTargetInst();
+            InstructionNode *TargetNode = G.InstToNode[TargetInst];
+            for (const auto &PN : TargetNode->Preds) {
+              IGC_ASSERT(!PN->Deleted);
+              if (PN->Src->I == RCP->getLastInst()) {
+                continue;
+              }
+              IsReady = false;
+              break;
+            }
+            if (IsReady) {
+              NonFilteredNodes.push_back(Node);
+            } else {
+              PrintDumpLevel(VerbosityLevel::High, "Filtering out not ready remat instruction: ");
+              PrintInstructionDumpLevel(VerbosityLevel::High, Node->I);
+            }
+          }
+        }
+        if (NonFilteredNodes.size() > 0) {
+          Nodes = std::move(NonFilteredNodes);
+        }
+        return Nodes;
+      };
+
+      auto filterOutNotReadyIcmp = [&](InstNodePtrList &Nodes) -> InstNodePtrList & {
+        // Heuristic in order not to put ICMP that is used by a select too early.
+        // Schedule it only when the select is ready
+
+        InstNodePtrList NonFilteredNodes;
+        for (InstructionNode *Node : Nodes) {
+          if (isa<ICmpInst>(Node->I)) {
+            bool IsReady = true;
+            User *U = IGCLLVM::getUniqueUndroppableUser(Node->I);
+            if (!U) {
+              NonFilteredNodes.push_back(Node);
+              continue;
+            }
+            SelectInst *SI = dyn_cast<SelectInst>(U);
+            if (!SI) {
+              NonFilteredNodes.push_back(Node);
+              continue;
+            }
+            // If the select instruction is not ready, we need to filter out the icmp instruction
+            InstructionNode *SelectNode = G.InstToNode[SI];
+            for (const auto &PN : SelectNode->Preds) {
+              if (PN->Src->I == Node->I) {
+                continue;
+              }
+              if (isa<Constant>(PN->Src->I) || isa<PHINode>(PN->Src->I)) {
+                continue;
+              }
+              Instruction *OpI = dyn_cast<Instruction>(PN->Src->I);
+              if (!OpI) {
+                continue;
+              }
+
+              if (!RT.inBBCurrent(OpI)) {
+                // if the instruction is in BBCurrent, then it is ready
+                IsReady = false;
+                break;
+              }
+            }
+            if (IsReady) {
+              NonFilteredNodes.push_back(Node);
+            }
+            // else it's filtered out, until the operand of the select is ready
+          }
+          else {
+            NonFilteredNodes.push_back(Node);
+          }
+        }
+        if (NonFilteredNodes.size() > 0) {
+          Nodes = std::move(NonFilteredNodes);
+        }
+        return Nodes;
+      };
+
+      auto focusLoadsOnOneDPAS = [&](InstNodePtrList &Nodes) -> InstNodePtrList & {
+        // If all Nodes are 2d block loads, choose the dpas user with the lowest initial number and filter out
+        // all the remaining loads. This is needed to avoid a situation when we schedule a lot of small loads first,
+        // but all the DPASes wait for some load that is in the end
+        if (Nodes.size() == 1) {
+          return Nodes;
+        }
+
+        InstNodePtrList NonFilteredNodes;
+        if (std::all_of(Nodes.begin(), Nodes.end(),
+                        [&](InstructionNode *Node) { return is2dBlockRead(Node->I); })) {
+
+          // Get the first DPAS user
+          InstructionNode *FirstDPASUser = nullptr;
+          for (InstructionNode *Node : Nodes) {
+            for (auto *U : getRealUsesThroughVS(Node->I)) {
+              auto *I = dyn_cast<Instruction>(U);
+              if (!I) {
+                continue;
+              }
+
+              if (isDPAS(I)) {
+                if (!FirstDPASUser || (G.InstToNode[I]->OriginalPosition < FirstDPASUser->OriginalPosition)) {
+                  FirstDPASUser = G.InstToNode[I];
+
+                  NonFilteredNodes = {Node};
+                } else if (G.InstToNode[I] == FirstDPASUser) {
+                  NonFilteredNodes.push_back(Node);
+                }
+              }
+            }
+          }
+
+          if (NonFilteredNodes.size() > 0) {
+            Nodes = std::move(NonFilteredNodes);
+          }
+        }
+
+        return Nodes;
+      };
+
+      auto filterOutNotUnblockingExistingVectorInst = [&](InstNodePtrList &Nodes) -> InstNodePtrList & {
+        // If some values are currently hanging because of creating a vector instruction out of scalars
+        // we prioritize the candidates that unblock the other elements of the vector
+
+        // This helps to resolve the issue when we schedule several IEs to the 0th element of different vectors
+        // increasing the regpressure, because the GRF space for the other elements is immediately reserved
+        // but the vectors are not fully populated and we can't use them
+
+        DenseSet<Instruction *> HangingElements = RT.getHangingS2VInstructions();
+        if (HangingElements.empty()) {
+          // If there are no hanging elements, we don't need to filter out anything
+          return Nodes;
+        }
+
+        InstNodePtrList NonFilteredNodes;
+        for (InstructionNode *Node : Nodes) {
+          if (HangingElements.count(Node->I) > 0) {
+            // If the instruction is already hanging, we don't need to filter it out
+            NonFilteredNodes.push_back(Node);
+            continue;
+          }
+          for (Value *V : getRealUsesThroughRematChains(Node->I)) {
+            if (Instruction *I = dyn_cast<Instruction>(V)) {
+              if (HangingElements.count(I) > 0) {
+                NonFilteredNodes.push_back(Node);
+                break; // No need to check other uses, we already found a use that unblocks the vector
+              }
+            }
+          }
+        }
+        if (NonFilteredNodes.size() > 0) {
+          Nodes = std::move(NonFilteredNodes);
+        }
+        return Nodes;
+      };
+
+      auto getMaxNumWaveAll = [&](InstNodePtrList &Nodes) -> InstNodePtrList & {
+        // Experimental heuristic: Add only maxnum (llvm.maxnum) and waveall instructions to the list
+        // The idea is that maxnum->waveall(max) is a common pattern
+        // that usually leads to decreasing the register pressure
+        // because all the lanes converge to the same value
+
+        InstNodePtrList NonFilteredNodes;
+        for (InstructionNode *Node : Nodes) {
+          if (GenIntrinsicInst *Intr = dyn_cast<GenIntrinsicInst>(Node->I)) {
+            if (Intr->getIntrinsicID() == GenISAIntrinsic::GenISA_WaveAll) {
+              NonFilteredNodes.push_back(Node);
+            }
+          }
+          else if (IntrinsicInst *Intr = llvm::dyn_cast<IntrinsicInst>(Node->I)) {
+            if (Intr->getIntrinsicID() == Intrinsic::maxnum) {
+              NonFilteredNodes.push_back(Node);
+            }
+          }
+        }
+        if (NonFilteredNodes.size() > 0) {
+          Nodes = std::move(NonFilteredNodes);
         }
         return Nodes;
       };
@@ -1719,15 +2273,79 @@ private:
 
       if (!ImmediateReadyList.empty()) {
         InstructionNode *Node = getFirstNode(ImmediateReadyList);
+
+        auto *DT = VSA->getDestVector(Node->I);
+        std::string VS_String = "   ";
+
+        // PrioritizeDPASOverImmediateVS heuristic: if we have an immediate ready instruction that is a DPAS,
+        // prioritize it over the immediate ready vector shuffle
+        // The idea is to put the DPAS in between the load and the load shuffle to hide latency
+        // because the vector shuffle forces waiting for the load to finish
+        if (C[Option::PrioritizeDPASAndOtherOverImmediateVS]) {
+          auto isAllowedInstruction = [&](Instruction *I) {
+            if (isa<BinaryOperator>(I)) {
+              return true;
+            }
+            if (isNoOpInst(I, CTX)) {
+              return true;
+            }
+            GenIntrinsicInst *Intr = dyn_cast<GenIntrinsicInst>(I);
+            if (!Intr) {
+              return false;
+            }
+            switch (Intr->getIntrinsicID()) {
+            case GenISAIntrinsic::GenISA_LSC2DBlockPrefetch:
+            case GenISAIntrinsic::GenISA_LSC2DBlockPrefetchAddrPayload:
+            case GenISAIntrinsic::GenISA_LSC2DBlockSetAddrPayloadField:
+              return true;
+            default:
+              return isDPAS(I);
+            }
+          };
+          auto getAllowedInstructions = [&](InstNodePtrList &Nodes) -> InstNodePtrList & {
+            InstNodePtrList AllowedNodes;
+            for (InstructionNode *Node : Nodes) {
+              if (isAllowedInstruction(Node->I)) {
+                AllowedNodes.push_back(Node);
+              }
+            }
+            Nodes = std::move(AllowedNodes);
+            return Nodes;
+          };
+
+          if (DT && DT->isVectorShuffle() && !DT->isNoOp() && !ReadyList.empty() && !ScheduledList.empty() &&
+              (is2dBlockRead(ScheduledList.back()->I) || isAllowedInstruction(ScheduledList.back()->I))) {
+            InstructionNode *OriginalImmediateNode = Node;
+
+            // Try to put a DPAS in between the load and the load shuffle
+            InstNodePtrList TempReadyList = ReadyList;
+            TempReadyList = getAllowedInstructions(TempReadyList);
+            if (!TempReadyList.empty()) {
+              TempReadyList = getLowestRegpressureNodes(TempReadyList);
+              TempReadyList = getMaxWeightNodes(TempReadyList, RT.isRegpressureHigh() || GreedyRP);
+              Node = getFirstNode(TempReadyList);
+              if (RT.estimate(Node->I) > C[Option::PrioritizeOverImmediateVSMaxRPInBytes]) {
+                Node = OriginalImmediateNode;
+              }
+              if (Node != OriginalImmediateNode) {
+                DT = nullptr;
+                VS_String = "DPH"; // DPAS heuristic
+              }
+            }
+          }
+        }
+
         std::string Info = std::to_string(RT.getCurrentPressure()) + ", " + std::to_string(RT.estimate(Node->I));
         Info.resize(11, ' ');
         Info = "(" + Info + ") Im: ";
         Info.resize(20, ' ');
 
-        auto *DT = VSA->getDestVector(Node->I);
         auto *V2SP = VSA->getVectorToScalarsPattern(Node->I);
+        auto *RCP = RCA->getRematChainPattern(Node->I);
 
-        std::string VS_String = "   ";
+        if (RCP) {
+          VS_String = "REM";
+        }
         if (DT && DT->isVectorShuffle()) {
           VS_String = "VS ";
         }
@@ -1754,6 +2372,11 @@ private:
 
         IGC_ASSERT(ReadyList.size() > 0);
 
+        PrintDumpLevel(VerbosityLevel::Medium, "Choosing from the ready list:\n");
+        for (InstructionNode *N : ReadyList) {
+          PrintInstructionDumpLevel(VerbosityLevel::Medium, N->I);
+        }
+
         // Filter ReadyList so that only if the instruction is Handicapped
         // It will remain only if the current regpressure is lower that the Handicapped value
         InstNodePtrList FilteredReadyList;
@@ -1772,6 +2395,9 @@ private:
           CanClone = false;
         }
 
+        FilteredReadyList = filterOutNotReadyRematInstructions(FilteredReadyList);
+        FilteredReadyList = filterOutNotReadyIcmp(FilteredReadyList);
+
         IGC_ASSERT(FilteredReadyList.size() > 0);
 
         bool ChooseByRP = RT.isRegpressureHigh() || GreedyRP;
@@ -1786,8 +2412,13 @@ private:
           // regpressure, if several, choose the one with the least OriginalPosition
           FilteredReadyList = getMaxWeightNodes(FilteredReadyList);
           FilteredReadyList = getLowestRegpressureNodes(FilteredReadyList);
+          if (C[Option::FocusLoadsOnOneDPAS]) {
+            FilteredReadyList = focusLoadsOnOneDPAS(FilteredReadyList);
+          }
           Node = getFirstNode(FilteredReadyList);
-          ChooseByRP = RT.isRegpressureHigh(Node->I);
+          bool IsRegpressureCritical = RT.isRegpressureCritical(Node->I);
+          CanClone = RT.isRegpressureHigh(Node->I) || isLargeLoad(Node->I);
+          ChooseByRP = IsRegpressureCritical;
           FilteredReadyList = OrigFilteredReadyList;
         }
 
@@ -1803,14 +2434,30 @@ private:
             FilteredReadyList = getLargeBlockLoadsIfExist(FilteredReadyList);
           }
 
+          if (C[Option::PrioritizeMaxnumWaveallHighRP]) {
+            FilteredReadyList = getMaxNumWaveAll(FilteredReadyList);
+          }
           if (C[Option::PrioritizeDPASHighRP]) {
             // Experimental heuristic: prioritize DPAS and the instructions that make it possible to
             // schedule DPAS earlier
-            FilteredReadyList = getDPASIfExist(FilteredReadyList);
-            FilteredReadyList = getLoadsThatUnlockDPASes(FilteredReadyList);
+            FilteredReadyList = getDPASIfExist(FilteredReadyList, false);
+          }
+          if (C[Option::PrioritizeLoadsThatUnlockDPASesHighRP]) {
+            // Experimental heuristic: prioritize loads that unlock
+            // DPASes
+            FilteredReadyList = getLoadsThatUnlockDPASes(FilteredReadyList,
+                                                         C[Option::PrioritizeLoadsThatUnlockDPASesHighRP_MaxLoadSize]);
+          }
+          if (C[Option::PrioritizePopulatingOneVectorHighRP]) {
+            FilteredReadyList = filterOutNotUnblockingExistingVectorInst(FilteredReadyList);
           }
 
           FilteredReadyList = getLowestRegpressureNodes(FilteredReadyList);
+
+          if (C[Option::FocusLoadsOnOneDPAS]) {
+            FilteredReadyList = focusLoadsOnOneDPAS(FilteredReadyList);
+          }
+
           // If we have several nodes with the same regpressure, choose the one with the highest MaxWeight
           FilteredReadyList = getMaxWeightNodes(FilteredReadyList, C[Option::UseHighRPWeight] == 1);
 
@@ -1819,8 +2466,15 @@ private:
           // Don't clone if we are choosing by RP
           CanClone = false;
         }
+
+#ifdef _DEBUG
         IGC_ASSERT(std::find(ReadyList.begin(), ReadyList.end(), Node) != ReadyList.end());
+#endif
         IGC_ASSERT(Node != nullptr);
+
+        if (!ChooseByRP) {
+          AllInstructionsScheduledByRP = false;
+        }
 
         // Dump the info
         std::string Info = std::to_string(RT.getCurrentPressure()) + ", " + std::to_string(RT.estimate(Node->I));
@@ -1841,7 +2495,7 @@ private:
           VS_String = "NOP";
         }
 
-        Info += VS_String + "   ";
+        Info += VS_String + (CanClone ? " * " : "   ");
 
         PrintDump(Info);
         Node->print(*LogStream);
@@ -1850,7 +2504,7 @@ private:
       }
     }
 
-    bool needToClone(InstructionNode *Node) {
+    bool needToClone(InstructionNode *Node, bool checkMinInterval = true) {
       if (!is2dBlockRead(Node->I)) {
         return false;
       }
@@ -1859,7 +2513,11 @@ private:
         return false;
       }
 
-      return RefLiveIntervals[Node->I] > C[Option::MinLiveIntervalForCloning];
+      if (checkMinInterval) {
+        return RefLiveIntervals[Node->I] > C[Option::MinLiveIntervalForCloning];
+      }
+
+      return true;
     }
   };
 };
@@ -1905,6 +2563,7 @@ bool CodeScheduling::runOnFunction(Function &F) {
   // AA = &getAnalysis<AAResultsWrapperPass>().getAAResults();
   AA = nullptr; // using alias information is not supported yet
   VSA = &getAnalysis<VectorShuffleAnalysis>();
+  RCA = &getAnalysis<RematChainsAnalysis>();
   RPE = &getAnalysis<IGCLivenessAnalysis>();
   FRPE = &getAnalysis<IGCFunctionExternalRegPressureAnalysis>();
   WI = &FRPE->getWIAnalysis(&F);
@@ -1915,7 +2574,7 @@ bool CodeScheduling::runOnFunction(Function &F) {
     if (!std::any_of(BB.begin(), BB.end(), [](Instruction &I) { return isDPAS(&I); }))
       continue;
 
-    BBScheduler Scheduler(&BB, RPE, FRPE, AA, VSA, CTX, &Config, LogStream);
+    BBScheduler Scheduler(&BB, RPE, FRPE, AA, VSA, RCA, CTX, &Config, LogStream);
     Changed |= Scheduler.schedule();
   }
 

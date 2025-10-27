@@ -127,7 +127,7 @@ private:
     llvm::LLVMContext &ctx = module.getContext();
     std::string funcName = GetName(overloadedTypes, overloadedPointeeTys);
     llvm::FunctionType *pFuncType = GetType(ctx, overloadedTypes);
-    llvm::AttributeList attribs = GetAttributeList(ctx, overloadedPointeeTys);
+    llvm::AttributeList attribs = GetAttributeList(module, overloadedPointeeTys);
     // There can never be multiple globals with the same name of different types,
     // because intrinsics must be a specific type.
     IGCLLVM::Module &M = static_cast<IGCLLVM::Module &>(module);
@@ -194,10 +194,12 @@ private:
     return llvm::FunctionType::get(resultTy, argTys, false);
   }
 
-  static llvm::AttributeList GetAttributeList(llvm::LLVMContext &ctx,
+  static llvm::AttributeList GetAttributeList(llvm::Module &M,
                                               const llvm::ArrayRef<llvm::Type *> &overloadedPointeeTys) {
+    auto &ctx = M.getContext();
     // 1. Instantiate regular attributes for the given intrinsic
-    constexpr auto &attributeKinds = IntrinsicDefinitionT::scAttributeKinds;
+    llvm::ArrayRef<llvm::Attribute::AttrKind> attributeKinds = IntrinsicDefinitionT::scAttributeKinds;
+
     auto mainAttrList = llvm::AttributeList::get(ctx, llvm::AttributeList::FunctionIndex, attributeKinds);
     // 2. Gather the memory attribute(s) in a separate routine
     auto memoryAB = IntrinsicDefinitionT::scMemoryEffects.getAsAttrBuilder(ctx);

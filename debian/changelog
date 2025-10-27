@@ -1,3 +1,11 @@
+intel-graphics-compiler2 (2.18.5-1) unstable; urgency=medium
+
+  * New upstream release
+  * rules: remove LTO strip
+  * patches: add disable_warnings_as_errors.patch
+
+ -- Pavel Androniychuk <pavel.androniychuk@intel.com>  Tue, 14 Oct 2025 11:57:13 -0700
+
 intel-graphics-compiler2 (2.16.0-2) unstable; urgency=medium
 
   * rules: Fix broken buildflags.

@@ -1116,18 +1116,17 @@ public:
 class ContinuationHLIntrinsic : public GenIntrinsicInst {
 public:
   // Methods for support type inquiry through isa, cast, and dyn_cast:
-  static inline bool classof(const GenIntrinsicInst *I) {
-    GenISAIntrinsic::ID ID = I->getIntrinsicID();
+  static inline bool classof(const GenIntrinsicInst *I) { return classof(I->getIntrinsicID()); }
+
+  static inline bool classof(GenISAIntrinsic::ID ID) {
     switch (ID) {
     case GenISAIntrinsic::GenISA_TraceRayAsyncHL:
     case GenISAIntrinsic::GenISA_CallShaderHL:
     case GenISAIntrinsic::GenISA_SyncDispatchRaysSplitPoint:
       return true;
     default:
-      break;
+      return false;
     }
-
-    return false;
   }
 
   static inline bool classof(const Value *V) { return isa<GenIntrinsicInst>(V) && classof(cast<GenIntrinsicInst>(V)); }
@@ -1754,6 +1753,7 @@ public:
   static inline bool classof(const Value *V) { return isa<GenIntrinsicInst>(V) && classof(cast<GenIntrinsicInst>(V)); }
 
   Function *getContinuationFn() const { return cast<Function>(getOperand(0)->stripPointerCasts()); }
+  uint32_t getContinuationID() const { return (uint32_t)cast<ConstantInt>(getOperand(1))->getZExtValue(); }
 };
 
 class PayloadPtrIntrinsic : public GenIntrinsicInst {

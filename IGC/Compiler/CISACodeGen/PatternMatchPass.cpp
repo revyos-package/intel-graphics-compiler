@@ -2418,9 +2418,6 @@ bool CodeGenPatternMatch::MatchImmOffsetLSC(llvm::Instruction &I) {
 
     llvm::Value *varOffset = isConstant0 ? addSubInst->getOperand(1) : addSubInst->getOperand(0);
 
-    if (!isA64AddressingModel && m_ctx->type != ShaderType::OPENCL_SHADER && IGC_GET_FLAG_VALUE(LscImmOffsMatch) < 2)
-      return false;
-
     // HW does an early bounds check on varOffset for A32 messages. Thus, if varOffset
     // is negative, then the bounds check fails early even though the immediate offset
     // would bring the final calculation to a positive number.
@@ -3536,6 +3533,7 @@ bool CodeGenPatternMatch::MatchCanonicalizeInstruction(llvm::Instruction &I) {
 }
 
 bool CodeGenPatternMatch::MatchBranch(llvm::BranchInst &I) {
+  using namespace llvm::PatternMatch;
   struct CondBrInstPattern : Pattern {
     SSource cond;
     llvm::BranchInst *inst;
@@ -3553,9 +3551,24 @@ bool CodeGenPatternMatch::MatchBranch(llvm::BranchInst &I) {
   pattern->inst = &I;
 
   if (!I.isUnconditional()) {
+    Value *orSrc0 = nullptr;
+    Value *orSrc1 = nullptr;
     Value *cond = I.getCondition();
     if (dyn_cast<GenIntrinsicInst>(cond, GenISAIntrinsic::GenISA_UpdateDiscardMask)) {
       pattern->isDiscardBranch = true;
+    } else if (match(cond, m_Or(m_Value(orSrc0), m_Value(orSrc1)))) {
+      // %6 = call i1 @llvm.genx.GenISA.UpdateDiscardMask(i1 %0, i1 %2)
+      // %7 = or i1 %6, %2  (or: %7 = or i1 %2, %6)
+      // br i1 %7, label %DiscardRet, label %PostDiscard
+      if (auto intr = dyn_cast<GenIntrinsicInst>(orSrc0, GenISAIntrinsic::GenISA_UpdateDiscardMask)) {
+        if (intr->getOperand(1) == orSrc1) {
+          pattern->isDiscardBranch = true;
+        }
+      } else if (auto intr = dyn_cast<GenIntrinsicInst>(orSrc1, GenISAIntrinsic::GenISA_UpdateDiscardMask)) {
+        if (intr->getOperand(1) == orSrc0) {
+          pattern->isDiscardBranch = true;
+        }
+      }
     }
     pattern->cond = GetSource(I.getCondition(), false, false, IsSourceOfSample(&I));
   }
@@ -4935,31 +4948,7 @@ bool CodeGenPatternMatch::MatchWaveShuffleIndex(llvm::GenIntrinsicInst &I) {
 }
 
 bool CodeGenPatternMatch::MatchWaveInstruction(llvm::GenIntrinsicInst &I) {
-  unsigned int helperLaneIndex = 0;
-  switch (I.getIntrinsicID()) {
-  case GenISAIntrinsic::GenISA_WaveAll:
-  case GenISAIntrinsic::GenISA_WaveClusteredBallot:
-    helperLaneIndex = 2;
-    break;
-  case GenISAIntrinsic::GenISA_WaveBallot:
-  case GenISAIntrinsic::GenISA_WaveInverseBallot:
-    helperLaneIndex = 1;
-    break;
-  case GenISAIntrinsic::GenISA_WaveInterleave:
-  case GenISAIntrinsic::GenISA_WaveClustered:
-  case GenISAIntrinsic::GenISA_WaveClusteredPrefix:
-    helperLaneIndex = 3;
-    break;
-  case GenISAIntrinsic::GenISA_WavePrefix:
-  case GenISAIntrinsic::GenISA_WaveClusteredInterleave:
-    helperLaneIndex = 4;
-    break;
-  default:
-    IGC_ASSERT(false);
-    break;
-  }
-  auto helperLaneMode = cast<ConstantInt>(I.getArgOperand(helperLaneIndex));
-  if (int_cast<int>(helperLaneMode->getSExtValue()) == 1) {
+  if (subgroupIntrinsicHasHelperLanes(I)) {
     m_NeedVMask = true;
   }
   return MatchSingleInstruction(I);

@@ -614,10 +614,13 @@ void CShader::AllocateNOSConstants(uint &offset) {
   offset += m_State.m_NOSBufferSize;
 }
 
-CVariable *CShader::CreateFunctionSymbol(llvm::Function *pFunc) {
+CVariable *CShader::CreateFunctionSymbol(llvm::Function *pFunc, StringRef symbolName) {
   // Functions with uses in this module requires relocation
   CVariable *funcAddr = GetSymbol(pFunc);
   std::string funcName = pFunc->getName().str();
+  if (!symbolName.empty()) {
+    funcName = symbolName.str();
+  }
   encoder.AddVISASymbol(funcName, funcAddr);
   encoder.Push();
 
@@ -3360,6 +3363,21 @@ CVariable *CShader::GetNewAlias(CVariable *var, uint16_t numInstances) {
   IGC_ASSERT(numInstances > 1);
   CVariable *alias = new (Allocator) CVariable(var, numInstances);
   encoder.CreateVISAVar(alias);
+  return alias;
+}
+
+CVariable *CShader::GetNewAliasWithAliasOffset(CVariable *var) {
+  IGC_ASSERT_MESSAGE(false == var->IsImmediate(), "Trying to create an alias of an immediate");
+  CVariable *rootVar = var->GetAlias();
+  uint32_t offset = var->GetAliasOffset();
+  IGC_ASSERT(rootVar && offset > 0);
+  uint32_t rootSize = rootVar->GetSize();
+  uint32_t eltSize = var->GetElemSize();
+  uint32_t varSize = (rootSize > offset) ? rootSize - offset : 0;
+  uint16_t nelts = varSize / eltSize;
+  IGC_ASSERT_MESSAGE(nelts > 0, "Error: CVar has zero size!");
+  CVariable *alias = new (Allocator) CVariable(rootVar, var->GetType(), offset, nelts, var->IsUniform());
+  encoder.CreateVISAVar(alias, true);
   return alias;
 }
 

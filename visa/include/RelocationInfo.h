@@ -41,6 +41,7 @@ enum GenSymType {
 };
 
 /// GenSymEntry - An symbol table entry
+/// Deprecated, use ZESymEntry instead
 typedef struct {
   uint32_t s_type;   // The symbol's type
   size_t s_offset; // The binary offset of this symbol. This field is ignored
@@ -62,6 +63,7 @@ enum GenRelocType {
 };
 
 /// GenRelocEntry - An relocation table entry
+/// Deprecated, use ZERelocEntry instead
 typedef struct {
   uint32_t r_type;   // The relocation's type
   uint32_t r_offset; // The binary offset of the relocated target

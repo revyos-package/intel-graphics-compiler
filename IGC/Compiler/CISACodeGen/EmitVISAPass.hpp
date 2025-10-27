@@ -439,6 +439,7 @@ public:
                       uint32_t SrcSubRegOffset = 0, bool allowLargerSIMDSize = false, CVariable *predicate = nullptr);
   void emitConstantVector(CVariable *Dst, uint64_t value = 0);
   void emitCopyAll(CVariable *Dst, CVariable *Src, llvm::Type *Ty);
+  void emitCopyAllInstances(CVariable *Dst, CVariable *Src, llvm::Type *Ty);
 
   void emitPredicatedVectorCopy(CVariable *Dst, CVariable *Src, CVariable *pred);
   void emitPredicatedVectorSelect(CVariable *Dst, CVariable *Src0, CVariable *Src1, CVariable *pred);
@@ -652,7 +653,7 @@ public:
   CVariable *GetHalfExecutionMask();
   CVariable *UniformCopy(CVariable *var, bool doSub = false);
   CVariable *UniformCopy(CVariable *var, CVariable *&LaneOffset, CVariable *eMask = nullptr, bool doSub = false,
-                         bool safeGuard = false);
+                         bool safeGuard = false, CVariable *predicate = nullptr);
 
   // generate loop header to process sample instruction with varying resource/sampler
   bool ResourceLoopHeader(const CVariable *destination, ResourceDescriptor &resource, SamplerDescriptor &sampler,
@@ -977,8 +978,6 @@ private:
   bool hasA64WAEnable() const;
 
   bool shouldForceEarlyRecompile(IGCMD::MetaDataUtils *pMdUtils, llvm::Function *F);
-
-  bool shouldDropToSIMD16(IGCMD::MetaDataUtils *pMdUtils, llvm::Function *F);
 
   bool isHalfGRFReturn(CVariable *dst, SIMDMode simdMode);
 

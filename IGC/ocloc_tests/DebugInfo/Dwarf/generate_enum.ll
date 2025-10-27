@@ -1,6 +1,6 @@
 ;=========================== begin_copyright_notice ============================
 ;
-; Copyright (C) 2024 Intel Corporation
+; Copyright (C) 2024-2025 Intel Corporation
 ;
 ; SPDX-License-Identifier: MIT
 ;
@@ -10,12 +10,19 @@
 
 ; UNSUPPORTED: sys32
 
-; REQUIRES: regkeys, oneapi-readelf
+; REQUIRES: regkeys, oneapi-readelf, llvm-16-plus
 
-; RUN: llvm-as %s -o %t
+; LLVM with opaque pointers:
+; RUN: llvm-as -opaque-pointers=1 %s -o %t
+; RUN: ocloc compile -llvm_input -file %t -device dg2 -options "-g -cl-opt-disable -igc_opts 'EnableOpaquePointersBackend=1, ElfDumpEnable=1, DumpUseShorterName=0, DebugDumpNamePrefix=%t_'"
+; RUN: oneapi-readelf --debug-dump %t_OCL_simd32_foo.elf | FileCheck %s
+
+; LLVM with typed pointers:
+; RUN: llvm-as -opaque-pointers=0 %s -o %t
 ; RUN: ocloc compile -llvm_input -file %t -device dg2 -options "-g -cl-opt-disable -igc_opts 'ElfDumpEnable=1, DumpUseShorterName=0, DebugDumpNamePrefix=%t_'"
 ; RUN: oneapi-readelf --debug-dump %t_OCL_simd32_foo.elf | FileCheck %s
 
+; CHECK  DW_AT_name        : typeinfo name for main::'lambda'(sycl::_V1::handler&)::operator()(sycl::_V1::handler&) const::simple_kernel
 ; CHECK: DW_TAG_enumeration_type
 ; CHECK:   DW_AT_type        : {{.*}}
 ; CHECK:   DW_AT_name        : {{.*}}

@@ -8754,50 +8754,9 @@ int VISAKernelImpl::GetRelocations(RelocListType &relocs) {
         static_cast<uint32_t>(genOffset + reloc.getTargetOffset(*m_builder));
     relocs.emplace_back(reloc.getType(), offset, reloc.getSymbolName());
 
-    vASSERT((genOffset != UNDEFINED_GEN_OFFSET) && (offset > genOffset) &&
-           (offset < genOffset + BYTES_PER_INST));
+    vASSERT((genOffset != UNDEFINED_GEN_OFFSET) && (offset >= genOffset) &&
+            (offset < genOffset + BYTES_PER_INST));
   }
-  return VISA_SUCCESS;
-}
-
-int VISAKernelImpl::GetGenRelocEntryBuffer(void *&buffer,
-                                           unsigned int &byteSize,
-                                           unsigned int &numEntries) {
-  G4_Kernel::RelocationTableTy &reloc_table = m_kernel->getRelocationTable();
-  numEntries = reloc_table.size();
-  byteSize = sizeof(GenRelocEntry) * numEntries;
-
-  if (reloc_table.empty())
-    return VISA_SUCCESS;
-
-  // allocate the buffer for relocation table
-  buffer = allocCodeBlock(byteSize);
-
-  if (buffer == nullptr)
-    return VISA_FAILURE;
-
-  GenRelocEntry *buffer_p = (GenRelocEntry *)buffer;
-  for (const auto &reloc : reloc_table) {
-    auto inst = reloc.getInst();
-    buffer_p->r_type = reloc.getType();
-    buffer_p->r_offset = static_cast<uint32_t>(inst->getGenOffset()) +
-                         reloc.getTargetOffset(*m_builder);
-
-    vISA_ASSERT((buffer_p->r_offset >= inst->getGenOffset()) &&
-           (buffer_p->r_offset < inst->getGenOffset() + BYTES_PER_INST),
-            "Invalid relocation offset returned, offset must be within"
-            "the ISA instruction");
-
-    vISA_ASSERT(reloc.getSymbolName().size() <= MAX_SYMBOL_NAME_LENGTH,
-        "Relocation symbol name longer than MAX_SYMBOL_NAME_LENGTH");
-
-    // clean the buffer first
-    memset(buffer_p->r_symbol, 0, MAX_SYMBOL_NAME_LENGTH);
-    strcpy_s(buffer_p->r_symbol, MAX_SYMBOL_NAME_LENGTH,
-             reloc.getSymbolName().c_str());
-    ++buffer_p;
-  }
-
   return VISA_SUCCESS;
 }
 
@@ -9181,30 +9140,32 @@ int VISAKernelImpl::getDeclarationID(VISA_SurfaceVar *decl) const {
 
 int64_t VISAKernelImpl::getGenOffset() const {
   vASSERT(false == m_kernel->fg.empty());
-  auto &entryBB = *(*m_kernel->fg.begin());
+  int64_t entryPointOffset = UNDEFINED_GEN_OFFSET;
 
   // the offset of the first gen inst in this kernel/function
-  vASSERT(false == entryBB.empty());
-  auto inst = entryBB.begin();
-  while ((UNDEFINED_GEN_OFFSET == (*inst)->getGenOffset()) &&
-         (entryBB.end() != inst)) {
-    vASSERT((*inst)->isLabel());
-    ++inst;
+  for (auto *BB : m_kernel->fg) {
+    for (auto *inst : BB->getInstList()) {
+      if (inst->isLabel())
+        continue;
+      entryPointOffset = inst->getGenOffset();
+      break;
+    }
+    if (entryPointOffset != UNDEFINED_GEN_OFFSET)
+      break;
   }
- vASSERT(inst != entryBB.end());
+  vASSERT(UNDEFINED_GEN_OFFSET != entryPointOffset);
 
-  auto entryPointOffset = (*inst)->getGenOffset();
   return entryPointOffset;
 }
 
 int64_t VISAKernelImpl::getGenSize() const {
- vASSERT(false == m_kernel->fg.empty());
+  vASSERT(false == m_kernel->fg.empty());
   auto &lastBB = *(*m_kernel->fg.rbegin());
 
   // the offset of the last gen inst in this kernel/function
- vASSERT(false == lastBB.empty());
+  vASSERT(false == lastBB.empty());
   auto inst = lastBB.rbegin();
- vASSERT(UNDEFINED_GEN_OFFSET !=
+  vASSERT(UNDEFINED_GEN_OFFSET !=
          (*inst)->getGenOffset()); // expecting terminator
 
   auto size = (*inst)->getGenOffset();

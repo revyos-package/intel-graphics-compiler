@@ -185,6 +185,8 @@ public:
   CVariable *GetNewAlias(CVariable *var, VISA_Type type, uint16_t offset, uint16_t numElements, bool uniform);
   // Create a multi-instance alias of a single-instance variable.
   CVariable *GetNewAlias(CVariable *var, uint16_t numInstances);
+  // Create an alias whose genVar has non-zero alias offset (for inline asm)
+  CVariable *GetNewAliasWithAliasOffset(CVariable *var);
 
   // If BaseVar's type matches V's, return BaseVar; otherwise, create an new
   // alias CVariable to BaseVar. The newly-created alias CVariable's size
@@ -262,7 +264,7 @@ public:
   void CreateConstantBufferOutput(SKernelProgram *pKernelProgram) {
     m_State.CreateConstantBufferOutput(pKernelProgram);
   }
-  CVariable *CreateFunctionSymbol(llvm::Function *pFunc);
+  CVariable *CreateFunctionSymbol(llvm::Function *pFunc, StringRef symbolName = "");
   CVariable *CreateGlobalSymbol(llvm::GlobalVariable *pGlobal);
 
   CVariable *GetStructVariable(llvm::Value *v);
