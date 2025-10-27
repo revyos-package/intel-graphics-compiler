@@ -1,5 +1,5 @@
-version=4
+Version: 5
 
-opts="filenamemangle=s%(?:.*?)?(\d[\d.]*)\.tar\.gz%intel-graphics-compiler_$1.orig.tar.gz%" \
-   https://github.com/intel/intel-graphics-compiler/tags \
-   (?:.*?/)?v(\d[\d.]*)\.tar\.gz
+Template: Github
+Owner: intel
+Project: intel-graphics-compiler
