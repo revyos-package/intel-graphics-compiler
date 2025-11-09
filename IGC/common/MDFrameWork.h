@@ -324,6 +324,10 @@ enum class ShaderTypeMD
 
         // for continuations used in ReorderThread, this field indicates the maximum value of the coherence hint
         uint32_t NumCoherenceHintBits = 0;
+
+        // if the function was created by cloning another function
+        // this will contain the name of the original shader
+        std::string OriginatingShaderName;
     };
 
     struct ConstantAddress
@@ -361,6 +365,8 @@ enum class ShaderTypeMD
         bool globalIDPresent = false;
         // This is true if the function has any sync raytracing functionality
         bool hasSyncRTCalls = false;
+        bool hasPrintfCalls = false;
+        bool hasIndirectCalls = false;
 
         // Analysis result of if there are non-kernel-argument ld/st in the kernel
         bool hasNonKernelArgLoad = false;
@@ -437,6 +443,7 @@ enum class ShaderTypeMD
         bool BufferOffsetArgOptional                    = true;
         bool replaceGlobalOffsetsByZero                 = false;
         unsigned forcePixelShaderSIMDMode               = 0;
+        unsigned int forceTotalGRFNum                   = 0; // 0 means not forced
         bool pixelShaderDoNotAbortOnSpill               = false;
         bool UniformWGS                                 = false;
         bool disableVertexComponentPacking              = false;
@@ -504,7 +511,8 @@ enum class ShaderTypeMD
         bool DisableLoopUnroll                          = false;
         unsigned ForcePushConstantMode                  = 0;
         bool UseInstructionHoistingOptimization         = false;
-        bool DisableResourceLoopDestLifeTimeStart = false;
+        bool DisableResourceLoopDestLifeTimeStart       = false;
+        bool UseLinearScanRA                            = false;
     };
 
     enum class ThreadIDLayout

@@ -2160,6 +2160,53 @@ void CustomSafeOptPass::dp4WithIdentityMatrix(ExtractElementInst &I) {
     addI[2]->replaceAllUsesWith(builder.CreateNeg(sel3));
 }
 
+// Check if a new vector is constructed, and if so, replace operand in first insert to undef. This optimization is
+// similar to LLVM instcombine pass (InstCombinerImpl::SimplifyDemandedVectorElts). LLVM optimization is limited to
+// short vectors, where IGC must support larger vectors (16, 32 elements).
+void CustomSafeOptPass::visitInsertElementInst(llvm::InsertElementInst &I) {
+  using namespace llvm::PatternMatch;
+
+  auto *VType = dyn_cast<IGCLLVM::FixedVectorType>(I.getType());
+  if (!VType)
+    return;
+
+  auto VWidth = VType->getNumElements();
+  auto ElSize = VType->getElementType()->getPrimitiveSizeInBits();
+
+  // Optimize only vectors typical for DPAS src.
+  bool ValidVector = iSTD::IsPowerOfTwo(VWidth) &&
+                     ((ElSize == 8 && VWidth <= 32) || (ElSize == 16 && VWidth <= 16) || (ElSize == 32 && VWidth <= 8));
+  if (!ValidVector)
+    return;
+
+  // Pattern is matched bottom-up, starting from last IE in chain. Instructions are visited top-down, exit early if this
+  // is not the last IE in chain.
+  if (I.hasOneUse() && isa<InsertElementInst>(I.use_begin()->getUser()))
+    return;
+
+  Instruction *CurrentInst = &I, *NextInst = nullptr;
+  uint64_t Index = 0;
+  APInt VisitedMask(APInt::getZero(VWidth));
+
+  while (true) {
+
+    if (!match(CurrentInst, m_InsertElt(m_Instruction(NextInst), m_Value(), m_ConstantInt(Index))))
+      return;
+
+    VisitedMask.setBit(Index);
+
+    if (NextInst->hasOneUse() && NextInst->getOpcode() == Instruction::InsertElement) {
+      CurrentInst = NextInst;
+    } else {
+      if (VisitedMask.isAllOnesValue()) {
+        // All elements are inserted, so input vector is fully overwritten.
+        CurrentInst->setOperand(0, PoisonValue::get(VType));
+      }
+      return;
+    }
+  }
+}
+
 void CustomSafeOptPass::visitExtractElementInst(ExtractElementInst &I) {
   // convert:
   // %1 = lshr i32 %0, 16,
@@ -6206,11 +6253,12 @@ void InsertBranchOpt::ThreeWayLoadSpiltOpt(Function &F) {
 
 void InsertBranchOpt::atomicSplitOpt(Function &F, int mode) {
   enum Mode {
-    Disable = 0x0,          // Disabled IGC\EnableAtomicBranch = 0x0
-    ZeroAdd = BIT(0),       // Enabled IGC\EnableAtomicBranch = 0x1
-    UMax = BIT(1),          // Enabled IGC\EnableAtomicBranch = 0x2
-    UMin = BIT(2),          // Enabled IGC\EnableAtomicBranch = 0x4
-    UntypedUgmLoad = BIT(3) // Enabled IGC\EnableAtomicBranch = 0x8
+    Disable         = 0x0,    // Disabled IGC\EnableAtomicBranch = 0x0
+    ZeroAdd         = BIT(0), // Enabled IGC\EnableAtomicBranch = 0x1
+    UMax            = BIT(1), // Enabled IGC\EnableAtomicBranch = 0x2
+    UMin            = BIT(2), // Enabled IGC\EnableAtomicBranch = 0x4
+    UntypedUgmLoad  = BIT(3), // Enabled IGC\EnableAtomicBranch = 0x8
+    StatelessAtomic = BIT(4)  // Enabled IGC\EnableAtomicBranch = 0x10
   };
 
   // Allow several modes to be applied
@@ -6218,6 +6266,7 @@ void InsertBranchOpt::atomicSplitOpt(Function &F, int mode) {
   const bool umaxMode = ((mode & UMax) == UMax);
   const bool uminMode = ((mode & UMin) == UMin);
   const bool untypedUgmLoadMode = ((mode & UntypedUgmLoad) == UntypedUgmLoad);
+  const bool statelessMode = ((mode & StatelessAtomic ) == StatelessAtomic);
 
   auto createReadFromAtomic = [=](IRBuilder<> &builder, Instruction *inst, bool isTyped) {
     Constant *zero = ConstantInt::get(inst->getType(), 0);
@@ -6234,7 +6283,15 @@ void InsertBranchOpt::atomicSplitOpt(Function &F, int mode) {
       ld_FunctionArgList[3] = inst->getOperand(3);
       ld_FunctionArgList[4] = zero;
       NewInst = builder.CreateCall(pLdIntrinsic, ld_FunctionArgList);
-    } else {
+    }
+    // Stateless atomic
+    else if ( (dyn_cast<GenIntrinsicInst>(inst))->getIntrinsicID() == GenISAIntrinsic::GenISA_intatomicrawA64 )
+    {
+      NewInst = builder.CreateLoad( inst->getType(), inst->getOperand( 0 ) );
+      return NewInst;
+    }
+    else
+    {
       std::vector<Type *> types;
       std::vector<Value *> ld_FunctionArgList;
       Function *pLdIntrinsic;
@@ -6306,7 +6363,9 @@ void InsertBranchOpt::atomicSplitOpt(Function &F, int mode) {
         if (inst->getIntrinsicID() == GenISAIntrinsic::GenISA_intatomictyped) {
           src = dyn_cast<Instruction>(inst->getOperand(4));
           op = dyn_cast<ConstantInt>(inst->getOperand(5));
-        } else if (inst->getIntrinsicID() == GenISAIntrinsic::GenISA_intatomicraw) {
+        } else if (inst->getIntrinsicID() == GenISAIntrinsic::GenISA_intatomicraw ||
+                   (statelessMode && (inst->getIntrinsicID() == GenISAIntrinsic::GenISA_intatomicrawA64)
+                                  && (inst->getOperand(0) == inst->getOperand(1)))) {
           src = dyn_cast<Instruction>(inst->getOperand(2));
           op = dyn_cast<ConstantInt>(inst->getOperand(3));
         }

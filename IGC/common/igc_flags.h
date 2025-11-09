@@ -442,13 +442,12 @@ DECLARE_IGC_REGKEY(DWORD, SetLoopUnrollThreshold, 0,
 DECLARE_IGC_REGKEY(
     DWORD, SetLoopUnrollThresholdForHighRegPressure, 200,
     "Set the loop unroll threshold for shaders with high reg pressure.", false)
-DECLARE_IGC_REGKEY(DWORD, SetLoopUnrollMaxPercentThresholdBoostForHighRegPressure, 100,
+DECLARE_IGC_REGKEY(DWORD, SetLoopUnrollMaxPercentThresholdBoostForHighRegPressure, 400,
                    "Set the loop unroll max allowed threshold boost in percentage for shaders with high reg pressure. "
-                   "The LLVM internal value is 400. Setting 100 here because the cost model is currently based on "
-                   "latency instead of code size where the latter is what we need.",
+                   "The LLVM internal value is 400.",
                    false)
 DECLARE_IGC_REGKEY(
-    bool, EnablePromoteLoopUnrollwithAlloca, true,
+    bool, EnablePromoteLoopUnrollwithAlloca, false,
     "Loop cost estimation assumes Load/Store who accesses Alloca with index deductible to loop count having 0 cost. "
     "Disable this flag makes them always cost something as well as disables dynamic threshold increase based on the "
     "size of alloca and number of GEP to the alloca in the loop, leading to the loop less likely to be unrolled.",
@@ -964,6 +963,7 @@ DECLARE_IGC_REGKEY(DWORD, VectorizerDepWindowMultiplier, 2,
 DECLARE_IGC_REGKEY(bool, VectorizerCheckScalarizer, false, "Add scalariser after vectorizer to check performance", true)
 DECLARE_IGC_REGKEY(DWORD, VectorizerList, -1, "Vectorize only one seed instruction with the provided number", true)
 DECLARE_IGC_REGKEY(bool, EnableVectorEmitter, true, "Enable Vector Emission for a vectorizer", true)
+DECLARE_IGC_REGKEY(bool, VectorizerAllowI32, true, "Allow I32 versions of instructions inside vectorizer", true)
 DECLARE_IGC_REGKEY(bool, VectorizerAllowFPTRUNC, true, "Allow FPTRUNC instructions inside vectorizer", true)
 DECLARE_IGC_REGKEY(bool, VectorizerAllowFDIV, true, "Allow FDIV instructions inside vectorizer", true)
 DECLARE_IGC_REGKEY(bool, VectorizerAllowFMUL, true, "Allow FMUL instructions inside vectorizer", true)
@@ -972,8 +972,8 @@ DECLARE_IGC_REGKEY(bool, VectorizerAllowFSUB, true, "Allow FSUB instructions ins
 DECLARE_IGC_REGKEY(bool, VectorizerAllowEXP2, true, "Allow EXP2 instructions inside vectorizer", true)
 DECLARE_IGC_REGKEY(bool, VectorizerAllowMAXNUM, true, "Allow MAXNUM instructions inside vectorizer", true)
 DECLARE_IGC_REGKEY(bool, VectorizerAllowWAVEALL, false, "Allow WAVEALL instructions inside vectorizer", true)
-DECLARE_IGC_REGKEY(bool, VectorizerAllowCMP, false, "Allow CMP instructions inside vectorizer", true)
-DECLARE_IGC_REGKEY(bool, VectorizerAllowSelect, false, "Allow Select instructions inside vectorizer", true)
+DECLARE_IGC_REGKEY(bool, VectorizerAllowCMP, true, "Allow CMP instructions inside vectorizer", true)
+DECLARE_IGC_REGKEY(bool, VectorizerAllowSelect, true, "Allow Select instructions inside vectorizer", true)
 DECLARE_IGC_REGKEY(bool, VectorizerAllowFMADMatching, true,
                    "Allow FADD and FMUL instructions to be matched later in the pattern match pass", true)
 DECLARE_IGC_REGKEY(bool, VectorizerUniformValueVectorizationEnabled, true,
@@ -1546,6 +1546,7 @@ DECLARE_IGC_REGKEY(
     "Confine rematerialization only to variables within the same BB, we won't pull down values from predeccors", false)
 DECLARE_IGC_REGKEY(bool, RematRespectUniformity, false, "Cutoff computation chain on uniform values", false)
 DECLARE_IGC_REGKEY(bool, RematAllowExtractElement, true, "Allow Extract Element to computation chain", false)
+DECLARE_IGC_REGKEY(bool, RematDataAllowCMP, true, "Allow rematerialization of cmp instructions", true)
 DECLARE_IGC_REGKEY(bool, RematReassocBefore, false,
                    "Enable short sequence of passes before clone address arithmetic pass to potentially decrese amount "
                    "of operations that will be rematerialized",
@@ -1836,6 +1837,8 @@ DECLARE_IGC_REGKEY_BITMASK(UseNewInlineRaytracing, 4, "Use the new rayquery impl
                            NEW_INLINE_RAYTRACING_MASK, true)
 DECLARE_IGC_REGKEY(DWORD, AddDummySlotsForNewInlineRaytracing, 0,
                    "Add dummy rayquery slots when doing new inline raytracing", true)
+DECLARE_IGC_REGKEY(bool, UseCrossBlockLoadVectorizationForInlineRaytracing, false,
+                   "If enabled, will try to vectorize loads that are not adjacent to each other. May increase GRF pressure", true)
 DECLARE_IGC_REGKEY(bool, OverrideRayQueryThrottling, false,
                    "Force rayquery throttling (dynamic ray management) to be enabled or disabled. Default value of "
                    "this key is ignored",

@@ -1165,6 +1165,7 @@ class GraphColor {
                          unsigned execSize);
 
   void gatherScatterForbiddenWA();
+  void preAssignSpillHeader();
 
 public:
   void getExtraInterferenceInfo();
@@ -1312,7 +1313,6 @@ public:
     forbiddenVec[(size_t)forbiddenKind::FBD_SCALAR].resize(
         getForbiddenVectorSize(G4_SCALAR));
   };
-  ~ForbiddenRegs(){};
 
   unsigned getForbiddenVectorSize(G4_RegFileKind regKind) const;
   void generateReservedGRFForbidden(unsigned reserveSpillSize);
@@ -2194,9 +2194,10 @@ private:
     }
     return instNum;
   }
-  // pair of abort, updated GRFSpillFillCount
-  std::pair<bool, unsigned int> abortOnSpill(unsigned int GRFSpillFillCount,
-                                             GraphColor &coloring);
+  // tuple of abort, updated GRFSpillFillCount, updated spillSize
+  std::tuple<bool, unsigned int, unsigned int>
+  abortOnSpill(unsigned int GRFSpillFillCount, unsigned int spillSize,
+               GraphColor &coloring);
   void verifyNoInfCostSpill(GraphColor &coloring, bool reserveSpillReg);
   void setupA0Dot2OnSpill(bool hasStackCall, unsigned int nextSpillOffset,
                           int globalScratchOffset);

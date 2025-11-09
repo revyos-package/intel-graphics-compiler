@@ -4078,7 +4078,7 @@ void CEncoder::InitVISABuilderOptions(TARGET_PLATFORM VISAPlatform, bool canAbor
     SaveOption(vISA_Src1Src2OverlapWA, true);
   }
 
-  if (IGC_IS_FLAG_ENABLED(UseLinearScanRA)) {
+  if (!IGC_IS_FLAG_SET(UseLinearScanRA) && context->getModuleMetaData()->compOpt.UseLinearScanRA || IGC_IS_FLAG_ENABLED(UseLinearScanRA)) {
     SaveOption(vISA_LinearScan, true);
   }
 
@@ -5138,9 +5138,11 @@ void CEncoder::CreateFuncAttributeTable(VISAKernel *pMainKernel, GenXFunctionGro
     uint32_t spillMemPerThread =
         getSpillMemSizeWithFG(*F, jitInfo->stats.spillMemUsed, pFga, jitInfo->numBytesScratchGtpin);
     uint8_t hasRTCalls = (uint8_t)modMD->FuncMD[F].hasSyncRTCalls;
+    uint8_t hasPrintfCalls = (uint8_t)modMD->FuncMD[F].hasPrintfCalls;
+    uint8_t hasIndirectCalls = (uint8_t)modMD->FuncMD[F].hasIndirectCalls;
 
     attrs.emplace_back((uint8_t)isKernel, isExternal, barrierCount, privateMemPerThread, spillMemPerThread,
-                       F->getName().str(), hasRTCalls);
+                       F->getName().str(), hasRTCalls, hasPrintfCalls, hasIndirectCalls);
   }
 }
 

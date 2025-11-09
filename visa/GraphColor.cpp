@@ -2147,7 +2147,7 @@ bool GlobalRA::canIncreaseGRF(unsigned spillSize, bool infCostSpilled) {
   //  - #GRFs selected and next larger one has same number of threads, or
   //  - Spill size is above threshold
   if ((infCostSpilled || kernel.grfMode.hasLargerGRFSameThreads() ||
-       spillSize >= kernel.grfMode.getSpillThreshold()) &&
+       spillSize > kernel.grfMode.getSpillThreshold()) &&
       !didGRFIncrease) {
     if (kernel.updateKernelToLargerGRF()) {
       // GRF successfully increased
@@ -6763,7 +6763,7 @@ void GraphColor::removeConstrained() {
 void GraphColor::determineColorOrdering() {
   numColor = 0;
   if (liveAnalysis.livenessClass(G4_GRF))
-    numColor = totalGRFRegCount - reserveSpillGRFCount;
+    numColor = totalGRFRegCount;
   else if (liveAnalysis.livenessClass(G4_ADDRESS))
     numColor = builder.getNumAddrRegisters();
   else if (liveAnalysis.livenessClass(G4_FLAG))
@@ -7627,6 +7627,10 @@ bool GraphColor::regAlloc(bool doBankConflictReduction,
   //
   intf.init();
   intf.computeInterference();
+
+  if (reserveSpillGRFCount) {
+    preAssignSpillHeader();
+  }
 
   builder.getFreqInfoManager().initForRegAlloc(&liveAnalysis);
 
@@ -10917,6 +10921,49 @@ std::pair<unsigned, unsigned> GlobalRA::reserveGRFSpillReg(GraphColor &coloring)
   return std::make_pair(spillRegSize, indrSpillRegSize);
 }
 
+void GraphColor::preAssignSpillHeader() {
+  // If spill header is used for spill/fill offset, it must have infinite spill
+  // cost. When running fail safe RA, if we assign this range to middle of free
+  // GRF space, it could cause fragmentation and other spilled ranges may not
+  // get an allocation. So, we pre-assign this variable at first candidate GRF
+  // to avoid fragmentation. This is relevant only in fail safe RA iteration.
+  if (!builder.hasValidSpillFillHeader())
+    return;
+
+  std::vector<bool> FreeGRFs(kernel.getNumRegTotal(), true);
+  auto *spillHeader = builder.getSpillFillHeader();
+  if (spillHeader->getRegVar()->getPhyReg())
+    return;
+  unsigned spillHeaderId = spillHeader->getRootDeclare()->getRegVar()->getId();
+  // Compute free GRFs
+  const auto *intf = getIntf();
+  for (auto neighbor : intf->getSparseIntfForVar(spillHeaderId)) {
+    auto *neighborLR = getLiveRanges()[neighbor];
+    auto *neighborGRF = neighborLR->getPhyReg();
+    if (!neighborGRF)
+      continue;
+    unsigned int neighborGRFStart = neighborGRF->asGreg()->getRegNum();
+    unsigned int neighborLastGRF =
+        neighborGRFStart + neighborLR->getNumRegNeeded();
+    for (unsigned int i = neighborGRFStart; i != neighborLastGRF; ++i) {
+      FreeGRFs[i] = false;
+    }
+  }
+
+  // Find a GRF r1 onwards that can be pre-assigned to spillHeader.
+  // r0 is usually reserved.
+  for (unsigned int i = 1; i != FreeGRFs.size(); ++i) {
+    if (FreeGRFs[i]) {
+      // Attach assignment to temp LR and to G4_RegVar
+      getLiveRanges()[spillHeaderId]->setPhyReg(regPool.getGreg(i), 0);
+      spillHeader->getRegVar()->setPhyReg(regPool.getGreg(i), 0);
+      // Decrement counter as this is used later in determineColorOrdering
+      liveAnalysis.reduceNumUnassignedVar();
+      break;
+    }
+  }
+}
+
 // pre-allocate the bits for forbidden registers which will not be used in
 // register assignment.
 // Note that the order of the calls matters, as all RCs inherit from RESERVEDGRF
@@ -11302,31 +11349,31 @@ bool GlobalRA::convertToFailSafe(bool reserveSpillReg, GraphColor &coloring,
   return reserveSpillReg;
 }
 
-std::pair<bool, unsigned int>
-GlobalRA::abortOnSpill(unsigned int GRFSpillFillCount,
-                            GraphColor &coloring) {
+std::tuple<bool, unsigned int, unsigned int>
+GlobalRA::abortOnSpill(unsigned int GRFSpillFillCount, unsigned int spillSize,
+                       GraphColor &coloring) {
   // Calculate the spill caused by send to decide if global splitting is
   // required or not
   for (auto spilled : coloring.getSpilledLiveRanges()) {
     GRFSpillFillCount += spilled->getRefCount();
   }
 
+  spillSize += computeSpillSize(coloring.getSpilledLiveRanges());
+
   // vISA_AbortOnSpillThreshold is defined as [0..200]
   // where 0 means abort on any spill and 200 means never abort
-  auto underSpillThreshold = [this](int numSpill, int asmCount,
-                                    GraphColor &coloring) {
+  auto underSpillThreshold = [this](int numSpill, unsigned spillSize,
+                                    int asmCount, GraphColor &coloring) {
     int threshold = std::min(
         builder.getOptions()->getuInt32Option(vISA_AbortOnSpillThreshold),
         200u);
-    unsigned spillSize = computeSpillSize(coloring.getSpilledLiveRanges());
-
     return (numSpill * 200) < (threshold * asmCount) ||
            spillSize < kernel.grfMode.getSpillThreshold();
   };
 
   unsigned int instNum = instCount();
   bool isUnderThreshold =
-      underSpillThreshold(GRFSpillFillCount, instNum, coloring);
+      underSpillThreshold(GRFSpillFillCount, spillSize, instNum, coloring);
   isUnderThreshold = builder.getFreqInfoManager().underFreqSpillThreshold(
       coloring.getSpilledLiveRanges(), instNum, GRFSpillFillCount,
       isUnderThreshold);
@@ -11345,9 +11392,9 @@ GlobalRA::abortOnSpill(unsigned int GRFSpillFillCount,
       jitInfo->stats.numGRFSpillFillWeighted = GRFSpillFillCount;
     }
 
-    return std::make_pair(true, GRFSpillFillCount);
+    return std::make_tuple(true, GRFSpillFillCount, spillSize);
   }
-  return std::make_pair(false, GRFSpillFillCount);
+  return std::make_tuple(false, GRFSpillFillCount, spillSize);
 }
 
 unsigned GlobalRA::computeSpillSize(std::list<LSLiveRange *> &spilledLRs) {
@@ -11650,6 +11697,7 @@ int GlobalRA::coloringRegAlloc() {
       builder.getOption(vISA_SpillSpaceCompression);
 
   uint32_t GRFSpillFillCount = 0;
+  uint32_t spillSize = 0;
   if (builder.getFreqInfoManager().isFreqBasedSpillSelectionEnabled())
     builder.getFreqInfoManager().initGRFSpillFillFreq();
 
@@ -11803,8 +11851,8 @@ int GlobalRA::coloringRegAlloc() {
         VISA_DEBUG_VERBOSE(reportSpillInfo(liveAnalysis, coloring));
       }
 
-      std::tie(abort, GRFSpillFillCount) =
-          abortOnSpill(GRFSpillFillCount, coloring);
+      std::tie(abort, GRFSpillFillCount, spillSize) =
+          abortOnSpill(GRFSpillFillCount, spillSize, coloring);
       if (abort) {
         // Early exit when -abortonspill is passed, instead of
         // spending time inserting spill code and then aborting.
