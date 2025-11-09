@@ -1,0 +1,17 @@
+Description: disable NewPMPlugin
+Author: Han Gao <rabenda.cn@gmail.com>
+
+Last-Update: 2025-11-09
+
+--- intel-graphics-compiler2-2.22.2.orig/IGC/VectorCompiler/lib/PassPluginLibrary/CMakeLists.txt
++++ intel-graphics-compiler2-2.22.2/IGC/VectorCompiler/lib/PassPluginLibrary/CMakeLists.txt
+@@ -6,6 +6,9 @@
+ #
+ #============================ end_copyright_notice =============================
+ 
++# disable
++return()
++
+ if((${LLVM_VERSION_MAJOR} LESS 16))
+     return()
+ endif()

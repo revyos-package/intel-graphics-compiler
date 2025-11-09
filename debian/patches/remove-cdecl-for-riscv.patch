@@ -1,0 +1,28 @@
+From: https://github.com/AOSC-Dev/aosc-os-abbs/blob/c5478da15c8b634002855fa112b7b203cd396f90/app-devel/intel-graphics-compiler/autobuild/patches/0001-igc-support-loongarch64.patch.loongarch64
+Description: remove cdecl for riscv
+Author: Han Gao <rabenda.cn@gmail.com>
+
+Last-Update: 2025-11-09
+
+--- intel-graphics-compiler2-2.20.4.orig/IGC/common/ShaderOverride.cpp
++++ intel-graphics-compiler2-2.20.4/IGC/common/ShaderOverride.cpp
+@@ -44,7 +44,7 @@ static void *GetProcAddress(void *hModul
+ #if defined(WIN32)
+ #define CDECLATTRIBUTE __cdecl
+ #elif __GNUC__
+-#if defined(__x86_64__) || defined(__ARM_ARCH)
++#if defined(__x86_64__) || defined(__ARM_ARCH) || (defined(__riscv) && __riscv_xlen == 64)
+ #define CDECLATTRIBUTE
+ #else
+ #define CDECLATTRIBUTE __attribute__((__cdecl__))
+--- intel-graphics-compiler2-2.20.4.orig/visa/iga/IGALibrary/api/igad.h
++++ intel-graphics-compiler2-2.20.4/visa/iga/IGALibrary/api/igad.h
+@@ -19,6 +19,8 @@ SPDX-License-Identifier: MIT
+ #define CDECLATTRIBUTE
+ #elif defined(__ARM_ARCH)
+ #define CDECLATTRIBUTE
++#elif (defined(__riscv) && __riscv_xlen == 64)
++#define CDECLATTRIBUTE
+ #else
+ #define CDECLATTRIBUTE __attribute__((__cdecl__))
+ #endif

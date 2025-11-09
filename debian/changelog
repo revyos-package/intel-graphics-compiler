@@ -1,3 +1,13 @@
+intel-graphics-compiler2 (2.20.4-0revyos1) unstable; urgency=medium
+
+  * New upstream version 2.20.4
+  * Add riscv support
+  * Add remove-cdecl-for-riscv.patch
+  * Apply disable-NewPMPlugin.patch
+  * Update to llvm16
+
+ -- Han Gao <rabenda.cn@gmail.com>  Sun, 09 Nov 2025 17:59:58 +0800
+
 intel-graphics-compiler2 (2.18.5-1) unstable; urgency=medium
 
   [ Pavel Androniychuk ]
