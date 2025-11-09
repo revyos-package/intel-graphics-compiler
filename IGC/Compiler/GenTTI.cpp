@@ -318,8 +318,7 @@ void GenIntrinsicsTTIImpl::getUnrollingPreferences(Loop *L, ScalarEvolution &SE,
   //       It can potentially do some global cost estimations.
   const unsigned UnrollMaxCountForAlloca = IGC_GET_FLAG_VALUE(PromoteLoopUnrollwithAllocaCountThreshold);
   bool AllocaFound = false;
-  if (MaxTripCount && MaxTripCount <= UnrollMaxCountForAlloca &&
-      IGC_IS_FLAG_ENABLED(EnablePromoteLoopUnrollwithAlloca)) {
+  if (MaxTripCount && MaxTripCount <= UnrollMaxCountForAlloca ) {
     unsigned int ThresholdBoost = 0;
     for (auto BB : L->blocks()) {
       for (auto &I : *BB) {
@@ -344,12 +343,13 @@ void GenIntrinsicsTTIImpl::getUnrollingPreferences(Loop *L, ScalarEvolution &SE,
         // TODO: Can a alloca with a fixed size not reside in the entry block?
         if (!AI->isStaticAlloca())
           continue;
-        // Assume every iteration consumes 1 alloca element.
-        if (cast<ConstantInt>(AI->getArraySize())->getZExtValue() > UnrollMaxCountForAlloca)
-          continue;
 
         // Using alloca size in bytes as the threshold boost seems a bit tricky.
         unsigned AllocaSize = *(AI->getAllocationSizeInBits(DL)) / 8;
+        // Assume every iteration consumes 1 DW (64 bytes).
+        if (AllocaSize/8 > UnrollMaxCountForAlloca)
+          continue;
+
         ThresholdBoost += AllocaSize;
         if (GEP)
           isGEPLoopInduction[GEP] = true;
@@ -362,7 +362,8 @@ void GenIntrinsicsTTIImpl::getUnrollingPreferences(Loop *L, ScalarEvolution &SE,
       UP.UpperBound = true;
       UP.Force = UnrollLoopForCodeSizeOnly ? false : true;
 
-      if (ctx->type != ShaderType::OPENCL_SHADER) {
+      if (IGC_IS_FLAG_ENABLED(EnablePromoteLoopUnrollwithAlloca) &&
+          ctx->type != ShaderType::OPENCL_SHADER) {
         UP.Threshold += ThresholdBoost;
         LLVM_DEBUG(dbgs() << "Increasing L:" << L->getName() << " threshold to " << UP.Threshold
                           << " due to Alloca accessed by:");
@@ -576,28 +577,18 @@ void GenIntrinsicsTTIImpl::getUnrollingPreferences(Loop *L, ScalarEvolution &SE,
 
   if (MDNode *LoopID = L->getLoopID()) {
     const llvm::StringRef maxIterMetadataNames = "spv.loop.iterations.max";
-#if LLVM_VERSION_MAJOR < 11
-    const llvm::StringRef peelCountMetadataNames = "spv.loop.peel.count";
-#endif
     for (unsigned i = 0; i < LoopID->getNumOperands(); ++i) {
       if (MDNode *MD = llvm::dyn_cast<MDNode>(LoopID->getOperand(i))) {
         if (MDString *S = llvm::dyn_cast<MDString>(MD->getOperand(0))) {
           if (maxIterMetadataNames.equals(S->getString())) {
             UP.MaxCount = static_cast<unsigned>(mdconst::extract<ConstantInt>(MD->getOperand(1))->getZExtValue());
           }
-#if LLVM_VERSION_MAJOR < 11
-          else if (peelCountMetadataNames.equals(S->getString())) {
-            UP.AllowPeeling = true;
-            UP.PeelCount = static_cast<unsigned>(mdconst::extract<ConstantInt>(MD->getOperand(1))->getZExtValue());
-          }
-#endif
         }
       }
     }
   }
 }
 
-#if LLVM_VERSION_MAJOR >= 11
 // [LLVM-UPGRADE] Peeling information was separated
 // https://github.com/llvm/llvm-project/commit/e541e1b757237172c247904b670c9894d6b3759d
 
@@ -618,7 +609,6 @@ void GenIntrinsicsTTIImpl::getPeelingPreferences(Loop *L, ScalarEvolution &SE,
     }
   }
 }
-#endif
 
 bool GenIntrinsicsTTIImpl::isProfitableToHoist(Instruction *I) {
   if (auto *CI = dyn_cast<CallInst>(I)) {

@@ -2278,6 +2278,13 @@ Function *getUniqueEntryFunc(const IGCMD::MetaDataUtils *pM, IGC::ModuleMetaData
   return entryFunc;
 }
 
+int getSIMDSize(const IGCMD::MetaDataUtils *M, llvm::Function *F) {
+  if (M->findFunctionsInfoItem(F) != M->end_FunctionsInfo()) {
+    return M->getFunctionsInfoItem(F)->getSubGroupSize()->getSIMDSize();
+  }
+  return 0;
+}
+
 // If true, the codegen will likely not emit instruction for this instruction.
 bool isNoOpInst(Instruction *I, CodeGenContext *Ctx) {
   if (isa<BitCastInst>(I) || isa<IntToPtrInst>(I) || isa<PtrToIntInst>(I)) {
@@ -2941,11 +2948,7 @@ void RecursivelyDeleteDeadInstructions(Instruction *I, const TargetLibraryInfo *
 void RecursivelyDeleteDeadInstructions(const SmallVectorImpl<Instruction *> &DeadInsts, const TargetLibraryInfo *TLI,
                                        MemorySSAUpdater *MSSAU,
                                        const std::function<void(Value *)> &AboutToDeleteCallback) {
-#if LLVM_VERSION_MAJOR < 11
-  SmallVector<Instruction *, 16> trivialDeadInsts;
-#else
   SmallVector<WeakTrackingVH, 16> trivialDeadInsts;
-#endif
   for (auto II : DeadInsts) {
     Instruction &I = *II;
     IGC_ASSERT(I.use_empty() && "Instructions with uses are not dead.");
@@ -2976,11 +2979,7 @@ void RecursivelyDeleteDeadInstructions(const SmallVectorImpl<Instruction *> &Dea
   }
 
   if (!trivialDeadInsts.empty()) {
-#if LLVM_VERSION_MAJOR < 13
-    RecursivelyDeleteTriviallyDeadInstructions(trivialDeadInsts, TLI, MSSAU);
-#else
     RecursivelyDeleteTriviallyDeadInstructions(trivialDeadInsts, TLI, MSSAU, AboutToDeleteCallback);
-#endif
   }
 }
 
@@ -3031,9 +3030,6 @@ bool AllowShortImplicitPayloadHeader(const CodeGenContext *ctx) {
     if (OCLCtx->m_InternalOptions.PromoteStatelessToBindless && OCLCtx->m_InternalOptions.UseBindlessLegacyMode)
       return false;
   }
-
-  if (ctx->platform.getPlatformInfo().eProductFamily == IGFX_PVC)
-    return false;
 
   return ctx->platform.isCoreChildOf(IGFX_XE_HP_CORE);
 }

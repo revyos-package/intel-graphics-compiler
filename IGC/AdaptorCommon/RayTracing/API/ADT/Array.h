@@ -114,7 +114,7 @@ public:
     End = Start + NumElts;
 
     for (uint32_t i = 0; i < NumElts; i++)
-      Start[i] = typename iterator::value_type();
+      new (&Start[i]) typename iterator::value_type;
   }
 
   Array &operator=(const Array &) = delete;
@@ -198,6 +198,9 @@ private:
   inline typename iterator::pointer allocate(size_t NumElts) {
     return static_cast<typename iterator::pointer>(::operator new(NumElts * sizeof(typename iterator::value_type)));
   }
+
+  template <typename A, typename B> friend class UnorderedMap;
 };
+
 
 } // namespace Interface

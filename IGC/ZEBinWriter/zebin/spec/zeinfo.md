@@ -127,6 +127,8 @@ If an attribute is **Required**, it must be present in execution_env. If it's **
 | has_multi_scratch_spaces | bool | Optional | false | |
 | has_no_stateless_write | bool | Optional | false | |
 | has_stack_calls | bool | Optional | false | When this value is true, it indicates that program uses stack calls. The implicit_arg_buffer is allocated accordingly.  |
+| has_printf_calls | bool | Optional | false | When this value is true, it indicates that the kernel itself uses printf calls in its body. |
+| has_indirect_calls | bool | Optional | false | When this value is true, it indicates that the kernel itself uses indirect calls in its body. |
 | require_disable_eufusion | bool | Optional | false | When this value is true, it indicates that program requires EU fusion disable |
 | indirect_stateless_count | int32 | Optional | 0 | |
 | inline_data_payload_size | int32 | Optional | 0 | Size of inline data in cross-thread-payload in byte. The value is 0 when inline data is disabled (default). |
@@ -234,6 +236,10 @@ Supported <argument_type> of payload_arguments or per_thread_payload_arguments.
 <!--- <argument_type> ArgType -->
 
 arg_byvalue and arg_bypointer are user arguments that are explicitly passed in from the applications. Other kinds of arguments are implicit arguments that are passed in by runtime.
+
+int32x3 argument types can be partially programmed using size field of respective payload argument. When size == 4, only .x channel is programmed, when size == 8, both .x and .y channels are programmed, whereas when size == 12, all 3 channels are programmed.
+
+By setting size attribute, local_id can be partially programmed. Considering SIMD32 scenario, when only x component is needed, size can be set to 64. When x and y component are needed, size can be set to 128. When x, y, and z components are needed, size can be set to 192. When local id is not needed, the argument type can be skipped. These sizes scale as per SIMD width of the program.
 
 ### Supported memory addressing modes:
 Supported <memory_addressing_mode> of payload_arguments.
